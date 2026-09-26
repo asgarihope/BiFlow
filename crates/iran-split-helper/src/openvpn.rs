@@ -46,6 +46,9 @@ pub(crate) struct RunningSideTunnel {
     routing_table: u32,
     routes: Vec<IpNet>,
     policy_installed: bool,
+    /// `OpenVPN` `route-gateway`. Required for a TAP adapter; an on-link
+    /// `0.0.0.0/0` makes Windows ARP for every destination and blackholes it.
+    gateway: Option<String>,
     /// Sanitized profile copy. Removed when this record is dropped, which is
     /// after `OpenVPN` has been stopped.
     sanitized_profile: PathBuf,
@@ -138,6 +141,7 @@ impl Supervisor {
                 routes,
                 policy_installed,
                 sanitized_profile,
+                gateway: gateway.clone(),
             },
         );
         self.push_log(
@@ -168,8 +172,14 @@ impl Supervisor {
     pub async fn ensure_interface_route(&self, device: &str) -> Result<(), HelperServiceError> {
         #[cfg(windows)]
         {
-            let _ = self;
-            install_policy_routing(device, DEFAULT_MARK, DEFAULT_TABLE, None).await?;
+            let gateway = self
+                .side_tunnels
+                .lock()
+                .await
+                .values()
+                .find(|tunnel| tunnel.device == device)
+                .and_then(|tunnel| tunnel.gateway.clone());
+            install_policy_routing(device, DEFAULT_MARK, DEFAULT_TABLE, gateway.as_deref()).await?;
         }
         #[cfg(not(windows))]
         {
@@ -411,20 +421,30 @@ fn spawn_openvpn(
         .map_err(|error| HelperServiceError::SideTunnel(redact(&error.to_string())))?;
     let log = Arc::new(tokio::sync::Mutex::new(OpenVpnSessionLog::default()));
     if let Some(stdout) = child.stdout.take() {
-        let slot = Arc::clone(&log);
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                observe_openvpn_line(&mut *slot.lock().await, line);
-            }
-        });
+        spawn_openvpn_log_reader(stdout, Arc::clone(&log));
+    }
+    // OpenVPN writes PUSH_REPLY, including `route-gateway`, to stderr.
+    if let Some(stderr) = child.stderr.take() {
+        spawn_openvpn_log_reader(stderr, Arc::clone(&log));
     }
     Ok((child, log))
+}
+
+fn spawn_openvpn_log_reader<R>(stream: R, slot: Arc<tokio::sync::Mutex<OpenVpnSessionLog>>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            observe_openvpn_line(&mut *slot.lock().await, line);
+        }
+    });
 }
 
 /// Waits until `OpenVPN` finishes startup and returns the adapter it opened.
@@ -438,6 +458,7 @@ async fn wait_for_device(
     log: &Arc<tokio::sync::Mutex<OpenVpnSessionLog>>,
 ) -> Result<OpenedAdapter, HelperServiceError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_seconds.max(1));
+    let mut ready_at: Option<tokio::time::Instant> = None;
     loop {
         if let Ok(Some(status)) = child.try_wait() {
             let state = log.lock().await.clone();
@@ -453,10 +474,17 @@ async fn wait_for_device(
         }
         let state = log.lock().await.clone();
         if state.ready {
-            return Ok(OpenedAdapter {
-                name: state.device.unwrap_or_else(|| device.to_owned()),
-                gateway: state.gateway,
-            });
+            // `route-gateway` can land in the same burst as the ready line.
+            let since = *ready_at.get_or_insert_with(tokio::time::Instant::now);
+            if state.gateway.is_some()
+                || !cfg!(windows)
+                || since.elapsed() >= Duration::from_secs(1)
+            {
+                return Ok(OpenedAdapter {
+                    name: state.device.clone().unwrap_or_else(|| device.to_owned()),
+                    gateway: state.gateway,
+                });
+            }
         }
         if !cfg!(windows) && device_is_up(device).await {
             return Ok(OpenedAdapter {
@@ -627,14 +655,26 @@ async fn install_policy_routing(
 ) -> Result<bool, HelperServiceError> {
     // A high metric keeps this off the system default route. Sockets that
     // Mihomo binds to this adapter can still use it, which is the Windows
-    // stand-in for the Linux fwmark table.
+    // stand-in for the Linux fwmark table. A TAP adapter is layer 2: an
+    // on-link default route makes Windows ARP for every destination and
+    // every one of those lookups fails. Only the OpenVPN gateway works.
     let interface = format!("interface={device}");
-    let mut attempts: Vec<Option<&str>> = Vec::new();
-    if gateway.is_some() {
-        attempts.push(gateway);
+    let attempts = interface_route_nexthops(device, gateway)?;
+    if tap_adapter(device) {
+        let _ = run_command(
+            "netsh",
+            &[
+                "interface",
+                "ipv4",
+                "delete",
+                "route",
+                "prefix=0.0.0.0/0",
+                interface.as_str(),
+                "nexthop=0.0.0.0",
+            ],
+        )
+        .await;
     }
-    attempts.push(Some("0.0.0.0"));
-    attempts.push(None);
     let mut last_detail = String::from("netsh add route failed");
     for nexthop in attempts {
         let mut args = vec![
@@ -736,6 +776,36 @@ async fn ip_command(args: &[&str]) -> Option<String> {
 #[cfg(any(windows, test))]
 fn interface_route_accepted(success: bool, text: &str) -> bool {
     success || text.to_ascii_lowercase().contains("already exists")
+}
+
+#[cfg(any(windows, test))]
+fn tap_adapter(device: &str) -> bool {
+    device.to_ascii_lowercase().contains("tap")
+}
+
+/// Nexthops to try for Mihomo's bound default route.
+///
+/// TAP must use the `OpenVPN` gateway. DCO and TUN can use an on-link route.
+#[cfg(any(windows, test))]
+fn interface_route_nexthops<'a>(
+    device: &str,
+    gateway: Option<&'a str>,
+) -> Result<Vec<Option<&'a str>>, HelperServiceError> {
+    if tap_adapter(device) {
+        let gateway = gateway.ok_or_else(|| {
+            HelperServiceError::SideTunnel(
+                "the TAP adapter has no OpenVPN gateway, so traffic would be blackholed".into(),
+            )
+        })?;
+        return Ok(vec![Some(gateway)]);
+    }
+    let mut attempts = Vec::new();
+    if gateway.is_some() {
+        attempts.push(gateway);
+    }
+    attempts.push(Some("0.0.0.0"));
+    attempts.push(None);
+    Ok(attempts)
 }
 
 #[cfg(windows)]
@@ -849,6 +919,17 @@ mod tests {
             false,
             "The requested operation requires elevation."
         ));
+        assert!(tap_adapter("OpenVPN TAP-Windows6"));
+        assert!(!tap_adapter("OpenVPN Data Channel Offload"));
+        assert_eq!(
+            interface_route_nexthops("OpenVPN TAP-Windows6", Some("10.138.172.1"))
+                .expect("tap gateway")
+                .as_slice(),
+            &[Some("10.138.172.1")]
+        );
+        assert!(interface_route_nexthops("OpenVPN TAP-Windows6", None).is_err());
+        let dco = interface_route_nexthops("OpenVPN Data Channel Offload", None).expect("dco");
+        assert_eq!(dco, vec![Some("0.0.0.0"), None]);
     }
 
     #[test]

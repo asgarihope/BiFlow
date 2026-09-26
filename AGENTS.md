@@ -121,6 +121,9 @@ If a required command fails or emits a warning from project code, fix it in the 
   `SAFE_PATHS` home is cut off (ADR 0101). On Windows do not emit
   `routing-mark`; give the side-tunnel adapter a high-metric default
   route so bound traffic can leave without replacing the system route.
+  A TAP adapter is layer 2: an on-link `0.0.0.0/0` makes Windows ARP for
+  every destination, so DNS and sites stay unreachable. Use the OpenVPN
+  `route-gateway` from stderr and delete the on-link route (ADR 0104).
   A reload is not successful until `GET /rules` shows the `MATCH` proxy
   from the config that was just sent. The client list must describe that
   live proxy; a saved default Mihomo is not using stays muted with the
