@@ -731,6 +731,9 @@ async fn ip_command(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+// Windows `netsh` reports an existing route as a failed command. The Linux
+// library build never calls this; `cfg(test)` keeps the matcher on every host.
+#[cfg(any(windows, test))]
 fn interface_route_accepted(success: bool, text: &str) -> bool {
     success || text.to_ascii_lowercase().contains("already exists")
 }

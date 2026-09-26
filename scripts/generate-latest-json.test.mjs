@@ -153,6 +153,30 @@ describe("generate-latest-json", () => {
     validateLatestJson(manifest);
   });
 
+  it("ignores Ubuntu 22.04 packages when choosing updater assets", () => {
+    const directory = mkdtempSync(join(tmpdir(), "biflow-latest-json-jammy-"));
+    writeFakeBundle(
+      join(directory, "appimage"),
+      "BiFlow_1.2.16_amd64.AppImage",
+    );
+    writeFakeBundle(
+      join(directory, "jammy"),
+      "BiFlow_1.2.16_ubuntu2204_amd64.AppImage",
+    );
+    writeFakeBundle(join(directory, "deb"), "BiFlow_1.2.16_amd64.deb");
+    writeFakeBundle(
+      join(directory, "jammy"),
+      "BiFlow_1.2.16_ubuntu2204_amd64.deb",
+    );
+    writeFakeBundle(join(directory, "nsis"), "BiFlow_1.2.16_x64-setup.exe");
+    const artifacts = discoverSignedArtifacts(directory);
+    assert.deepEqual(artifacts.map((artifact) => artifact.fileName).sort(), [
+      "BiFlow_1.2.16_amd64.AppImage",
+      "BiFlow_1.2.16_amd64.deb",
+      "BiFlow_1.2.16_x64-setup.exe",
+    ]);
+  });
+
   it("rejects duplicate bundles for one platform", () => {
     const directory = mkdtempSync(join(tmpdir(), "biflow-latest-json-dupe-"));
     writeFakeBundle(

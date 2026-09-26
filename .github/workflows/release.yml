@@ -14,8 +14,11 @@ env:
 # Third-party VPN apps stay in-app (ADR 0004); this workflow does not vendor them.
 # Build jobs only upload workflow artifacts. The final job publishes all four together.
 # Native runners follow the official Tauri GitHub pipeline: Linux WebKitGTK 4.1 on
-# Ubuntu 24.04, Windows MSVC + WebView2 on windows-2025. Do not cross-compile the
-# Windows installer from Linux here; the Linux Tauri CLI rejects --bundles nsis.
+# Ubuntu 22.04 and 24.04, Windows MSVC + WebView2 on windows-2025. The 22.04
+# packages are extra release assets (`*_ubuntu2204_*`) because that glibc is
+# too old for a binary built on 24.04. Updater latest.json stays on the 24.04
+# deb and AppImage. Do not cross-compile the Windows installer from Linux here;
+# the Linux Tauri CLI rejects --bundles nsis.
 
 concurrency:
   group: release-${{ github.ref }}
@@ -68,6 +71,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Ubuntu 22.04 is the oldest glibc this release supports. Its
+          # packages are renamed so they do not replace the Ubuntu 24.04
+          # updater assets, which depend on the t64 library names.
+          - platform: ubuntu-22.04
+            args: --bundles deb,appimage
           - platform: ubuntu-24.04
             args: --bundles deb,appimage
           - platform: windows-2025
@@ -93,7 +101,13 @@ jobs:
           workspaces: ". -> target"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils libfuse2t64
+        run: |
+          sudo apt-get update
+          fuse2=libfuse2
+          if apt-cache show libfuse2t64 >/dev/null 2>&1; then
+            fuse2=libfuse2t64
+          fi
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils "$fuse2"
       - name: Prefetch AppImage tools
         if: runner.os == 'Linux'
         run: ./scripts/prefetch-appimage-tools.sh
@@ -131,6 +145,28 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         with:
           args: ${{ matrix.args }}
+      - name: Mark Ubuntu 22.04 packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.platform }}" != "ubuntu-22.04" ]; then
+            exit 0
+          fi
+          shopt -s nullglob
+          for path in \
+            target/release/bundle/deb/*.deb \
+            target/release/bundle/deb/*.deb.sig \
+            target/release/bundle/appimage/*.AppImage \
+            target/release/bundle/appimage/*.AppImage.sig
+          do
+            base="$(basename "$path")"
+            case "$base" in
+              *_ubuntu2204_*) continue ;;
+            esac
+            dir="$(dirname "$path")"
+            mv "$path" "$dir/${base/_amd64/_ubuntu2204_amd64}"
+          done
       - name: Sign Debian updater package
         if: runner.os == 'Linux'
         shell: bash
@@ -154,7 +190,7 @@ jobs:
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: release-linux
+          name: release-linux-${{ matrix.platform }}
           path: |
             target/release/bundle/deb/*.deb
             target/release/bundle/deb/*.deb.sig
@@ -206,22 +242,26 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          mapfile -t debs < <(find release-assets -type f -name '*.deb' -print | sort)
-          mapfile -t deb_sigs < <(find release-assets -type f -name '*.deb.sig' -print | sort)
-          mapfile -t appimages < <(find release-assets -type f -name '*.AppImage' -print | sort)
-          mapfile -t appimage_sigs < <(find release-assets -type f -name '*.AppImage.sig' -print | sort)
+          mapfile -t debs < <(find release-assets -type f -name '*.deb' ! -name '*ubuntu2204*' -print | sort)
+          mapfile -t deb_sigs < <(find release-assets -type f -name '*.deb.sig' ! -name '*ubuntu2204*' -print | sort)
+          mapfile -t appimages < <(find release-assets -type f -name '*.AppImage' ! -name '*ubuntu2204*' -print | sort)
+          mapfile -t appimage_sigs < <(find release-assets -type f -name '*.AppImage.sig' ! -name '*ubuntu2204*' -print | sort)
+          mapfile -t ubuntu_debs < <(find release-assets -type f -name '*ubuntu2204*.deb' -print | sort)
+          mapfile -t ubuntu_deb_sigs < <(find release-assets -type f -name '*ubuntu2204*.deb.sig' -print | sort)
+          mapfile -t ubuntu_appimages < <(find release-assets -type f -name '*ubuntu2204*.AppImage' -print | sort)
+          mapfile -t ubuntu_appimage_sigs < <(find release-assets -type f -name '*ubuntu2204*.AppImage.sig' -print | sort)
           mapfile -t portable < <(find release-assets -type f -name 'BiFlow.exe' -print | sort)
           mapfile -t installers < <(find release-assets -type f -name '*-setup.exe' -print | sort)
           mapfile -t installer_sigs < <(find release-assets -type f -name '*-setup.exe.sig' -print | sort)
           mapfile -t manifests < <(find release-assets -type f -name 'latest.json' -print | sort)
 
-          if (( ${#debs[@]} != 1 || ${#deb_sigs[@]} != 1 || ${#appimages[@]} != 1 || ${#appimage_sigs[@]} != 1 || ${#portable[@]} != 1 || ${#installers[@]} != 1 || ${#installer_sigs[@]} != 1 || ${#manifests[@]} != 1 )); then
-            echo "Expected one deb and signature, AppImage and signature, portable exe, NSIS installer and signature, and latest.json"
+          if (( ${#debs[@]} != 1 || ${#deb_sigs[@]} != 1 || ${#appimages[@]} != 1 || ${#appimage_sigs[@]} != 1 || ${#ubuntu_debs[@]} != 1 || ${#ubuntu_deb_sigs[@]} != 1 || ${#ubuntu_appimages[@]} != 1 || ${#ubuntu_appimage_sigs[@]} != 1 || ${#portable[@]} != 1 || ${#installers[@]} != 1 || ${#installer_sigs[@]} != 1 || ${#manifests[@]} != 1 )); then
+            echo "Expected Ubuntu 24.04 and Ubuntu 22.04 deb/AppImage pairs with signatures, one portable exe, one NSIS installer and signature, and latest.json"
             find release-assets -type f -print
             exit 1
           fi
 
-          assets=("${debs[@]}" "${deb_sigs[@]}" "${appimages[@]}" "${appimage_sigs[@]}" "${portable[@]}" "${installers[@]}" "${installer_sigs[@]}" "${manifests[@]}")
+          assets=("${debs[@]}" "${deb_sigs[@]}" "${appimages[@]}" "${appimage_sigs[@]}" "${ubuntu_debs[@]}" "${ubuntu_deb_sigs[@]}" "${ubuntu_appimages[@]}" "${ubuntu_appimage_sigs[@]}" "${portable[@]}" "${installers[@]}" "${installer_sigs[@]}" "${manifests[@]}")
           if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${GITHUB_REF_NAME}" \
               --draft \

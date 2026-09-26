@@ -28,9 +28,13 @@ Official sources:
 
 ## Decision
 
-- Keep native runners: `ubuntu-24.04` for Linux packages and host Clippy,
-  `windows-2025` for Windows Clippy, tests, and NSIS. Do not cross-compile the
-  GitHub Windows installer from Linux.
+- Keep native runners: `ubuntu-22.04` and `ubuntu-24.04` for Linux Clippy,
+  tests, and packages, and `windows-2025` for Windows Clippy, tests, and NSIS.
+  Do not cross-compile the GitHub Windows installer from Linux.
+- Publish the Ubuntu 22.04 `.deb` and AppImage beside the Ubuntu 24.04
+  updater assets. A binary built on 24.04 needs a newer glibc and does not
+  run on 22.04; the 24.04 package stays the `latest.json` updater target
+  because its library dependencies use the t64 names.
 - Set `fail-fast: false` on the CI rust matrix so both OS jobs finish.
 - Cache with `swatinem/rust-cache@v2` and `workspaces: ". -> target"`.
 - Set `git config --global core.autocrlf false` **before** `actions/checkout`

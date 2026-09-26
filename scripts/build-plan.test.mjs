@@ -454,9 +454,12 @@ describe("release artifact names", () => {
     assert.doesNotMatch(workflow, /ref_protected/);
     assert.match(workflow, /--bundles deb,appimage/);
     assert.match(workflow, /--bundles nsis/);
+    assert.match(workflow, /ubuntu-22\.04/);
     assert.match(workflow, /ubuntu-24\.04/);
     assert.match(workflow, /windows-2025/);
+    assert.match(workflow, /libfuse2/);
     assert.match(workflow, /libfuse2t64/);
+    assert.match(workflow, /ubuntu2204/);
     assert.match(workflow, /BiFlow\.exe/);
     assert.match(workflow, /iran-split-desktop\.exe/);
     assert.match(workflow, /x64-setup\.exe|nsis/);
@@ -504,6 +507,7 @@ describe("release artifact names", () => {
     const rustJob = ci.split(/^\s*rust:/m)[1]?.split(/^\s*security:/m)[0];
     assert.ok(rustJob);
     assert.match(rustJob, /fail-fast:\s*false/);
+    assert.match(rustJob, /ubuntu-22\.04/);
     assert.match(rustJob, /ubuntu-24\.04/);
     assert.match(rustJob, /windows-2025/);
     const buildJob = workflow
@@ -615,6 +619,7 @@ describe("release artifact names", () => {
       "utf8",
     );
     assert.match(workflow, /workflow_dispatch:/);
+    assert.match(workflow, /ubuntu-22\.04/);
     assert.match(workflow, /ubuntu-24\.04/);
     assert.match(workflow, /windows-2025/);
     assert.match(workflow, /actions\/upload-artifact@v4/);

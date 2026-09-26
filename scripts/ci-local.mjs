@@ -120,7 +120,7 @@ export function planSteps(platform) {
 
   if (platform === "win32") {
     gaps.push(
-      "rust (ubuntu-24.04): Linux-only modules and `cargo test --workspace` need a Linux host",
+      "rust (ubuntu-22.04, ubuntu-24.04): Linux-only modules and `cargo test --workspace` need a Linux host",
     );
   } else {
     steps.splice(steps.findIndex((step) => step.id === "clippy-host") + 1, 0, {

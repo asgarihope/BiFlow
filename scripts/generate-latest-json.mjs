@@ -144,7 +144,10 @@ function collectFiles(directory) {
  * @param {string} suffix
  */
 function findUniqueBundle(files, suffix) {
-  const matches = files.filter((file) => basename(file).endsWith(suffix));
+  const matches = files.filter((file) => {
+    const name = basename(file);
+    return name.endsWith(suffix) && !name.includes("ubuntu2204");
+  });
   if (matches.length > 1) {
     throw new Error(
       `expected one ${suffix} bundle, found ${matches.length}: ${matches.sort().join(", ")}`,

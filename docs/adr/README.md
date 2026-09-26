@@ -106,3 +106,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0100](./0100-reset-connections-on-default-route.md)           | Reset live connections when the default route reloads         | Accepted   |
 | [0101](./0101-live-match-log-and-one-local-proxy-start.md)     | Log the live MATCH and start every local proxy the same way   | Accepted   |
 | [0102](./0102-live-match-is-the-ui.md)                         | The UI shows the live MATCH rule                              | Accepted   |
+| [0103](./0103-ubuntu-2204-packages.md)                         | Ubuntu 22.04 is built beside Ubuntu 24.04                     | Accepted   |
