@@ -12,6 +12,7 @@ import type {
   ListCheckEntry,
   Outbound,
   PinnedRoute,
+  EgressProbeReport,
   ExportResult,
   FreshStartReport,
   InstallGuide,
@@ -1358,6 +1359,19 @@ export const mockApi = {
       path: `/tmp/biflow/${id}`,
       guide: guideFor(id),
     };
+  },
+  async probeClientEgress(): Promise<EgressProbeReport[]> {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return [
+      {
+        adapter: "OpenVPN TAP-Windows6",
+        address: "10.138.172.26",
+        route: "on_link",
+        ok: false,
+        detail:
+          "OpenVPN TAP-Windows6 (10.138.172.26) has an on-link gateway 0.0.0.0. Connecting to 1.1.1.1:80 timed out. A TAP adapter cannot deliver packets without the OpenVPN gateway, so sites on this client do not open.",
+      },
+    ];
   },
   async freshHiddifyStart(): Promise<FreshStartReport> {
     await new Promise((resolve) => setTimeout(resolve, 150));

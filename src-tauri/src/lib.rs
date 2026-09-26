@@ -1,6 +1,7 @@
 mod connect_prep;
 mod deps;
 mod diagnostics;
+mod egress_cli;
 mod github_update;
 mod helper_install;
 mod hiddify_reset;
@@ -880,6 +881,44 @@ fn get_stack_snapshot(app: AppHandle) -> Result<StackSnapshot, String> {
     diagnostics::trace_sync("stack", "tauri_command", "get_stack_snapshot", || {
         Ok(services(&app)?.engine.snapshot())
     })
+}
+
+#[tauri::command]
+async fn probe_client_egress(
+    app: AppHandle,
+) -> Result<Vec<iran_split_ipc::egress::EgressProbe>, String> {
+    diagnostics::trace_action(
+        "diagnostics",
+        "tauri_command",
+        "probe_client_egress",
+        async move {
+            let from_engine = if let Ok(services) = services(&app) {
+                services
+                    .engine
+                    .running_config_text()
+                    .await
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let yaml = if from_engine.is_empty() {
+                egress_cli::installed_config()
+            } else {
+                from_engine
+            };
+            let reports = iran_split_ipc::egress::probe_config(&yaml);
+            egress_cli::write_report(&reports);
+            let reachable = reports.iter().filter(|report| report.ok).count();
+            tracing::info!(
+                event = "egress.probe_completed",
+                reachable,
+                adapters = reports.len(),
+                "probed side-tunnel adapter egress without logging the address"
+            );
+            Ok(reports)
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3581,6 +3620,8 @@ fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     }
 }
 
+pub use egress_cli::run_probe_cli;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Starts the `BiFlow` Tauri application and blocks on its event loop.
 ///
@@ -3671,6 +3712,7 @@ pub fn run() {
             delete_debug_log,
             export_support_bundle,
             fresh_hiddify_start,
+            probe_client_egress,
             check_for_update,
             get_update_state,
             install_update,

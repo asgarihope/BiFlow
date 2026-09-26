@@ -395,6 +395,15 @@ test.describe("primary BiFlow flows", () => {
     await expect(page.getByText(/Backup: .*hiddify-/)).toBeVisible();
   });
 
+  test("explains when a side-tunnel adapter cannot deliver packets", async ({
+    page,
+  }) => {
+    await openFresh(page);
+    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await page.getByRole("button", { name: "Test tunnel egress" }).click();
+    await expect(page.getByText(/on-link gateway 0\.0\.0\.0/)).toBeVisible();
+  });
+
   test("adds a catalog client, pins a host, and sets MATCH Direct", async ({
     page,
   }) => {

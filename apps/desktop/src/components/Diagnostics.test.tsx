@@ -64,6 +64,16 @@ vi.mock("../api/desktop", () => ({
         detail: null,
       },
     ]),
+    probeClientEgress: vi.fn().mockResolvedValue([
+      {
+        adapter: "OpenVPN TAP-Windows6",
+        address: "10.138.172.26",
+        route: "on_link",
+        ok: false,
+        detail:
+          "OpenVPN TAP-Windows6 has an on-link gateway 0.0.0.0. Connecting to 1.1.1.1:80 timed out.",
+      },
+    ]),
     freshHiddifyStart: vi.fn().mockResolvedValue({
       data_dir: "/home/user/.local/share/hiddify",
       backup_dir: "/home/user/.local/share/biflow/backups/hiddify-20260815",
@@ -520,5 +530,16 @@ describe("Diagnostics", () => {
     expect(await screen.findByRole("dialog")).toHaveTextContent(
       "Press Connect first",
     );
+  });
+
+  it("shows why a side-tunnel adapter cannot deliver packets", async () => {
+    render(<Diagnostics report={null} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Test tunnel egress" }),
+    );
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "on-link gateway 0.0.0.0",
+    );
+    expect(desktop.probeClientEgress).toHaveBeenCalledTimes(1);
   });
 });

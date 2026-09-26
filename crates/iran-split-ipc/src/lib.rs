@@ -1,3 +1,5 @@
+pub mod egress;
+
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{collections::BTreeMap, io, time::Duration};
 use thiserror::Error;
@@ -114,7 +116,8 @@ pub enum HelperCommand {
         client_id: Uuid,
     },
     /// Adds the high-metric default route on an adapter Mihomo binds with
-    /// `interface-name`. Safe to repeat: an existing route is success.
+    /// `interface-name`. A TAP adapter must use the `OpenVPN` gateway; an
+    /// existing on-link route is not success.
     EnsureInterfaceRoute {
         device: String,
     },

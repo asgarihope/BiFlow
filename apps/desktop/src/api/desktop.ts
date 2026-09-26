@@ -10,6 +10,7 @@ import type {
   DiagnosticsReport,
   DirectRulesDocument,
   ExportResult,
+  EgressProbeReport,
   FreshStartReport,
   InstallGuide,
   InstallResult,
@@ -224,6 +225,9 @@ export const desktop = {
   },
   freshHiddifyStart(): Promise<FreshStartReport> {
     return native ? invoke("fresh_hiddify_start") : mockApi.freshHiddifyStart();
+  },
+  probeClientEgress(): Promise<EgressProbeReport[]> {
+    return native ? invoke("probe_client_egress") : mockApi.probeClientEgress();
   },
   getInstallGuide(id: string): Promise<InstallGuide> {
     return native

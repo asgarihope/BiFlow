@@ -27,6 +27,14 @@ enum Command {
     ValidateConfig { path: std::path::PathBuf },
     /// Resolves the intended rule decision using the offline bootstrap snapshot.
     Route { target: String },
+    /// Connects from the live side-tunnel adapter and prints why traffic can leave.
+    ///
+    /// `windscribe` reads `interface-name` from the running Mihomo config.
+    /// Any other value is the adapter name itself.
+    Probe {
+        #[arg(default_value = "windscribe")]
+        client: String,
+    },
 }
 
 #[tokio::main]
@@ -40,6 +48,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&issues)?);
             if !issues.is_empty() {
                 std::process::exit(2);
+            }
+        }
+        Command::Probe { client } => {
+            let reports = if client.eq_ignore_ascii_case("windscribe") {
+                let yaml = std::fs::read_to_string(mihomo_config_path()).unwrap_or_default();
+                iran_split_ipc::egress::probe_config(&yaml)
+            } else {
+                vec![iran_split_ipc::egress::probe_adapter(&client)]
+            };
+            println!("{}", serde_json::to_string_pretty(&reports)?);
+            if reports.iter().any(|report| !report.ok) {
+                std::process::exit(1);
             }
         }
         Command::Route { target } => {
@@ -70,6 +90,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn mihomo_config_path() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        std::path::PathBuf::from(r"C:\ProgramData\iran-split\runtime\config.yaml")
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from("/var/lib/iran-split/runtime/config.yaml")
+    }
 }
 
 async fn demo() -> Result<(), CoreError> {

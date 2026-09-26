@@ -54,6 +54,9 @@ export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
   const [freshStartError, setFreshStartError] = useState<string | null>(null);
   const [moving, setMoving] = useState(false);
   const [moveError, setMoveError] = useState<string | null>(null);
+  const [probing, setProbing] = useState(false);
+  const [egress, setEgress] = useState<string | null>(null);
+  const [egressError, setEgressError] = useState<string | null>(null);
 
   const refreshDebugLog = () => {
     setLogAction("refresh");
@@ -230,6 +233,59 @@ export function Diagnostics({ report }: { report: DiagnosticsReport | null }) {
               ))}
             </ol>
           )}
+        </div>
+      </div>
+
+      <div className="flex h-full flex-col rounded-2xl border border-ink/10 bg-surface p-3.5">
+        <h2 className="font-semibold">{t("egressProbe")}</h2>
+        <p className="mt-1 max-w-prose text-sm text-muted">
+          {t("egressProbeHelp")}
+        </p>
+        {egress ? (
+          <p
+            className="mt-4 whitespace-pre-line rounded-xl bg-canvas p-3 text-sm"
+            role="status"
+          >
+            {egress}
+          </p>
+        ) : null}
+        {egressError ? (
+          <p
+            className="mt-4 rounded-xl bg-canvas p-3 text-sm text-danger"
+            role="alert"
+          >
+            {egressError}
+          </p>
+        ) : null}
+        <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-ink/10 pt-3">
+          <button
+            type="button"
+            disabled={probing}
+            onClick={() => {
+              setProbing(true);
+              setEgress(null);
+              setEgressError(null);
+              void desktop
+                .probeClientEgress()
+                .then((reports) =>
+                  setEgress(reports.map((report) => report.detail).join("\n")),
+                )
+                .catch((error: unknown) =>
+                  setEgressError(
+                    error instanceof Error ? error.message : String(error),
+                  ),
+                )
+                .finally(() => setProbing(false));
+            }}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+          >
+            {probing ? (
+              <LoaderCircle className="animate-spin" size={14} aria-hidden />
+            ) : (
+              <Route size={14} aria-hidden />
+            )}
+            {t("egressProbeButton")}
+          </button>
         </div>
       </div>
 

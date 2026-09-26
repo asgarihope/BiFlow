@@ -657,24 +657,13 @@ async fn install_policy_routing(
     // Mihomo binds to this adapter can still use it, which is the Windows
     // stand-in for the Linux fwmark table. A TAP adapter is layer 2: an
     // on-link default route makes Windows ARP for every destination and
-    // every one of those lookups fails. Only the OpenVPN gateway works.
+    // every one of those lookups fails. Only the OpenVPN gateway works, and
+    // an existing on-link route must be replaced rather than left in place.
+    if tap_adapter(device) {
+        return install_tap_gateway_route(device, gateway).await;
+    }
     let interface = format!("interface={device}");
     let attempts = interface_route_nexthops(device, gateway)?;
-    if tap_adapter(device) {
-        let _ = run_command(
-            "netsh",
-            &[
-                "interface",
-                "ipv4",
-                "delete",
-                "route",
-                "prefix=0.0.0.0/0",
-                interface.as_str(),
-                "nexthop=0.0.0.0",
-            ],
-        )
-        .await;
-    }
     let mut last_detail = String::from("netsh add route failed");
     for nexthop in attempts {
         let mut args = vec![
@@ -781,6 +770,108 @@ fn interface_route_accepted(success: bool, text: &str) -> bool {
 #[cfg(any(windows, test))]
 fn tap_adapter(device: &str) -> bool {
     device.to_ascii_lowercase().contains("tap")
+}
+
+#[cfg(windows)]
+async fn install_tap_gateway_route(
+    device: &str,
+    gateway: Option<&str>,
+) -> Result<bool, HelperServiceError> {
+    let gateway = gateway.ok_or_else(|| {
+        HelperServiceError::SideTunnel(
+            "the TAP adapter has no OpenVPN gateway, so an on-link default route would blackhole traffic".into(),
+        )
+    })?;
+    let interface = format!("interface={device}");
+    let _ = run_command(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "delete",
+            "route",
+            "prefix=0.0.0.0/0",
+            interface.as_str(),
+        ],
+    )
+    .await;
+    let _ = run_command(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "delete",
+            "route",
+            "prefix=0.0.0.0/0",
+            interface.as_str(),
+            "nexthop=0.0.0.0",
+        ],
+    )
+    .await;
+    if let Some(table) = run_capture("netsh", &["interface", "ipv4", "show", "interfaces"]).await {
+        if let Some(index) = iran_split_ipc::egress::parse_interface_index(&table, device) {
+            let index = index.to_string();
+            let _ = run_command(
+                "route",
+                &[
+                    "delete", "0.0.0.0", "mask", "0.0.0.0", "0.0.0.0", "if", &index,
+                ],
+            )
+            .await;
+            let _ = run_command(
+                "route",
+                &[
+                    "add", "0.0.0.0", "mask", "0.0.0.0", gateway, "metric", "9000", "if", &index,
+                ],
+            )
+            .await;
+        }
+    }
+    let nexthop = format!("nexthop={gateway}");
+    let added = run_command(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "add",
+            "route",
+            "prefix=0.0.0.0/0",
+            interface.as_str(),
+            nexthop.as_str(),
+            "metric=9000",
+            "store=active",
+        ],
+    )
+    .await;
+    let addresses = run_capture(
+        "netsh",
+        &[
+            "interface",
+            "ipv4",
+            "show",
+            "addresses",
+            &format!("name={device}"),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+    if iran_split_ipc::egress::adapter_gateway_is_on_link(&addresses) {
+        let detail = added
+            .stderr
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("the on-link route was not replaced");
+        return Err(HelperServiceError::SideTunnel(format!(
+            "the TAP adapter still has an on-link gateway, so traffic cannot leave: {detail}"
+        )));
+    }
+    tracing::info!(
+        event = "side_tunnel.interface_route",
+        route_kind = "gateway",
+        tap = true,
+        "installed the TAP default route via the OpenVPN gateway"
+    );
+    Ok(true)
 }
 
 /// Nexthops to try for Mihomo's bound default route.

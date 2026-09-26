@@ -26,8 +26,9 @@ border-ink/10 pt-3`, with small buttons
 
 - Page sections are ordered by how often they are used: in Diagnostics the
   live-connections list comes first, then Test flow, then Reachability +
-  Test timeline as a two-column pair, then the three utility tiles, then
-  logs.
+  Test timeline as a two-column pair, then the client-egress probe, then
+  the three utility tiles, then logs. The egress probe says whether the
+  adapter Mihomo bound can deliver a packet, and why it cannot.
 - Small independent utilities tile side-by-side (`grid gap-3 xl:grid-cols-3`)
   instead of stacking full-width.
 

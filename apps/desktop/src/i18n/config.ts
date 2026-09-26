@@ -244,6 +244,10 @@ const resources = {
         "Loopback, LAN, and carrier-grade NAT addresses always stay direct. Sending them through the tunnel would cut this machine off from its own network.",
       pinnedDirect: "Pinned direct",
       pinnedVpn: "Pinned to VPN",
+      egressProbe: "Client egress",
+      egressProbeHelp:
+        "Connects to 1.1.1.1 from the adapter Mihomo is using and says whether packets can leave. Run BiFlow.exe probe windscribe for the same report.",
+      egressProbeButton: "Test tunnel egress",
       freshHiddify: "Fresh Hiddify start",
       freshHiddifyHelp:
         "Use this when Hiddify opens on a blank window. It closes Hiddify, moves the generated configs, runtime folder, and logs into a backup, then starts Hiddify again. Your subscriptions and settings are kept.",
@@ -556,6 +560,10 @@ const resources = {
         "نشانی‌های لوپ‌بک، شبکهٔ محلی و NAT اپراتور همیشه مستقیم می‌مانند. عبور دادن آن‌ها از تونل، این دستگاه را از شبکهٔ خودش جدا می‌کند.",
       pinnedDirect: "سنجاق‌شده به مستقیم",
       pinnedVpn: "سنجاق‌شده به وی‌پی‌ان",
+      egressProbe: "خروج کلاینت",
+      egressProbeHelp:
+        "از آداپتوری که میهومو استفاده می‌کند به 1.1.1.1 وصل می‌شود و می‌گوید بسته‌ها خارج می‌شوند یا نه. همان گزارش با BiFlow.exe probe windscribe هم نوشته می‌شود.",
+      egressProbeButton: "آزمون خروج تونل",
       freshHiddify: "شروع تازهٔ هیدیفای",
       freshHiddifyHelp:
         "وقتی هیدیفای با صفحهٔ سفید باز می‌شود از این استفاده کنید. هیدیفای بسته می‌شود، پیکربندی‌های ساخته‌شده، پوشهٔ اجرا و لاگ‌ها به پشتیبان منتقل می‌شوند و هیدیفای دوباره اجرا می‌شود. اشتراک‌ها و تنظیمات شما حفظ می‌شود.",

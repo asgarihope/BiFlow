@@ -324,6 +324,14 @@ export interface DebugLogStatus {
   size_bytes: number;
 }
 
+export interface EgressProbeReport {
+  adapter: string;
+  address: string;
+  route: "missing" | "on_link" | "gateway";
+  ok: boolean;
+  detail: string;
+}
+
 export interface FreshStartReport {
   data_dir: string;
   backup_dir: string;

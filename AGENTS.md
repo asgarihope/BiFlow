@@ -124,6 +124,10 @@ If a required command fails or emits a warning from project code, fix it in the 
   A TAP adapter is layer 2: an on-link `0.0.0.0/0` makes Windows ARP for
   every destination, so DNS and sites stay unreachable. Use the OpenVPN
   `route-gateway` from stderr and delete the on-link route (ADR 0104).
+  `netsh` "already exists" is the old on-link route still winning; do not
+  treat it as success. `BiFlow.exe probe windscribe` connects to
+  `1.1.1.1:80` from the bound adapter and writes the reason to
+  `probe-report.txt` (ADR 0105).
   A reload is not successful until `GET /rules` shows the `MATCH` proxy
   from the config that was just sent. The client list must describe that
   live proxy; a saved default Mihomo is not using stays muted with the

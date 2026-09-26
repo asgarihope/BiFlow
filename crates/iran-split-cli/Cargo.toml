@@ -11,6 +11,7 @@ async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
 iran-split-config = { path = "../iran-split-config" }
+iran-split-ipc = { path = "../iran-split-ipc" }
 iran-split-core = { path = "../iran-split-core" }
 iran-split-rules = { path = "../iran-split-rules" }
 serde_json.workspace = true
