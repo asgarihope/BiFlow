@@ -24,6 +24,9 @@ vi.mock("../api/desktop", () => ({
     installDependency: vi.fn(),
     listDependencies: vi.fn(),
     getSnapshot: vi.fn(),
+    runningMihomoConfig: vi
+      .fn()
+      .mockResolvedValue('secret: "<redacted>"\n- MATCH,DIRECT\n'),
   },
 }));
 
@@ -294,6 +297,32 @@ describe("Dashboard", () => {
       /overflow-y-auto/,
     );
     expect(container.querySelector("section")?.className).toMatch(/pb-2/);
+  });
+
+  it("names the live unmatched outbound and opens a read-only config", async () => {
+    const running = { phase: "running" as const, message: "Ready", since: now };
+    render(
+      <Dashboard
+        snapshot={{
+          ...stopped,
+          phase: "running",
+          mihomo: running,
+          live_route: {
+            match_proxy: "DIRECT",
+            match_client_id: null,
+            matches_saved_default: true,
+          },
+        }}
+      />,
+    );
+    expect(screen.getByTestId("mihomo-using")).toHaveTextContent(
+      "Mihomo sends unmatched traffic through DIRECT",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /View config/ }));
+    const config = await screen.findByTestId("mihomo-config");
+    expect(config).toHaveTextContent("MATCH,DIRECT");
+    expect(config).toHaveAttribute("aria-readonly", "true");
+    expect(config.querySelector("textarea, input")).toBeNull();
   });
 
   it("renders compact mobile status and provider summaries", () => {

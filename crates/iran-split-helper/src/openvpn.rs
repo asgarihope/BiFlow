@@ -158,6 +158,26 @@ impl Supervisor {
         })
     }
 
+    /// Installs the adapter route Mihomo needs to send traffic out a side
+    /// tunnel that is already up. On Windows this is the high-metric
+    /// `0.0.0.0/0`. Repeating it is success when the route already exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HelperServiceError::SideTunnel`] when the route cannot be added.
+    pub async fn ensure_interface_route(&self, device: &str) -> Result<(), HelperServiceError> {
+        #[cfg(windows)]
+        {
+            let _ = self;
+            install_policy_routing(device, DEFAULT_MARK, DEFAULT_TABLE, None).await?;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (self, device);
+        }
+        Ok(())
+    }
+
     /// Stops one side tunnel and removes helper-owned routes.
     ///
     /// # Errors

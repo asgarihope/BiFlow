@@ -883,6 +883,23 @@ fn get_stack_snapshot(app: AppHandle) -> Result<StackSnapshot, String> {
 }
 
 #[tauri::command]
+async fn running_mihomo_config(app: AppHandle) -> Result<String, String> {
+    diagnostics::trace_action(
+        "diagnostics",
+        "tauri_command",
+        "running_mihomo_config",
+        async move {
+            services(&app)?
+                .engine
+                .running_config_text()
+                .await
+                .map_err(|error| error.to_string())
+        },
+    )
+    .await
+}
+
+#[tauri::command]
 async fn start_stack(
     app: AppHandle,
     side_tunnel_timeout_seconds: Option<u64>,
@@ -3606,6 +3623,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bootstrap_app,
             get_stack_snapshot,
+            running_mihomo_config,
             get_network_status,
             check_reachability,
             get_traffic_totals,

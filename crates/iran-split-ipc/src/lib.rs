@@ -113,6 +113,11 @@ pub enum HelperCommand {
     StopSideTunnel {
         client_id: Uuid,
     },
+    /// Adds the high-metric default route on an adapter Mihomo binds with
+    /// `interface-name`. Safe to repeat: an existing route is success.
+    EnsureInterfaceRoute {
+        device: String,
+    },
 }
 
 impl HelperCommand {
@@ -163,6 +168,11 @@ impl HelperCommand {
                     "side tunnel request is missing a supported driver, profile, or timeout".into(),
                 ))
             }
+            Self::EnsureInterfaceRoute { device } if !valid_interface_device(device) => {
+                Err(ProtocolError::InvalidMessage(
+                    "interface device name must be 1-64 safe characters".into(),
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -183,8 +193,17 @@ impl HelperCommand {
             Self::PrepareForUpdate => "prepare_for_update",
             Self::StartSideTunnel { .. } => "start_side_tunnel",
             Self::StopSideTunnel { .. } => "stop_side_tunnel",
+            Self::EnsureInterfaceRoute { .. } => "ensure_interface_route",
         }
     }
+}
+
+fn valid_interface_device(value: &str) -> bool {
+    let len = value.chars().count();
+    (1..=64).contains(&len)
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.'))
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -407,6 +426,16 @@ mod tests {
         assert!(HelperCommand::CollectServiceLogs { max_entries: 2_001 }
             .validate()
             .is_err());
+        assert!(HelperCommand::EnsureInterfaceRoute {
+            device: "OpenVPN Data Channel Offload".into(),
+        }
+        .validate()
+        .is_ok());
+        assert!(HelperCommand::EnsureInterfaceRoute {
+            device: "bad|name".into(),
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

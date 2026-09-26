@@ -166,6 +166,10 @@ async fn dispatch(
         HelperCommand::StopSideTunnel { client_id } => {
             HelperReply::SideTunnel(supervisor.stop_side_tunnel(client_id).await?)
         }
+        HelperCommand::EnsureInterfaceRoute { device } => {
+            supervisor.ensure_interface_route(&device).await?;
+            HelperReply::Ack
+        }
     })
 }
 

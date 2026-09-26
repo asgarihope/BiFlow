@@ -121,6 +121,10 @@ If a required command fails or emits a warning from project code, fix it in the 
   `SAFE_PATHS` home is cut off (ADR 0101). On Windows do not emit
   `routing-mark`; give the side-tunnel adapter a high-metric default
   route so bound traffic can leave without replacing the system route.
+  A reload is not successful until `GET /rules` shows the `MATCH` proxy
+  from the config that was just sent. The client list must describe that
+  live proxy; a saved default Mihomo is not using stays muted with the
+  reason (ADR 0102).
 - Enabled-client pins must keep the Mihomo group name even when that
   egress is missing from live handles. Rewriting them to `REJECT`/`DIRECT`
   made a Windscribe pin on `google.com` look like it never applied, and

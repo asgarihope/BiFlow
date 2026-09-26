@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { desktop } from "../api/desktop";
 import type { BootstrapResult } from "../api/models";
 import { createClientInstance } from "../lib/clients";
+import { MOCK_HIDDIFY_ID } from "../lib/outbound";
 import { baseSettings, baseSnapshot } from "../test/fixtures";
 import { useAppStore } from "../store/app";
 import { ClientRegistry } from "./ClientRegistry";
@@ -59,6 +60,86 @@ beforeEach(() => {
     disconnectClient: vi.fn(),
     routeFallbackNotice: null,
     clearRouteFallbackNotice: vi.fn(),
+  });
+});
+
+describe("ClientRegistry live Mihomo", () => {
+  it("says when the saved default is not the live MATCH rule", () => {
+    const windscribeId = "22222222-2222-2222-2222-222222222222";
+    const settings = useAppStore.getState().settings;
+    if (!settings) throw new Error("settings missing");
+    useAppStore.setState({
+      settings: {
+        ...settings,
+        default_route: { kind: "client", client_id: windscribeId },
+      },
+      snapshot: baseSnapshot({
+        phase: "running",
+        clients: [
+          {
+            id: MOCK_HIDDIFY_ID,
+            preset: "hiddify",
+            enabled: true,
+            status: { phase: "running", message: null, since: "now" },
+            exit_ip: null,
+          },
+          {
+            id: windscribeId,
+            preset: "windscribe",
+            enabled: true,
+            status: { phase: "running", message: null, since: "now" },
+            exit_ip: null,
+          },
+        ],
+        live_route: {
+          match_proxy: `client-${MOCK_HIDDIFY_ID}`,
+          match_client_id: MOCK_HIDDIFY_ID,
+          matches_saved_default: false,
+        },
+      }),
+    });
+    render(<ClientRegistry />);
+    expect(screen.getByTestId("live-match")).toHaveTextContent("Hiddify");
+    expect(screen.getByTestId("client-card-windscribe")).toHaveTextContent(
+      "Mihomo is not using Windscribe",
+    );
+    expect(
+      screen.getByRole("option", { name: "Windscribe" }),
+    ).not.toBeDisabled();
+  });
+
+  it("disables a stopped client in the default list and writes the reason", () => {
+    const windscribeId = "22222222-2222-2222-2222-222222222222";
+    useAppStore.setState({
+      snapshot: baseSnapshot({
+        phase: "running",
+        clients: [
+          {
+            id: MOCK_HIDDIFY_ID,
+            preset: "hiddify",
+            enabled: true,
+            status: { phase: "running", message: null, since: "now" },
+            exit_ip: null,
+          },
+          {
+            id: windscribeId,
+            preset: "windscribe",
+            enabled: true,
+            status: {
+              phase: "error",
+              message: "tunnel did not come up",
+              since: "now",
+            },
+            exit_ip: null,
+          },
+        ],
+      }),
+    });
+    render(<ClientRegistry />);
+    expect(screen.getByTestId("client-card-windscribe")).toHaveTextContent(
+      "tunnel did not come up",
+    );
+    expect(screen.getByRole("option", { name: /Windscribe/ })).toBeDisabled();
   });
 });
 

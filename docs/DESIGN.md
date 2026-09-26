@@ -75,6 +75,16 @@ border-ink/10 pt-3`, with small buttons
   the longest EN/FA idle or stage string so labels never wrap and the control
   row does not shift while Connect/Pause/Resume/Disconnect progress runs.
 
+## Live Mihomo
+
+- The Mihomo status card states which outbound the live `MATCH` rule is
+  using. Its footer button opens that config read-only, with the controller
+  secret removed. The view is not an editor.
+- A client card shows “Default for unmatched” only when Mihomo’s live `MATCH`
+  is that client. If the saved choice is unused, or the client is stopped or
+  in error, the card is muted and the reason is written on it. A stopped
+  client is also disabled in the default-route list.
+
 ## Accessibility guardrails
 
 - Never use `sr-only` labels for inputs inside scrollable pages (they anchor

@@ -61,6 +61,15 @@ const resources = {
       catalogOnly: "Listed for later. This version cannot run it yet.",
       defaultRouteLabel: "Default for everything else",
       matchDefault: "Default for unmatched",
+      mihomoUsing: "Mihomo sends unmatched traffic through {{name}}",
+      mihomoNotUsing:
+        "Mihomo is not using {{name}}. Unmatched traffic is going through {{actual}}.",
+      mihomoConfigTitle: "Running Mihomo config",
+      mihomoConfigReadOnly:
+        "Read only. This is the config file of the running Mihomo generation. You cannot edit it. The card says which outbound Mihomo is actually using.",
+      viewMihomoConfig: "View config",
+      mihomoConfigUnavailable:
+        "The running Mihomo config is not available yet.",
       enabled: "Enabled",
       disabled: "disabled",
       clientPort: "Local port",
@@ -366,6 +375,14 @@ const resources = {
       catalogOnly: "در این نسخه قابل اجرا نیست.",
       defaultRouteLabel: "پیش‌فرض برای بقیه ترافیک",
       matchDefault: "پیش‌فرض بی‌قانون",
+      mihomoUsing: "میهومو ترافیکِ بدون قانون را از {{name}} می‌فرستد",
+      mihomoNotUsing:
+        "میهومو از {{name}} استفاده نمی‌کند. ترافیکِ بدون قانون از {{actual}} می‌رود.",
+      mihomoConfigTitle: "کانفیگ جاری میهومو",
+      mihomoConfigReadOnly:
+        "فقط خواندنی است. این فایل کانفیگ نسل جاری میهومو است و اینجا عوض نمی‌شود. کارت میهومو می‌گوید واقعاً از کدام خروجی استفاده می‌کند.",
+      viewMihomoConfig: "دیدن کانفیگ",
+      mihomoConfigUnavailable: "کانفیگ جاری میهومو هنوز در دسترس نیست.",
       enabled: "فعال",
       disabled: "غیرفعال",
       clientPort: "پورت محلی",

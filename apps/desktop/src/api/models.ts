@@ -85,6 +85,12 @@ export interface ClientComponentStatus {
   exit_ip: string | null;
 }
 
+export interface LiveRoute {
+  match_proxy: string | null;
+  match_client_id: string | null;
+  matches_saved_default: boolean;
+}
+
 export interface StackSnapshot {
   revision: number;
   phase: StackPhase;
@@ -99,6 +105,7 @@ export interface StackSnapshot {
   dns: ComponentStatus;
   providers: ProviderSummary;
   exit_ip: string | null;
+  live_route?: LiveRoute;
   backend: "external_hiddify";
   last_error: AppError | null;
   updated_at: string;

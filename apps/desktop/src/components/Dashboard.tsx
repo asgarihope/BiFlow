@@ -30,11 +30,18 @@ import { ClientRegistry } from "./ClientRegistry";
 import { LifecycleCancelButton } from "./LifecycleCancelButton";
 import { StatusPill } from "./StatusPill";
 import { failureReason } from "../lib/failureReason";
-import { clientColor } from "../lib/outbound";
+import { clientColor, outboundLabel } from "../lib/outbound";
 import { presetById, type PresetId } from "../lib/presets";
+import { MihomoConfigDialog } from "./MihomoConfigDialog";
 
 export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
   const { t } = useTranslation();
+  const [configOpen, setConfigOpen] = useState(false);
+  const storedClients = useAppStore((state) => state.settings?.clients);
+  const clients = storedClients ?? [];
+  const liveName = snapshot.live_route?.match_proxy
+    ? outboundLabel(snapshot.live_route.match_proxy, clients)
+    : null;
   const {
     actionPending,
     toggleConnection,
@@ -236,6 +243,12 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
             }
             installing={installingId === "mihomo"}
             onInstall={() => void installDependency("mihomo")}
+            detail={liveName ? t("mihomoUsing", { name: liveName }) : null}
+            onView={
+              snapshot.mihomo.phase === "running"
+                ? () => setConfigOpen(true)
+                : undefined
+            }
           />
           <Component name="TUN" status={snapshot.tun} icon={<ArrowDownUp />} />
           <Component name="DNS" status={snapshot.dns} icon={<Network />} />
@@ -245,6 +258,7 @@ export function Dashboard({ snapshot }: { snapshot: StackSnapshot }) {
       <ClientRegistry />
 
       {active ? <TrafficFlow /> : null}
+      <MihomoConfigDialog open={configOpen} onOpenChange={setConfigOpen} />
 
       <p className="text-xs text-muted">
         {t("lastUpdated")}: {new Date(snapshot.updated_at).toLocaleTimeString()}
@@ -317,6 +331,8 @@ function Component({
   installed,
   installing,
   onInstall,
+  detail,
+  onView,
 }: {
   name: string;
   status: ComponentStatus;
@@ -324,10 +340,29 @@ function Component({
   installed?: boolean;
   installing?: boolean;
   onInstall?: () => void;
+  detail?: string | null;
+  onView?: () => void;
 }) {
   const { t } = useTranslation();
   return (
-    <div className="rounded-2xl border border-ink/10 bg-surface p-3">
+    <div
+      className={`flex h-full flex-col rounded-2xl border border-ink/10 bg-surface p-3 ${
+        onView ? "cursor-pointer" : ""
+      }`}
+      role={onView ? "button" : undefined}
+      tabIndex={onView ? 0 : undefined}
+      onClick={onView}
+      onKeyDown={
+        onView
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onView();
+              }
+            }
+          : undefined
+      }
+    >
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <span
@@ -345,6 +380,11 @@ function Component({
       <p className="mt-2 line-clamp-2 min-h-8 text-xs leading-4 text-muted">
         {status.message ?? t("statusDetailUnavailable")}
       </p>
+      {detail ? (
+        <p className="mt-1 text-xs font-semibold" data-testid="mihomo-using">
+          {detail}
+        </p>
+      ) : null}
       {installed === false && onInstall ? (
         <button
           type="button"
@@ -359,6 +399,13 @@ function Component({
           )}
           {installing ? t("installing") : t("install")}
         </button>
+      ) : null}
+      {onView ? (
+        <div className="mt-auto border-t border-ink/10 pt-3">
+          <span className="rounded-lg px-3 py-1.5 text-xs font-semibold text-brand">
+            {t("viewMihomoConfig")}
+          </span>
+        </div>
       ) : null}
     </div>
   );
@@ -394,11 +441,16 @@ function TrafficFlow() {
   const settings = useAppStore((state) => state.settings);
   const snapshot = useAppStore((state) => state.snapshot);
   const clients = settings?.clients;
-  const defaultClientId =
-    settings?.default_route.kind === "client"
+  const live = snapshot?.live_route;
+  const liveKnown = Boolean(live?.match_proxy);
+  const defaultClientId = liveKnown
+    ? (live?.match_client_id ?? null)
+    : settings?.default_route.kind === "client"
       ? settings.default_route.client_id
       : null;
-  const defaultIsDirect = settings?.default_route.kind === "direct";
+  const defaultIsDirect = liveKnown
+    ? live?.match_proxy === "DIRECT"
+    : settings?.default_route.kind === "direct";
   const [selected, setSelected] = useState<string | null>(null);
   const [packets, setPackets] = useState<FlowPacket[]>([]);
   const recentPackets = useRef<Map<string, { branch: string; at: number }>>(

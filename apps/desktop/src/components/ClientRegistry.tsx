@@ -7,14 +7,24 @@ import {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
-import type { ClientInstance, PinnedRoute, RuleListMeta } from "../api/models";
+import type {
+  ClientInstance,
+  DefaultRoute,
+  PinnedRoute,
+  RuleListMeta,
+  StackSnapshot,
+} from "../api/models";
 import { canAddPreset, enabledClients, profileFileName } from "../lib/clients";
 import {
   failedSideTunnelClients,
   INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT,
   nextSideTunnelRetryTimeout,
 } from "../lib/sideTunnelConnect";
-import { defaultRouteFromKey, outboundKey } from "../lib/outbound";
+import {
+  defaultRouteFromKey,
+  outboundKey,
+  outboundLabel,
+} from "../lib/outbound";
 import {
   downloadLinksFor,
   downloadUrlFor,
@@ -147,12 +157,33 @@ export function ClientRegistry() {
           className="rounded-xl border-ink/15 bg-surface"
         >
           <option value="direct">{t("direct")}</option>
-          {enabledClients(clients).map((client) => (
-            <option key={client.id} value={client.id}>
-              {presetById(client.preset as PresetId).title}
-            </option>
-          ))}
+          {enabledClients(clients).map((client) => {
+            const reported = snapshot?.clients.find(
+              (item) => item.id === client.id,
+            );
+            const down =
+              (snapshot?.phase === "running" ||
+                snapshot?.phase === "degraded") &&
+              (reported?.status.phase === "stopped" ||
+                reported?.status.phase === "error" ||
+                reported?.status.phase === "unavailable");
+            const title = presetById(client.preset as PresetId).title;
+            return (
+              <option key={client.id} value={client.id} disabled={down}>
+                {down
+                  ? `${title} — ${reported?.status.message ?? t("disabled")}`
+                  : title}
+              </option>
+            );
+          })}
         </select>
+        {snapshot?.live_route?.match_proxy ? (
+          <p className="text-xs font-semibold" data-testid="live-match">
+            {t("mihomoUsing", {
+              name: outboundLabel(snapshot.live_route.match_proxy, clients),
+            })}
+          </p>
+        ) : null}
       </label>
 
       {catalogOpen ? (
@@ -225,9 +256,18 @@ export function ClientRegistry() {
                 list.outbound.client_id === client.id,
             )}
             isDefault={
-              settings.default_route.kind === "client" &&
-              settings.default_route.client_id === client.id
+              snapshot?.live_route?.match_proxy
+                ? snapshot.live_route.match_client_id === client.id
+                : settings.default_route.kind === "client" &&
+                  settings.default_route.client_id === client.id
             }
+            unusedReason={unusedClientReason(
+              client,
+              clients,
+              settings.default_route,
+              snapshot,
+              t,
+            )}
             phase={
               snapshot?.clients.find((item) => item.id === client.id)?.status
                 .phase ?? "stopped"
@@ -288,11 +328,42 @@ export function ClientRegistry() {
   );
 }
 
+function unusedClientReason(
+  client: ClientInstance,
+  clients: ClientInstance[],
+  route: DefaultRoute,
+  snapshot: StackSnapshot | null,
+  translate: (key: string, options?: Record<string, string>) => string,
+): string | null {
+  if (snapshot?.phase !== "running" && snapshot?.phase !== "degraded") {
+    return null;
+  }
+  const reported = snapshot.clients.find((item) => item.id === client.id);
+  const down =
+    reported?.status.phase === "stopped" ||
+    reported?.status.phase === "error" ||
+    reported?.status.phase === "unavailable";
+  if (down) return reported?.status.message ?? null;
+  if (
+    route.kind === "client" &&
+    route.client_id === client.id &&
+    snapshot.live_route?.match_proxy &&
+    !snapshot.live_route.matches_saved_default
+  ) {
+    return translate("mihomoNotUsing", {
+      name: presetById(client.preset as PresetId).title,
+      actual: outboundLabel(snapshot.live_route.match_proxy, clients),
+    });
+  }
+  return null;
+}
+
 function ClientCard({
   client,
   pins,
   lists,
   isDefault,
+  unusedReason,
   phase,
   statusMessage,
   deleting,
@@ -319,6 +390,7 @@ function ClientCard({
   pins: PinnedRoute[];
   lists: RuleListMeta[];
   isDefault: boolean;
+  unusedReason: string | null;
   phase: string;
   statusMessage: string | null;
   deleting: boolean;
@@ -421,7 +493,7 @@ function ClientCard({
     <article
       data-testid={`client-card-${client.preset}`}
       className={`flex flex-col rounded-2xl border border-ink/10 bg-surface p-3.5 ${
-        client.enabled ? "" : "opacity-70"
+        !client.enabled || unusedReason ? "opacity-60" : ""
       }`}
     >
       <div className="flex items-center justify-between gap-3">
@@ -443,6 +515,12 @@ function ClientCard({
           {t("enabled")}
         </label>
       </div>
+
+      {unusedReason ? (
+        <p className="mt-2 text-xs font-semibold text-danger" role="status">
+          {unusedReason}
+        </p>
+      ) : null}
 
       <p className="mt-1.5 text-xs text-muted">
         {t("pinSummary", { domains: domainCount, ips: ipCount })}

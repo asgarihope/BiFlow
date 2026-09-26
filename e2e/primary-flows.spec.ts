@@ -425,6 +425,22 @@ test.describe("primary BiFlow flows", () => {
     ).toBeVisible();
   });
 
+  test("shows the live unmatched outbound and a read-only Mihomo config", async ({
+    page,
+  }) => {
+    await openFresh(page);
+    await connectButton(page).click();
+    await expect(page.getByTestId("mihomo-using")).toContainText("Hiddify");
+    await page.getByRole("button", { name: /View config/ }).click();
+    const config = page.getByTestId("mihomo-config");
+    await expect(config).toBeVisible();
+    await expect(config).toHaveAttribute("aria-readonly", "true");
+    await expect(config).toContainText(
+      "MATCH,client-11111111-1111-1111-1111-111111111111",
+    );
+    await expect(config.locator("textarea, input")).toHaveCount(0);
+  });
+
   test("picks a config file for OpenVPN and Windscribe", async ({ page }) => {
     await openFresh(page);
     await page.getByRole("button", { name: "Add client" }).click();

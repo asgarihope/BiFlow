@@ -819,6 +819,11 @@ async function runStart(accepted: OperationAccepted) {
     clients: clientsWithMockSideTunnelOutcomes(mockSideTunnelConnectTimeout),
     exit_ip: "203.0.113.42",
     last_error: null,
+    live_route: {
+      match_proxy: `client-${MOCK_HIDDIFY_ID}`,
+      match_client_id: MOCK_HIDDIFY_ID,
+      matches_saved_default: true,
+    },
   };
   lifecycleBusy = null;
   emit("running", null, null, null);
@@ -1400,6 +1405,14 @@ export const mockApi = {
   },
   async applyLiveSettings(): Promise<void> {
     return undefined;
+  },
+  async runningMihomoConfig(): Promise<string> {
+    return [
+      "mixed-port: 17890",
+      'secret: "<redacted>"',
+      "rules:",
+      `- MATCH,client-${MOCK_HIDDIFY_ID}`,
+    ].join("\n");
   },
   async testRoute(target: string): Promise<RouteTestResult> {
     // Mirrors RuleSet::decide: private, enabled client pins, DIRECT pins,

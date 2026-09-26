@@ -239,6 +239,11 @@ export const desktop = {
   applyLiveSettings(): Promise<void> {
     return native ? invoke("apply_live_settings") : mockApi.applyLiveSettings();
   },
+  runningMihomoConfig(): Promise<string> {
+    return native
+      ? invoke("running_mihomo_config")
+      : mockApi.runningMihomoConfig();
+  },
   testRoute(target: string): Promise<RouteTestResult> {
     return native
       ? invoke("test_route", { target })

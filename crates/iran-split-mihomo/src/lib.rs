@@ -1100,6 +1100,51 @@ impl ControllerClient {
     }
 }
 
+/// Proxy name on the generated `MATCH` line, such as `client-<uuid>` or `DIRECT`.
+#[must_use]
+pub fn match_line_proxy(yaml: &str) -> Option<String> {
+    yaml.lines().rev().find_map(|line| {
+        let line = line.trim().trim_start_matches("- ").trim();
+        let proxy = line.strip_prefix("MATCH,")?.trim();
+        (!proxy.is_empty()).then(|| proxy.to_owned())
+    })
+}
+
+/// `Some` when a reload left Mihomo's live `MATCH` on a different proxy.
+#[must_use]
+pub fn match_reload_disagrees(yaml: &str, live: &str) -> Option<String> {
+    if live == "unavailable" {
+        return None;
+    }
+    let expected = match_line_proxy(yaml)?;
+    (live != expected).then(|| {
+        format!("Mihomo kept unmatched traffic on {live}; the reloaded config says {expected}")
+    })
+}
+
+/// The group `generate_config` will put on `MATCH` for this app and handles.
+#[must_use]
+pub fn expected_match_proxy(app: &AppConfig, handles: &[EgressHandle]) -> String {
+    match_group(app, &routing_handles(app, handles))
+}
+
+/// Hides the controller secret before a config is shown in the UI.
+#[must_use]
+pub fn redact_controller_secret(yaml: &str) -> String {
+    yaml.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("secret:") {
+                let indent = line.len() - trimmed.len();
+                format!("{}secret: \"<redacted>\"", &line[..indent])
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn match_proxy_from_rules(value: &Value) -> Option<String> {
     let rules = value.get("rules")?.as_array()?;
     rules.iter().rev().find_map(|rule| {
@@ -1843,6 +1888,22 @@ mod tests {
         )
         .expect("config");
         assert!(generated.yaml.contains("MATCH,DIRECT"));
+    }
+
+    #[test]
+    fn reload_disagreement_names_the_live_and_expected_proxy() {
+        let yaml = "rules:\n- MATCH,client-5b836461-a4d9-40a4-ab7b-7cc71e830bee\n";
+        assert!(
+            match_reload_disagrees(yaml, "client-5b836461-a4d9-40a4-ab7b-7cc71e830bee").is_none()
+        );
+        let detail = match_reload_disagrees(yaml, "client-9813e34a-dfe8-42d5-9c1c-d0c1f6e57df1")
+            .expect("disagreement");
+        assert!(detail.contains("9813e34a"));
+        assert!(detail.contains("5b836461"));
+        assert!(match_reload_disagrees(yaml, "unavailable").is_none());
+        let secret = redact_controller_secret("secret: \"abc\"\nrules: []\n");
+        assert!(secret.contains("<redacted>"));
+        assert!(!secret.contains("abc"));
     }
 
     #[test]

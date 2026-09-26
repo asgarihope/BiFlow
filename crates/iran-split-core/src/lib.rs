@@ -209,6 +209,50 @@ pub struct ClientComponentStatus {
     pub exit_ip: Option<String>,
 }
 
+/// What Mihomo's live `MATCH` rule is doing, compared with the saved default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveRoute {
+    /// Proxy name from `GET /rules`, when the controller answered.
+    pub match_proxy: Option<String>,
+    /// Set when `match_proxy` is `client-<uuid>`.
+    #[serde(default)]
+    pub match_client_id: Option<ClientId>,
+    /// False only when a live proxy was read and it is not the saved default.
+    pub matches_saved_default: bool,
+}
+
+impl LiveRoute {
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self {
+            match_proxy: None,
+            match_client_id: None,
+            matches_saved_default: true,
+        }
+    }
+
+    #[must_use]
+    pub fn observe(expected: &str, observed: Option<String>) -> Self {
+        let Some(proxy) = observed else {
+            return Self::unknown();
+        };
+        let match_client_id = proxy
+            .strip_prefix("client-")
+            .and_then(|raw| ClientId::parse(raw).ok());
+        Self {
+            matches_saved_default: proxy == expected,
+            match_proxy: Some(proxy),
+            match_client_id,
+        }
+    }
+}
+
+impl Default for LiveRoute {
+    fn default() -> Self {
+        Self::unknown()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackSnapshot {
     pub revision: u64,
@@ -228,6 +272,8 @@ pub struct StackSnapshot {
     pub dns: ComponentStatus,
     pub providers: ProviderSummary,
     pub exit_ip: Option<String>,
+    #[serde(default)]
+    pub live_route: LiveRoute,
     pub backend: BackendKind,
     pub last_error: Option<AppError>,
     pub updated_at: DateTime<Utc>,
@@ -249,6 +295,7 @@ impl Default for StackSnapshot {
             dns: ComponentStatus::default(),
             providers: ProviderSummary::default(),
             exit_ip: None,
+            live_route: LiveRoute::unknown(),
             backend: BackendKind::default(),
             last_error: None,
             updated_at: Utc::now(),
@@ -319,6 +366,7 @@ pub struct RuntimeHealth {
     pub tun: ComponentStatus,
     pub dns: ComponentStatus,
     pub providers: ProviderSummary,
+    pub live_route: LiveRoute,
 }
 
 impl ReadinessReport {
@@ -553,6 +601,12 @@ pub trait PlatformBackend: Send + Sync + 'static {
         generation: &RuntimeGeneration,
         rebind_host: Option<String>,
     ) -> Result<(), CoreError>;
+    /// The config file the running Mihomo process loaded, with its secret removed.
+    async fn running_config_text(&self) -> Result<String, CoreError> {
+        Err(CoreError::Platform(
+            "the running Mihomo config is not available".into(),
+        ))
+    }
     async fn stop_core(&self) -> Result<(), CoreError>;
     async fn stop_user_proxy(&self) -> Result<(), CoreError> {
         Ok(())
@@ -650,6 +704,9 @@ pub struct Engine<B: PlatformBackend> {
     /// A client recovered but the live routing refresh has not landed yet;
     /// the next health tick retries `apply_user_rules` until it succeeds.
     route_refresh_pending: AtomicBool,
+    /// How many times this process has re-applied routing because live `MATCH`
+    /// disagreed with the saved default. Stops after three attempts.
+    match_reconcile_attempts: AtomicUsize,
     /// Consecutive failed end-to-end probes of the default-route egress.
     primary_egress_failures: AtomicUsize,
     /// The Degraded phase was set by the egress watchdog (not an operation),
@@ -697,6 +754,7 @@ impl<B: PlatformBackend> Engine<B> {
             pending: Mutex::new(HashMap::new()),
             timeouts,
             route_refresh_pending: AtomicBool::new(false),
+            match_reconcile_attempts: AtomicUsize::new(0),
             primary_egress_failures: AtomicUsize::new(0),
             probe_degraded: AtomicBool::new(false),
             side_tunnel_connect_timeout: Mutex::new(None),
@@ -719,6 +777,15 @@ impl<B: PlatformBackend> Engine<B> {
     #[must_use]
     pub fn snapshot(&self) -> StackSnapshot {
         self.snapshots.borrow().clone()
+    }
+
+    /// The config the running Mihomo process loaded, with the controller secret removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no generation is running or the file cannot be read.
+    pub async fn running_config_text(&self) -> Result<String, CoreError> {
+        self.backend.running_config_text().await
     }
 
     pub fn subscribe(&self) -> watch::Receiver<StackSnapshot> {
@@ -818,6 +885,25 @@ impl<B: PlatformBackend> Engine<B> {
                 trace_route = "engine->platform_backend->recover_clients",
                 "optional client recovery check failed; retrying on the next health tick"
             ),
+        }
+        let live = self.snapshot().live_route;
+        let mismatched = live.match_proxy.is_some() && !live.matches_saved_default;
+        if mismatched && self.snapshot().busy.is_none() {
+            let attempt = self.match_reconcile_attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < 3 {
+                info!(
+                    event = "mihomo.match_reconcile",
+                    section = "rules",
+                    initiator = "engine",
+                    cause = "live_match_disagrees",
+                    trace_route = "engine->apply_user_rules",
+                    match_proxy = live.match_proxy.as_deref().unwrap_or("missing"),
+                    "saved default and the live MATCH rule disagree; reloading Mihomo"
+                );
+                self.route_refresh_pending.store(true, Ordering::SeqCst);
+            }
+        } else if !mismatched {
+            self.match_reconcile_attempts.store(0, Ordering::SeqCst);
         }
         if !self.route_refresh_pending.load(Ordering::SeqCst) {
             return;
@@ -2081,6 +2167,7 @@ fn apply_health(snapshot: &mut StackSnapshot, health: RuntimeHealth) {
     snapshot.tun = health.tun;
     snapshot.dns = health.dns;
     snapshot.providers = health.providers;
+    snapshot.live_route = health.live_route;
 }
 
 fn merge_clients_during_connect(
@@ -2248,6 +2335,7 @@ mod tests {
                 } else {
                     ProviderSummary::default()
                 },
+                live_route: LiveRoute::unknown(),
             }
         }
 

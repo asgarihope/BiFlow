@@ -16,7 +16,7 @@ use iran_split_config::{
 };
 use iran_split_core::{
     CleanupReport, ClientComponentStatus, ComponentPhase, ComponentStatus, CoreError, HelperStatus,
-    PlatformBackend, ProcessStatus, ProviderSummary, ReadinessReport, RuntimeGeneration,
+    LiveRoute, PlatformBackend, ProcessStatus, ProviderSummary, ReadinessReport, RuntimeGeneration,
     RuntimeHealth, TunStatus,
 };
 use iran_split_ipc::{
@@ -24,7 +24,8 @@ use iran_split_ipc::{
     HelperReply, HELPER_IPC_FRAME_TIMEOUT_SECS, PROTOCOL_VERSION,
 };
 use iran_split_mihomo::{
-    generate_config_with_handles, probe_hiddify_egress, validate_with_binary, ControllerClient,
+    expected_match_proxy, generate_config_with_handles, match_reload_disagrees,
+    probe_hiddify_egress, redact_controller_secret, validate_with_binary, ControllerClient,
     MihomoError, Platform, RuntimePaths,
 };
 use iran_split_rules::{DirectTarget, Outbound, RoutePinsDocument};
@@ -418,6 +419,12 @@ impl WindowsBackend {
                 "unavailable".into()
             }
         };
+        ensure_live_match(
+            &std::fs::read_to_string(config_path).unwrap_or_default(),
+            &match_proxy,
+            &generation_id,
+            "windows_platform_backend",
+        )?;
         info!(
             event = "mihomo.hot_reload_succeeded",
             section = "rules",
@@ -1322,6 +1329,92 @@ impl WindowsBackend {
             ),
         }
     }
+
+    async fn observe_live_route(&self, config: &AppConfig, handles: &[EgressHandle]) -> LiveRoute {
+        let expected = expected_match_proxy(config, handles);
+        let Ok(controller) = ControllerClient::new(
+            &config.mihomo.controller_host,
+            config.mihomo.controller_port,
+            config.mihomo.controller_secret.clone(),
+        ) else {
+            return LiveRoute::unknown();
+        };
+        let observed = controller.live_match_proxy().await.ok().flatten();
+        LiveRoute::observe(&expected, observed)
+    }
+
+    async fn ensure_default_interface_route(&self) -> Result<(), CoreError> {
+        let config = self.config.read().await.clone();
+        let Some(client_id) = config.default_route.client_id() else {
+            return Ok(());
+        };
+        let Some(client) = config.client(client_id) else {
+            return Ok(());
+        };
+        if client.spec().kind != EgressKind::OwnedSideTunnel {
+            return Ok(());
+        }
+        let device = self
+            .egress_handles
+            .lock()
+            .await
+            .iter()
+            .find(|handle| handle.client_id == client_id && handle.ready)
+            .and_then(|handle| handle.outbound.as_ref())
+            .and_then(|outbound| outbound.interface_name.clone());
+        let Some(device) = device else {
+            return Err(CoreError::MihomoStartFailed(
+                "the default side tunnel has no adapter, so Mihomo cannot send unmatched traffic through it"
+                    .into(),
+            ));
+        };
+        match self
+            .helper_request(HelperCommand::EnsureInterfaceRoute { device })
+            .await
+        {
+            Ok(HelperReply::Ack) => {
+                info!(
+                    event = "side_tunnel.interface_route_ready",
+                    section = "clients",
+                    initiator = "windows_platform_backend",
+                    cause = "default_side_tunnel",
+                    trace_route = "engine->windows_platform_backend->helper",
+                    "side-tunnel adapter route is installed for Mihomo"
+                );
+                Ok(())
+            }
+            Ok(_) => Err(CoreError::Platform(
+                "helper did not confirm the side-tunnel adapter route".into(),
+            )),
+            Err(cause) => Err(cause),
+        }
+    }
+
+    async fn read_running_config(&self) -> Result<String, CoreError> {
+        let reply = self
+            .helper_request(HelperCommand::GetMihomoProcessStatus)
+            .await?;
+        let HelperReply::ProcessStatus(status) = reply else {
+            return Err(CoreError::Platform(
+                "helper did not report the Mihomo process".into(),
+            ));
+        };
+        let Some(generation_id) = status.generation_id else {
+            return Err(CoreError::Platform(
+                "Mihomo is not running a generation".into(),
+            ));
+        };
+        let path = self
+            .paths
+            .system_runtime_dir
+            .join("generations")
+            .join(generation_id.to_string())
+            .join("config.yaml");
+        let yaml = std::fs::read_to_string(&path).map_err(|error| {
+            CoreError::Platform(format!("could not read the running Mihomo config: {error}"))
+        })?;
+        Ok(redact_controller_secret(&yaml))
+    }
 }
 
 #[async_trait]
@@ -1374,6 +1467,7 @@ impl PlatformBackend for WindowsBackend {
             });
         }
 
+        let live_route = self.observe_live_route(&config, &handles).await;
         RuntimeHealth {
             helper,
             clients,
@@ -1381,6 +1475,7 @@ impl PlatformBackend for WindowsBackend {
             tun,
             dns,
             providers,
+            live_route,
         }
     }
 
@@ -1675,6 +1770,7 @@ impl PlatformBackend for WindowsBackend {
         generation: &RuntimeGeneration,
         rebind_host: Option<String>,
     ) -> Result<(), CoreError> {
+        self.ensure_default_interface_route().await?;
         self.register_runtime(generation).await?;
         match self
             .helper_request(HelperCommand::OverlayRuntimeGeneration {
@@ -1703,6 +1799,10 @@ impl PlatformBackend for WindowsBackend {
                 "generation overlay did not return process status".into(),
             )),
         }
+    }
+
+    async fn running_config_text(&self) -> Result<String, CoreError> {
+        self.read_running_config().await
     }
 
     async fn stop_core(&self) -> Result<(), CoreError> {
@@ -1944,6 +2044,7 @@ impl PlatformBackend for WindowsBackend {
             tun: ComponentStatus::new(ComponentPhase::Starting, Some("Waiting for TUN".into())),
             dns: Self::dns_component(config.mihomo.dns_port, dns_listening),
             providers: ProviderSummary::default(),
+            live_route: LiveRoute::unknown(),
         }
     }
 
@@ -2054,6 +2155,28 @@ fn clients_missing_egress<'config>(
         .filter(|client| client.spec().kind == EgressKind::LocalProxy)
         .filter(|client| !handles.iter().any(|handle| handle.client_id == client.id))
         .collect()
+}
+
+fn ensure_live_match(
+    yaml: &str,
+    live: &str,
+    generation_id: &str,
+    initiator: &'static str,
+) -> Result<(), CoreError> {
+    let Some(detail) = match_reload_disagrees(yaml, live) else {
+        return Ok(());
+    };
+    error!(
+        event = "mihomo.live_match_disagreed",
+        section = "rules",
+        initiator,
+        cause = %detail,
+        generation_id,
+        match_proxy = live,
+        trace_route = "engine->platform_backend->mihomo_controller",
+        "reloaded Mihomo but the live MATCH rule did not change"
+    );
+    Err(CoreError::MihomoStartFailed(detail))
 }
 
 fn client_start_timeout(client: &ClientInstance) -> Duration {

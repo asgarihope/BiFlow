@@ -141,6 +141,7 @@ impl PlatformBackend for DemoBackend {
                 None,
             ),
             providers: ProviderSummary::default(),
+            live_route: iran_split_core::LiveRoute::unknown(),
         }
     }
 
