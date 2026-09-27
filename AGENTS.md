@@ -426,3 +426,6 @@ already in progress"`. Cache the last `UpdateInfo` (never log asset URLs).
   explain that state. On NSIS, always pop and check `nsExec::ExecToLog`'s
   result; an unchecked privileged-helper error must fail the package operation
   (ADR 0095).
+- Cargo normalizes hyphens in target names to underscores when creating Windows
+  PDB files. Give a package's binary and library distinct target names or Cargo
+  emits an output-collision warning during every build (ADR 0107).

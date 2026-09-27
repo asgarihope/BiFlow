@@ -110,3 +110,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0104](./0104-tap-route-needs-gateway.md)                      | A TAP side tunnel needs the OpenVPN gateway                   | Accepted   |
 | [0105](./0105-egress-probe.md)                                 | Probe side-tunnel egress and replace an on-link TAP route     | Accepted   |
 | [0106](./0106-drop-legacy-ncp-ciphers.md)                      | Drop legacy cipher negotiation before starting OpenVPN        | Accepted   |
+| [0107](./0107-distinct-desktop-cargo-artifacts.md)             | Give desktop binary and library distinct Cargo artifact names | Accepted   |

@@ -65,6 +65,19 @@ describe("release artifact names", () => {
     assert.match(source, /corepack", "pnpm"/);
   });
 
+  it("gives the desktop binary and library distinct Cargo artifact names", () => {
+    const manifest = readFileSync(join(root, "src-tauri/Cargo.toml"), "utf8");
+    const packageName = manifest.match(
+      /\[package\][\s\S]*?name\s*=\s*"([^"]+)"/,
+    )?.[1];
+    const libraryName = manifest.match(
+      /\[lib\][\s\S]*?name\s*=\s*"([^"]+)"/,
+    )?.[1];
+    assert.ok(packageName);
+    assert.ok(libraryName);
+    assert.notEqual(libraryName, packageName.replaceAll("-", "_"));
+  });
+
   it("rejects a --from stage that does not exist on that packaging target", () => {
     if (isWindows) return;
     const result = spawnSync(
