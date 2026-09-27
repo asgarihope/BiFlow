@@ -20,6 +20,12 @@ packages.
   (`cfg(any(windows, test))`), so the Linux library build does not see it as
   unused and the matcher still runs in tests.
 - Run the CI Rust job on `ubuntu-22.04`, `ubuntu-24.04`, and `windows-2025`.
+- Give each matrix OS its own `swatinem/rust-cache` `prefix-key`. The
+  action keys on `runner.os` (`Linux`), so a shared `target/` lets Cargo
+  skip rebuilding `tauri` on 22.04 while rustc cannot load the 24.04 rlib
+  (`E0463 can't find crate for tauri`). After installing
+  `libwebkit2gtk-4.1-dev` (jammy universe), fail if
+  `pkg-config --exists webkit2gtk-4.1` is false.
 - On a tag, build `.deb` and AppImage on both Ubuntu runners. Install
   `libfuse2` on 22.04 and `libfuse2t64` on 24.04. Rename the 22.04 files to
   `*_ubuntu2204_*` before signing the Debian package, and upload them as

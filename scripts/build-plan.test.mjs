@@ -498,8 +498,12 @@ describe("release artifact names", () => {
     assert.match(ci, /fail-fast:\s*false/);
     assert.match(ci, /swatinem\/rust-cache@v2/);
     assert.match(ci, /workspaces:\s*["']\. -> target["']/);
+    assert.match(ci, /prefix-key:\s*\$\{\{\s*matrix\.os\s*\}\}/);
+    assert.match(ci, /pkg-config --exists webkit2gtk-4\.1/);
     assert.match(workflow, /swatinem\/rust-cache@v2/);
     assert.match(workflow, /workspaces:\s*["']\. -> target["']/);
+    assert.match(workflow, /prefix-key:\s*\$\{\{\s*matrix\.platform\s*\}\}/);
+    assert.match(workflow, /pkg-config --exists webkit2gtk-4\.1/);
     assert.match(workflow, /choco install nsis/);
     assert.match(workflow, /\$env:Path = "\$nsis;\$env:Path"/);
     assert.match(workflow, /prefetch-appimage-tools\.sh/);

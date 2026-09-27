@@ -37,6 +37,9 @@ Official sources:
   because its library dependencies use the t64 names.
 - Set `fail-fast: false` on the CI rust matrix so both OS jobs finish.
 - Cache with `swatinem/rust-cache@v2` and `workspaces: ". -> target"`.
+  Set `prefix-key` to the matrix OS (`ubuntu-22.04` vs `ubuntu-24.04`).
+  `runner.os` is only `Linux`, and a shared cache makes Clippy report
+  `can't find crate for tauri` on 22.04.
 - Set `git config --global core.autocrlf false` **before** `actions/checkout`
   on Windows. `.gitattributes` `-text` still pins bundled rule bytes.
 - Install NSIS with Chocolatey on `windows-2025` before `tauri-action`. After

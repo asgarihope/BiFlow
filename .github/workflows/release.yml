@@ -43,6 +43,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          prefix-key: ubuntu-24.04
       - name: Verify tag matches the version file
         shell: bash
         run: |
@@ -52,7 +53,7 @@ jobs:
             exit 1
           fi
       - name: Install Linux desktop dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils && pkg-config --exists webkit2gtk-4.1
       - run: pnpm install --frozen-lockfile
       - name: Python for script contract tests
         run: python3 --version
@@ -99,6 +100,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          prefix-key: ${{ matrix.platform }}
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: |
@@ -108,6 +110,7 @@ jobs:
             fuse2=libfuse2t64
           fi
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils "$fuse2"
+          pkg-config --exists webkit2gtk-4.1
       - name: Prefetch AppImage tools
         if: runner.os == 'Linux'
         run: ./scripts/prefetch-appimage-tools.sh
