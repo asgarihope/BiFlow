@@ -155,7 +155,10 @@ If a required command fails or emits a warning from project code, fix it in the 
   of duplicating them under `cfg(windows)`. A helper that only the Windows
   call site uses is dead code in the Linux library build even when a test
   calls it; gate it with `cfg(any(windows, test))` so Clippy on Ubuntu
-  stays quiet and the test still runs (ADR 0103).
+  stays quiet and the test still runs (ADR 0103). A Windows-only body
+  inside an `async` helper also fails Linux `dead_code` (unread struct
+  fields) and `clippy::unused_async` (no await left). Share the lock /
+  field read on every host and `cfg` only the privileged work.
 - tokio's `process::Command` exposes `creation_flags` inherently on
   Windows; importing `std::os::windows::process::CommandExt` for it trips
   `-D unused-imports` (and `items-after-statements` if placed mid-body).

@@ -170,20 +170,23 @@ impl Supervisor {
     ///
     /// Returns [`HelperServiceError::SideTunnel`] when the route cannot be added.
     pub async fn ensure_interface_route(&self, device: &str) -> Result<(), HelperServiceError> {
+        // Look the stored gateway up on every host. A `#[cfg(windows)]` body
+        // left Linux Clippy with an unread field and an async fn that never
+        // awaited. Linux already installed policy routing at start.
+        let gateway = self
+            .side_tunnels
+            .lock()
+            .await
+            .values()
+            .find(|tunnel| tunnel.device == device)
+            .and_then(|tunnel| tunnel.gateway.clone());
         #[cfg(windows)]
         {
-            let gateway = self
-                .side_tunnels
-                .lock()
-                .await
-                .values()
-                .find(|tunnel| tunnel.device == device)
-                .and_then(|tunnel| tunnel.gateway.clone());
             install_policy_routing(device, DEFAULT_MARK, DEFAULT_TABLE, gateway.as_deref()).await?;
         }
         #[cfg(not(windows))]
         {
-            let _ = (self, device);
+            let _ = gateway;
         }
         Ok(())
     }
@@ -1097,6 +1100,26 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let error = resolve_binary(Some(directory.path())).expect_err("directory rejected");
         assert!(matches!(error, HelperServiceError::SideTunnel(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_interface_route_is_a_linux_noop_without_a_tunnel() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let supervisor = Supervisor::new(HelperSettings {
+            authorized_uid: 1_000,
+            authorized_gid: 1_000,
+            socket_path: directory.path().join("helper.sock"),
+            staging_dir: directory.path().join("staging"),
+            runtime_dir: directory.path().join("runtime"),
+            mihomo_binary: directory.path().join("mihomo"),
+            mihomo_sha256: "0".repeat(64),
+            tun_name: "biflow-tun".into(),
+        });
+        supervisor
+            .ensure_interface_route("tun-missing")
+            .await
+            .expect("linux no-op succeeds");
     }
 
     #[cfg(unix)]
