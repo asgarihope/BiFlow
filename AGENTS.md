@@ -265,6 +265,8 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Keep both root Prettier scripts explicit with `--end-of-line auto`; Prettier CLI defaults to LF even when EditorConfig says `auto`, otherwise a Windows developer with autocrlf enabled sees hundreds of false format failures.
 - Bash entrypoints executed from WSL must have LF line endings or the shebang resolves as `bash\r`. Pin Unix shell scripts with `.gitattributes` `eol=lf` and syntax-check/invoke them from WSL after editing on Windows.
 - Values read from Windows-edited config files in shell scripts must strip a trailing carriage return before passing them to tools; rustup rejects `1.88.0\r` as an invalid toolchain. Keep build-script contract tests for this normalization.
+- Windscribe profiles can retain a mixed `ncp-ciphers` list containing AES-256-CBC even when BiFlow passes AEAD-only `--data-ciphers`. On Windows OpenVPN 2.7 this disables ovpn-dco and can fall back to TAP, which has no usable gateway. Drop `ncp-ciphers` only from the Windows sanitized temporary copy and keep regression fixtures for Windows removal and Linux preservation (ADR 0106).
+- Git Bash on Windows does not resolve `pnpm.cmd` as `pnpm`. The pre-commit hook must use `pnpm` when present and fall back to `pnpm.cmd`, with a script contract test, so the CI-mirror frontend gate still runs.
 
 - Older Pillow has no `Image.Resampling`; generate icons with `Image.LANCZOS` / `Image.BICUBIC`.
 - Inner `#![allow(...)]` attributes must be the first item in a Rust module, before `use`.

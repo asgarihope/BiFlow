@@ -137,10 +137,11 @@ const CONFLICTING_DIRECTIVES: [&str; 12] = [
 ];
 
 /// Drops directives that would steal the system default route, DNS, or an
-/// existing TUN adapter. Inline certificates and keys are kept verbatim.
-/// Server pushes of the same options are ignored separately on the command line.
+/// existing TUN adapter, and legacy cipher negotiation that disables DCO.
+/// Inline certificates and keys are kept verbatim. Server pushes of the same
+/// options are ignored separately on the command line.
 #[must_use]
-pub fn sanitize_openvpn_profile(text: &str) -> String {
+pub fn sanitize_openvpn_profile(text: &str, windows: bool) -> String {
     let mut sanitized = String::new();
     let mut inline_block: Option<String> = None;
     for line in text.lines() {
@@ -170,7 +171,11 @@ pub fn sanitize_openvpn_profile(text: &str) -> String {
             .unwrap_or_default()
             .trim_start_matches("--")
             .to_ascii_lowercase();
-        if CONFLICTING_DIRECTIVES.contains(&directive.as_str()) {
+        // A legacy Windows `ncp-ciphers` list can include CBC even when the
+        // helper sets AEAD-only `data-ciphers`. OpenVPN 2.7 then disables DCO.
+        if CONFLICTING_DIRECTIVES.contains(&directive.as_str())
+            || (windows && directive == "ncp-ciphers")
+        {
             continue;
         }
         sanitized.push_str(line);
@@ -360,6 +365,7 @@ client
 dev tun
 remote vpn.example.com 443
 auth-user-pass
+ncp-ciphers AES-256-GCM:AES-256-CBC:AES-128-GCM
 redirect-gateway def1
 block-outside-dns
 dhcp-option DNS 10.255.255.1
@@ -368,10 +374,11 @@ resolv-retry infinite
 not a real certificate
 </ca>
 ";
-        let sanitized = sanitize_openvpn_profile(source);
+        let sanitized = sanitize_openvpn_profile(source, true);
         assert!(sanitized.contains("remote vpn.example.com 443"));
         assert!(sanitized.contains("auth-user-pass"));
         assert!(sanitized.contains("not a real certificate"));
+        assert!(!sanitized.contains("ncp-ciphers"));
         assert!(!sanitized.contains("redirect-gateway"));
         assert!(!sanitized.contains("block-outside-dns"));
         assert!(!sanitized.contains("dhcp-option"));
@@ -405,5 +412,12 @@ not a real certificate
         assert!(!args.iter().any(|arg| arg == "--dev-node"));
         let dev = args.iter().position(|arg| arg == "--dev").expect("dev");
         assert_eq!(args[dev + 1], "tun");
+    }
+
+    #[test]
+    fn linux_profile_keeps_its_cipher_negotiation() {
+        let source = "client\nremote vpn.example.com 443\nncp-ciphers AES-256-CBC\n";
+        let sanitized = sanitize_openvpn_profile(source, false);
+        assert!(sanitized.contains("ncp-ciphers AES-256-CBC"));
     }
 }

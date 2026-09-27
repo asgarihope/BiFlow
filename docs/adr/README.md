@@ -109,3 +109,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0103](./0103-ubuntu-2204-packages.md)                         | Ubuntu 22.04 is built beside Ubuntu 24.04                     | Accepted   |
 | [0104](./0104-tap-route-needs-gateway.md)                      | A TAP side tunnel needs the OpenVPN gateway                   | Accepted   |
 | [0105](./0105-egress-probe.md)                                 | Probe side-tunnel egress and replace an on-link TAP route     | Accepted   |
+| [0106](./0106-drop-legacy-ncp-ciphers.md)                      | Drop legacy cipher negotiation before starting OpenVPN        | Accepted   |

@@ -337,7 +337,7 @@ fn sanitized_profile_copy(
         HelperServiceError::SideTunnel(format!("could not stage a sanitized profile: {error}"))
     })?;
     let copy = runtime_dir.join(format!("openvpn-{client_id}.ovpn"));
-    std::fs::write(&copy, sanitize_openvpn_profile(&text)).map_err(|error| {
+    std::fs::write(&copy, sanitize_openvpn_profile(&text, cfg!(windows))).map_err(|error| {
         HelperServiceError::SideTunnel(format!("could not write the sanitized profile: {error}"))
     })?;
     Ok(copy)

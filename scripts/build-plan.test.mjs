@@ -442,6 +442,13 @@ describe("release artifact names", () => {
     assert.match(agents, /not done/i);
   });
 
+  it("runs the pre-commit frontend gate from Windows Git Bash", () => {
+    const hook = readFileSync(join(root, ".githooks/pre-commit"), "utf8");
+    assert.match(hook, /command -v pnpm/);
+    assert.match(hook, /command -v pnpm\.cmd/);
+    assert.match(hook, /run pnpm\.cmd check/);
+  });
+
   it("publishes deb, appimage, portable exe, and nsis from v* tags only", () => {
     const workflow = readFileSync(
       join(root, ".github/workflows/release.yml"),

@@ -55,7 +55,15 @@ fi
 
 if [ "${has_frontend}" = true ]; then
   # Mirrors the CI verify job (format, lint, typecheck, unit tests, version sync).
-  run pnpm check
+  if command -v pnpm >/dev/null 2>&1; then
+    run pnpm check
+  elif command -v pnpm.cmd >/dev/null 2>&1; then
+    # Git Bash does not resolve Windows .cmd extensions when called as pnpm.
+    run pnpm.cmd check
+  else
+    echo "pre-commit: pnpm is not installed or not on PATH" >&2
+    exit 1
+  fi
 fi
 
 echo "pre-commit: all CI-mirror checks passed"
