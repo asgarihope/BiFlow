@@ -251,6 +251,7 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Playwright `getByText` can match both a heading and descriptive text containing the same phrase. Select diagnostics cards with an exact heading role.
 - Playwright `getByText("Reachable")` is a substring match, so it also hits every "Unreachable" label. Pass `{ exact: true }` when one status label is a suffix of another.
 - An isolated `CARGO_TARGET_DIR` can consume enough disk to make a later workspace link fail with `No space left on device`. Remove only the known disposable isolated target; never use `cargo clean` on the shared incremental cache.
+- On Windows, Rust may need temporary object files under `%TEMP%` even when `target/` is on another drive. If workspace tests fail with OS error 112 and the system drive is low, point `TEMP` and `TMP` at a known directory on a drive with free space, then rerun the same checks.
 - In the managed sandbox, `pnpm version:sync` can fail with `spawn EPERM` when pnpm launches the configured Node binary. Re-run the same synchronization command with approved execution; do not bypass the root `version` source by hand-editing generated manifest versions.
 - `build.ps1` must not run `corepack enable`. That writes `pnpm` under `C:\Program Files\nodejs` and a normal PowerShell gets `EPERM`. Call `corepack prepare pnpm@9.0.1` and then `corepack pnpm` (ADR 0087).
 - Structured audit calls can push an existing Rust handler over Clippy's `too_many_lines` limit. Extract request execution plus its start/result audit events into a focused helper instead of suppressing the warning.
@@ -271,6 +272,7 @@ If a required command fails or emits a warning from project code, fix it in the 
 - When extending `RoutePinsDocument`, also extend `RawPinsDocument` and every explicit struct initializer; use `#[serde(default)]` so existing saved rule files remain readable.
 - `getByText("1 running", { exact: true })` can match multiple application rows; scope repeated values to a row or select a locator with `.first()` in Playwright assertions.
 - A missing Playwright Chromium executable is an environment setup failure. Install it with `pnpm exec playwright install chromium`, then rerun the e2e command.
+- Windows may reserve the default Playwright port 1420 (for example, inside an excluded TCP range), making Vite fail with `EACCES` even when no process listens there. Use the validated `BIFLOW_E2E_PORT` override for local e2e runs instead of changing system port reservations.
 - When a List Management component loads running apps through `useEffect`, include its memoized `refresh` callback in the dependency array so the frontend zero-warning lint gate passes.
 - Normalize absolute POSIX artifact paths with `node:path.resolve` before comparing them on Windows; path joining converts separators while an unnormalized root string does not.
 
