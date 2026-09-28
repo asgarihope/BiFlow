@@ -8,7 +8,7 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { desktop } from "../api/desktop";
 import type {
@@ -16,6 +16,8 @@ import type {
   DirectRulesDocument,
   ListCheckEntry,
   PinnedRoute,
+  RunningApplication,
+  RunningApplications,
   RouteTestResult,
   RuleListMeta,
 } from "../api/models";
@@ -92,6 +94,7 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
       </header>
 
       <RuleLists rules={rules} clients={enabled} allClients={clients} />
+      <ApplicationRoutes rules={rules} clients={enabled} allClients={clients} />
 
       <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -293,6 +296,186 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
       </div>
 
       {route ? <FlowResult route={route} /> : null}
+    </section>
+  );
+}
+
+function ApplicationRoutes({
+  rules,
+  clients,
+  allClients,
+}: {
+  rules: DirectRulesDocument;
+  clients: ClientInstance[];
+  allClients: ClientInstance[];
+}) {
+  const { t } = useTranslation();
+  const { actionPending, setApplicationRoute, removeApplicationRoute } =
+    useAppStore();
+  const [scan, setScan] = useState<RunningApplications | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [scanFailed, setScanFailed] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      setScan(await desktop.listRunningApplications());
+      setScanFailed(false);
+    } catch {
+      setScanFailed(true);
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  if (scan?.supported === false) return null;
+
+  const running = scan?.applications ?? [];
+  const known = new Map(
+    running.map((app) => [app.process_name.toLowerCase(), app]),
+  );
+  const applications = [
+    ...running,
+    ...rules.applications
+      .filter((route) => !known.has(route.process_name.toLowerCase()))
+      .map<RunningApplication>((route) => ({
+        process_name: route.process_name,
+        instances: 0,
+      })),
+  ]
+    .filter((application) =>
+      application.process_name
+        .toLowerCase()
+        .includes(search.trim().toLowerCase()),
+    )
+    .sort((left, right) => left.process_name.localeCompare(right.process_name));
+  const visibleApplications = applications.slice(0, 100);
+
+  return (
+    <section
+      aria-labelledby="application-routes-title"
+      data-testid="application-routes"
+      className="rounded-2xl border border-ink/10 bg-surface p-3.5"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 id="application-routes-title" className="font-semibold">
+            {t("applicationRoutes")}
+          </h2>
+          <p className="mt-1 text-sm text-muted">
+            {t("applicationRoutesHelp")}
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={refreshing || actionPending}
+          onClick={() => void refresh()}
+          className="inline-flex items-center gap-2 rounded-lg border border-ink/15 px-3 py-1.5 text-xs font-semibold disabled:opacity-50"
+        >
+          <RefreshCw size={14} aria-hidden />
+          {refreshing ? t("scanningApplications") : t("refreshApplications")}
+        </button>
+      </div>
+
+      <input
+        aria-label={t("searchApplications")}
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+        placeholder={t("searchApplications")}
+        className="mt-3 w-full rounded-lg border-ink/15 bg-canvas"
+      />
+
+      {scanFailed ? (
+        <p className="mt-3 text-sm text-muted">
+          {t("applicationsUnavailable")}
+        </p>
+      ) : scan === null ? (
+        <p className="mt-3 text-sm text-muted">{t("scanningApplications")}</p>
+      ) : visibleApplications.length === 0 ? (
+        <p className="mt-3 text-sm text-muted">{t("noApplicationsFound")}</p>
+      ) : (
+        <ul className="mt-3 flex flex-col gap-2">
+          {visibleApplications.map((application) => {
+            const saved = rules.applications.find(
+              (route) =>
+                route.process_name.toLowerCase() ===
+                application.process_name.toLowerCase(),
+            );
+            const selected = saved ? outboundKey(saved.outbound) : "default";
+            const savedClientId =
+              saved?.outbound.kind === "client"
+                ? saved.outbound.client_id
+                : null;
+            const disabledClientName =
+              savedClientId !== null &&
+              !allClients.some(
+                (client) => client.id === savedClientId && client.enabled,
+              )
+                ? outboundLabel(savedClientId, allClients)
+                : null;
+            return (
+              <li
+                key={application.process_name.toLowerCase()}
+                className="flex flex-wrap items-center gap-2 rounded-xl border border-ink/10 bg-canvas px-3 py-2"
+              >
+                <span className="min-w-0 flex-1 break-all font-mono text-sm font-medium">
+                  {application.process_name}
+                </span>
+                <span className="text-xs text-muted">
+                  {application.instances > 0
+                    ? t("applicationInstances", {
+                        count: application.instances,
+                      })
+                    : t("applicationNotRunning")}
+                </span>
+                {disabledClientName ? (
+                  <span className="text-xs font-semibold text-muted">
+                    {disabledClientName} ({t("disabled")})
+                  </span>
+                ) : (
+                  <select
+                    aria-label={t("applicationRouteFor", {
+                      name: application.process_name,
+                    })}
+                    value={selected}
+                    disabled={actionPending}
+                    onChange={(event) => {
+                      const next = event.target.value;
+                      const action =
+                        next === "default"
+                          ? removeApplicationRoute(application.process_name)
+                          : setApplicationRoute(application.process_name, next);
+                      void action.catch(() => undefined);
+                    }}
+                    className="max-w-[390px] rounded-lg border border-ink/15 bg-surface px-2 py-1 text-xs font-semibold"
+                  >
+                    <option value="default">{t("defaultBiFlowRoute")}</option>
+                    <option value="direct">{t("direct")}</option>
+                    {clients.map((client) => (
+                      <option key={client.id} value={client.id}>
+                        {outboundLabel(
+                          { kind: "client", client_id: client.id },
+                          clients,
+                        )}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {applications.length > visibleApplications.length ? (
+        <p className="mt-2 text-xs text-muted">
+          {t("applicationResultsLimit", { count: visibleApplications.length })}
+        </p>
+      ) : null}
     </section>
   );
 }

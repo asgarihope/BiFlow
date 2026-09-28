@@ -66,7 +66,7 @@ const boot = {
     updated_at: "now",
   },
   settings: { revision: 0 },
-  direct_rules: { revision: 1, pins: [], lists: [] },
+  direct_rules: { revision: 1, pins: [], lists: [], applications: [] },
   cloud_rules: {
     domain_count: 10,
     ip_count: 4,
@@ -486,7 +486,7 @@ describe("app store", () => {
 
   it("rethrows addRule failures after recording the store error", async () => {
     useAppStore.setState({
-      rules: { revision: 1, pins: [], lists: [] },
+      rules: { revision: 1, pins: [], lists: [], applications: [] },
       error: null,
     });
     vi.mocked(desktop.addRule).mockRejectedValue(new Error("rules changed"));
@@ -501,9 +501,10 @@ describe("app store", () => {
       revision: 2,
       pins: [],
       lists: [],
+      applications: [],
     });
     useAppStore.setState({
-      rules: { revision: 1, pins: [], lists: [] },
+      rules: { revision: 1, pins: [], lists: [], applications: [] },
       error: null,
     });
     await useAppStore.getState().addRule("https://console.kavenegar.com/");
@@ -616,7 +617,7 @@ describe("app store", () => {
     );
     useAppStore.setState({
       settings,
-      rules: { revision: 1, pins: [], lists: [] },
+      rules: { revision: 1, pins: [], lists: [], applications: [] },
     });
 
     await expect(

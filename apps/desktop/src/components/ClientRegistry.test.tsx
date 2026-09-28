@@ -44,7 +44,7 @@ beforeEach(() => {
       ...baseSettings(),
       clients: [...baseSettings().clients, openvpn, windscribe],
     },
-    rules: { revision: 0, pins: [], lists: [] },
+    rules: { revision: 0, pins: [], lists: [], applications: [] },
     snapshot: baseSnapshot(),
     actionPending: false,
     boot: { platform: "linux" } as BootstrapResult,

@@ -105,6 +105,8 @@ struct TunConfig {
     auto_redirect: bool,
     auto_detect_interface: bool,
     strict_route: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    route_exclude_address: Vec<String>,
     dns_hijack: Vec<String>,
 }
 
@@ -232,6 +234,7 @@ pub fn generate_config_with_handles(
     let routing = routing_handles(app, &live);
     let match_target = match_group(app, &live);
     let mut rules = process_bypass_rules(app, platform);
+    rules.extend(application_route_rules(app, custom_rules, &live, &routing)?);
     rules.extend([
         "DOMAIN-SUFFIX,localhost,DIRECT".into(),
         "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve".into(),
@@ -316,6 +319,11 @@ pub fn generate_config_with_handles(
             auto_redirect: false,
             auto_detect_interface: true,
             strict_route: platform == Platform::Windows,
+            route_exclude_address: if platform == Platform::Windows {
+                vec!["127.0.0.0/8".into(), "::1/128".into()]
+            } else {
+                Vec::new()
+            },
             dns_hijack: vec!["any:53".into(), "tcp://any:53".into()],
         },
         dns: DnsConfig {
@@ -582,6 +590,44 @@ fn process_bypass_rules(app: &AppConfig, platform: Platform) -> Vec<String> {
         }
     }
     rules
+}
+
+fn application_route_rules(
+    app: &AppConfig,
+    custom_rules: &RoutePinsDocument,
+    live: &[EgressHandle],
+    routing: &[EgressHandle],
+) -> Result<Vec<String>, MihomoError> {
+    custom_rules
+        .applications
+        .iter()
+        .filter_map(|route| {
+            if !valid_process_name(&route.process_name) {
+                return Some(Err(MihomoError::InvalidConfig(
+                    "application route contains an invalid executable name".into(),
+                )));
+            }
+            let target = match route.outbound {
+                iran_split_rules::Outbound::Direct => Some("DIRECT".to_owned()),
+                iran_split_rules::Outbound::Client { client_id } => app
+                    .client(client_id)
+                    .filter(|client| client.enabled)
+                    .map(|client| client_rule_target(app, client, live, routing)),
+            }?;
+            Some(Ok(format!(
+                "PROCESS-NAME,{},{}",
+                route.process_name, target
+            )))
+        })
+        .collect()
+}
+
+fn valid_process_name(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= 255
+        && !value
+            .chars()
+            .any(|character| character.is_control() || matches!(character, ',' | '/' | '\\' | '*'))
 }
 
 fn providers(app: &AppConfig) -> BTreeMap<String, RuleProvider> {
@@ -1411,6 +1457,7 @@ mod tests {
                 refreshed_at: None,
             }],
             lists: vec![],
+            applications: vec![],
         };
         let generated = generate_config(&app, Platform::Linux, &paths(), &custom).expect("config");
         let match_line = match_needle(&app);
@@ -1499,6 +1546,9 @@ mod tests {
         )
         .expect("config");
         assert!(generated.yaml.contains("strict-route: true"));
+        assert!(generated.yaml.contains("route-exclude-address:"));
+        assert!(generated.yaml.contains("- 127.0.0.0/8"));
+        assert!(generated.yaml.contains("- ::1/128"));
         assert!(generated.yaml.contains("find-process-mode: always"));
         assert!(generated.yaml.contains("auto-redirect: false"));
         assert!(generated.yaml.contains("ipv6: false"));
@@ -1508,6 +1558,61 @@ mod tests {
             .yaml
             .contains("PROCESS-NAME-WILDCARD,*Hiddify*,DIRECT"));
         assert!(generated.yaml.contains("PROCESS-NAME,BiFlow.exe,DIRECT"));
+        assert!(!generated.yaml.contains("PROCESS-NAME,kubectl.exe,DIRECT"));
+    }
+
+    #[test]
+    fn linux_config_does_not_add_windows_loopback_route_exclusions() {
+        let generated = generate_config(
+            &AppConfig::default(),
+            Platform::Linux,
+            &paths(),
+            &RoutePinsDocument::default(),
+        )
+        .expect("config");
+        assert!(!generated.yaml.contains("route-exclude-address"));
+        assert!(!generated.yaml.contains("kubectl.exe"));
+    }
+
+    #[test]
+    fn application_routes_are_emitted_before_destination_rules() {
+        let mut routes = RoutePinsDocument::default();
+        routes
+            .applications
+            .push(iran_split_rules::ApplicationRoute {
+                process_name: "kubectl.exe".into(),
+                outbound: iran_split_rules::Outbound::Direct,
+            });
+        let generated =
+            generate_config(&AppConfig::default(), Platform::Windows, &paths(), &routes)
+                .expect("config");
+        let app_route = generated
+            .yaml
+            .find("PROCESS-NAME,kubectl.exe,DIRECT")
+            .expect("application rule");
+        let local_rule = generated
+            .yaml
+            .find("DOMAIN-SUFFIX,localhost,DIRECT")
+            .expect("local rule");
+        assert!(app_route < local_rule);
+    }
+
+    #[test]
+    fn application_routes_can_select_an_enabled_client() {
+        let app = AppConfig::default();
+        let client = app.clients.first().expect("default client");
+        let mut routes = RoutePinsDocument::default();
+        routes
+            .applications
+            .push(iran_split_rules::ApplicationRoute {
+                process_name: "kubectl.exe".into(),
+                outbound: iran_split_rules::Outbound::client(client.id),
+            });
+        let generated =
+            generate_config(&app, Platform::Windows, &paths(), &routes).expect("config");
+        assert!(generated
+            .yaml
+            .contains(&format!("PROCESS-NAME,kubectl.exe,{}", client.group_name())));
     }
 
     #[test]
@@ -1698,6 +1803,7 @@ mod tests {
                 ),
             ],
             lists: vec![],
+            applications: vec![],
         };
         let generated = generate_config_with_handles(
             &app,
@@ -1757,6 +1863,7 @@ mod tests {
                 })
                 .collect(),
             lists: vec![],
+            applications: vec![],
         };
         let generated =
             generate_config_with_handles(&app, Platform::Linux, &paths(), &pinned, &handles)
@@ -1799,6 +1906,7 @@ mod tests {
                 },
             ],
             lists: vec![],
+            applications: vec![],
         };
         let generated = generate_config(&app, Platform::Linux, &paths(), &pinned).expect("config");
         let group = app.clients[0].group_name();
@@ -1844,6 +1952,7 @@ mod tests {
                 refreshed_at: None,
             }],
             lists: vec![],
+            applications: vec![],
         };
         let generated =
             generate_config_with_handles(&app, Platform::Linux, &paths(), &pinned, &[dead.clone()])
@@ -1933,6 +2042,7 @@ mod tests {
             revision: 1,
             pins: vec![pin("google.com", Outbound::client(windscribe_id))],
             lists: vec![],
+            applications: vec![],
         };
         let generated = generate_config_with_handles(
             &app,
@@ -1988,6 +2098,7 @@ mod tests {
                 },
             ],
             lists: vec![],
+            applications: vec![],
         };
         let generated = generate_config_with_handles(
             &app,

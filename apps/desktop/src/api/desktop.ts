@@ -26,6 +26,7 @@ import type {
   UpdateStatus,
   ValidationIssue,
   ActiveConnection,
+  RunningApplications,
 } from "./models";
 
 const native =
@@ -106,6 +107,32 @@ export const desktop = {
   },
   listRules(): Promise<DirectRulesDocument> {
     return native ? invoke("list_direct_rules") : mockApi.listRules();
+  },
+  listRunningApplications(): Promise<RunningApplications> {
+    return native
+      ? invoke("list_running_applications")
+      : mockApi.listRunningApplications();
+  },
+  setApplicationRoute(
+    processName: string,
+    outbound: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("set_application_route", {
+          processName,
+          outbound,
+          expectedRevision,
+        })
+      : mockApi.setApplicationRoute(processName, outbound, expectedRevision);
+  },
+  removeApplicationRoute(
+    processName: string,
+    expectedRevision: number,
+  ): Promise<DirectRulesDocument> {
+    return native
+      ? invoke("remove_application_route", { processName, expectedRevision })
+      : mockApi.removeApplicationRoute(processName, expectedRevision);
   },
   addRule(
     input: string,

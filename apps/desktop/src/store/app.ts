@@ -77,6 +77,8 @@ interface AppStore {
   saveSettings: (draft: AppConfig) => Promise<boolean>;
   addRule: (input: string) => Promise<void>;
   pinRoute: (input: string, outbound: string) => Promise<void>;
+  setApplicationRoute: (processName: string, outbound: string) => Promise<void>;
+  removeApplicationRoute: (processName: string) => Promise<void>;
   createList: (name: string, outbound: string) => Promise<void>;
   renameList: (id: string, name: string) => Promise<void>;
   deleteList: (id: string) => Promise<void>;
@@ -338,6 +340,37 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ actionPending: true, error: null });
     try {
       const next = await desktop.pinRoute(host, outbound, rules.revision);
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  setApplicationRoute: async (processName, outbound) => {
+    const rules = get().rules;
+    if (!rules) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.setApplicationRoute(
+        processName,
+        outbound,
+        rules.revision,
+      );
+      set({ rules: next, actionPending: false });
+    } catch (error) {
+      set({ actionPending: false, error: message(error) });
+      throw error;
+    }
+  },
+  removeApplicationRoute: async (processName) => {
+    const rules = get().rules;
+    if (!rules) return;
+    set({ actionPending: true, error: null });
+    try {
+      const next = await desktop.removeApplicationRoute(
+        processName,
+        rules.revision,
+      );
       set({ rules: next, actionPending: false });
     } catch (error) {
       set({ actionPending: false, error: message(error) });

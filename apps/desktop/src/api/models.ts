@@ -222,6 +222,21 @@ export interface RuleListMeta {
   outbound: Outbound;
 }
 
+export interface ApplicationRoute {
+  process_name: string;
+  outbound: Outbound;
+}
+
+export interface RunningApplication {
+  process_name: string;
+  instances: number;
+}
+
+export interface RunningApplications {
+  supported: boolean;
+  applications: RunningApplication[];
+}
+
 export interface ListCheckEntry {
   target: string;
   status: "ok" | "slow" | "fail" | "skipped";
@@ -233,6 +248,7 @@ export interface DirectRulesDocument {
   revision: number;
   pins: PinnedRoute[];
   lists: RuleListMeta[];
+  applications: ApplicationRoute[];
 }
 
 export interface RouteTestResult {

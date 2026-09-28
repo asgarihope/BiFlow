@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { createServer } from "node:http";
 
 async function openFresh(page: Page, mode: "basic" | "advanced" = "advanced") {
   await page.goto("/");
@@ -45,6 +46,39 @@ async function walkAdvancedPages(page: Page, labels: string[]) {
 }
 
 test.describe("primary BiFlow flows", () => {
+  test("opens localhost in the browser on an operating-system-assigned port", async ({
+    page,
+  }) => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<main><h1>BiFlow localhost probe</h1></main>");
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "::", resolve);
+    });
+
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+      throw new Error("localhost probe did not receive a TCP port");
+    }
+
+    try {
+      await page.goto(`http://localhost:${address.port}`);
+      await expect(
+        page.getByRole("heading", { name: "BiFlow localhost probe" }),
+      ).toBeVisible();
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
   test("installs missing apps, connects, and splits traffic", async ({
     page,
   }) => {
@@ -244,6 +278,22 @@ test.describe("primary BiFlow flows", () => {
     await page.getByRole("button", { name: "Add rule" }).click();
     await expect(
       page.getByRole("cell", { name: "aparat.com", exact: true }),
+    ).toBeVisible();
+  });
+
+  test("routes a running application through a selected client", async ({
+    page,
+  }) => {
+    await openFresh(page);
+    await page.getByRole("button", { name: "List Management" }).click();
+    const route = page.getByRole("combobox", {
+      name: "Route for kubectl.exe",
+    });
+    await expect(route).toBeVisible();
+    await route.selectOption({ label: "Hiddify" });
+    await expect(route).toHaveValue("11111111-1111-1111-1111-111111111111");
+    await expect(
+      page.getByText("1 running", { exact: true }).first(),
     ).toBeVisible();
   });
 

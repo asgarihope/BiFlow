@@ -31,6 +31,7 @@ import type {
   ActiveConnection,
   UpdateStatus,
   ValidationIssue,
+  RunningApplications,
 } from "./models";
 import { validateDirectDns } from "../lib/directDns";
 import { sanitizeDefaultRoute } from "../lib/clients";
@@ -187,8 +188,18 @@ function initialDirectRules(): DirectRulesDocument {
         outbound: { kind: "direct" },
       },
     ],
+    applications: [],
   };
 }
+
+const runningApplications: RunningApplications = {
+  supported: true,
+  applications: [
+    { process_name: "Code.exe", instances: 2 },
+    { process_name: "kubectl.exe", instances: 1 },
+    { process_name: "powershell.exe", instances: 1 },
+  ],
+};
 
 function mockUuid(): string {
   return "xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx".replaceAll(/x/g, () =>
@@ -1107,6 +1118,46 @@ export const mockApi = {
   async listRules() {
     return structuredClone(directRules);
   },
+  async listRunningApplications() {
+    return structuredClone(runningApplications);
+  },
+  async setApplicationRoute(
+    processName: string,
+    outbound: string,
+    expectedRevision: number,
+  ) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
+    const route = outboundFromKey(outbound);
+    const existing = directRules.applications.find(
+      (item) => item.process_name.toLowerCase() === processName.toLowerCase(),
+    );
+    directRules = {
+      ...directRules,
+      revision: directRules.revision + 1,
+      applications: existing
+        ? directRules.applications.map((item) =>
+            item === existing ? { ...item, outbound: route } : item,
+          )
+        : [
+            ...directRules.applications,
+            { process_name: processName, outbound: route },
+          ],
+    };
+    return structuredClone(directRules);
+  },
+  async removeApplicationRoute(processName: string, expectedRevision: number) {
+    if (expectedRevision !== directRules.revision)
+      throw new Error("Rules changed in another window");
+    directRules = {
+      ...directRules,
+      revision: directRules.revision + 1,
+      applications: directRules.applications.filter(
+        (item) => item.process_name.toLowerCase() !== processName.toLowerCase(),
+      ),
+    };
+    return structuredClone(directRules);
+  },
   async addRule(input: string, expectedRevision: number) {
     return mockApi.pinRoute(input, "direct", expectedRevision);
   },
@@ -1150,6 +1201,7 @@ export const mockApi = {
     if (expectedRevision !== directRules.revision)
       throw new Error("Rules changed in another window");
     directRules = {
+      ...directRules,
       revision: directRules.revision + 1,
       pins: directRules.pins.filter(
         (pin) =>
@@ -1159,6 +1211,12 @@ export const mockApi = {
         (list) =>
           !(list.outbound.kind === "client" && list.outbound.client_id === id),
       ),
+      applications: directRules.applications.filter(
+        (route) =>
+          !(
+            route.outbound.kind === "client" && route.outbound.client_id === id
+          ),
+      ),
     };
     return structuredClone(directRules);
   },
@@ -1167,6 +1225,7 @@ export const mockApi = {
       throw new Error("Rules changed in another window");
     const outbound = outboundFromKey(to);
     directRules = {
+      ...directRules,
       revision: directRules.revision + 1,
       pins: directRules.pins.map((pin) =>
         pin.outbound.kind === "client" && pin.outbound.client_id === from
@@ -1177,6 +1236,11 @@ export const mockApi = {
         list.outbound.kind === "client" && list.outbound.client_id === from
           ? { ...list, outbound }
           : list,
+      ),
+      applications: directRules.applications.map((route) =>
+        route.outbound.kind === "client" && route.outbound.client_id === from
+          ? { ...route, outbound }
+          : route,
       ),
     };
     return structuredClone(directRules);
@@ -1230,6 +1294,7 @@ export const mockApi = {
     if (expectedRevision !== directRules.revision)
       throw new Error("Rules changed in another window");
     directRules = {
+      ...directRules,
       revision: directRules.revision + 1,
       pins: directRules.pins.filter((pin) => pin.list_id !== listId),
       lists: directRules.lists.filter((list) => list.id !== listId),
@@ -1258,6 +1323,7 @@ export const mockApi = {
       );
     }
     directRules = {
+      ...directRules,
       revision: directRules.revision + 1,
       pins: directRules.pins.map((pin) =>
         pin.list_id === listId ? { ...pin, outbound: route } : pin,

@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const viewports = [
   { name: "mobile", width: 390, height: 844 },
@@ -12,11 +12,11 @@ function resolveScreenshotDir(): string {
   const preferred = "/opt/cursor/artifacts/screenshots";
   try {
     mkdirSync(preferred, { recursive: true });
-    return preferred;
+    return resolve(preferred);
   } catch {
     const fallback = join(process.cwd(), "test-results/responsive-screenshots");
     mkdirSync(fallback, { recursive: true });
-    return fallback;
+    return resolve(fallback);
   }
 }
 

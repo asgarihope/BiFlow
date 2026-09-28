@@ -14,6 +14,7 @@ mod version;
 mod window_state;
 
 use chrono::Utc;
+use iran_split_clients::{process_bypass_union, DriverPlatform};
 use iran_split_config::{
     AppConfig, ClientId, ConfigStore, DefaultRoute, PresetId, ValidationIssue,
 };
@@ -45,6 +46,11 @@ use tauri_plugin_updater::UpdaterExt;
 use tokio::io::AsyncWriteExt;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::process::Command;
 
 #[cfg(target_os = "linux")]
 use iran_split_platform_linux::{LinuxBackend as NativeBackend, LinuxPaths};
@@ -1332,6 +1338,223 @@ async fn list_direct_rules(app: AppHandle) -> Result<DirectRulesDocument, String
     diagnostics::trace_action("rules", "tauri_command", "list_direct_rules", async move {
         Ok(services(&app)?.rules.list().await)
     })
+    .await
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunningApplication {
+    process_name: String,
+    instances: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RunningApplications {
+    supported: bool,
+    applications: Vec<RunningApplication>,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn parse_tasklist(stdout: &str) -> Vec<RunningApplication> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for line in stdout.lines() {
+        let Some(process_name) = line.split(',').next() else {
+            continue;
+        };
+        let process_name = process_name.trim().trim_matches('"');
+        let normalized = process_name.to_ascii_lowercase();
+        if !Path::new(process_name)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+            || matches!(normalized.as_str(), "biflow.exe" | "mihomo.exe")
+        {
+            continue;
+        }
+        *counts.entry(process_name.to_owned()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(process_name, instances)| RunningApplication {
+            process_name,
+            instances,
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn list_running_applications(app: AppHandle) -> Result<RunningApplications, String> {
+    diagnostics::trace_action(
+        "rules",
+        "tauri_command",
+        "list_running_applications",
+        async {
+            #[cfg(target_os = "windows")]
+            {
+                let output = match tokio::task::spawn_blocking(|| {
+                    Command::new("tasklist")
+                        .creation_flags(0x0800_0000)
+                        .args(["/FO", "CSV", "/NH"])
+                        .output()
+                })
+                .await
+                {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(_cause)) => {
+                        warn!(
+                            event = "rules.application_scan_failed",
+                            section = "rules",
+                            initiator = "tauri_command",
+                            cause = "tasklist could not be started",
+                            trace_route = "tauri_command->list_running_applications->tasklist",
+                            "could not list running applications"
+                        );
+                        return Err("could not list running applications".into());
+                    }
+                    Err(_cause) => {
+                        warn!(
+                            event = "rules.application_scan_failed",
+                            section = "rules",
+                            initiator = "tauri_command",
+                            cause = "tasklist worker failed",
+                            trace_route = "tauri_command->list_running_applications->tasklist",
+                            "could not list running applications"
+                        );
+                        return Err("could not list running applications".into());
+                    }
+                };
+                if !output.status.success() {
+                    warn!(
+                        event = "rules.application_scan_failed",
+                        section = "rules",
+                        initiator = "tauri_command",
+                        cause = "tasklist returned a non-zero exit status",
+                        trace_route = "tauri_command->list_running_applications->tasklist",
+                        "could not list running applications"
+                    );
+                    return Err("could not list running applications".into());
+                }
+                let config = services(&app)?
+                    .config_store
+                    .load()
+                    .map_err(|cause| cause.to_string())?;
+                let bypassed = process_bypass_union(&config.clients, DriverPlatform::Windows)
+                    .into_iter()
+                    .map(|process| (process.name.to_ascii_lowercase(), process.wildcard))
+                    .collect::<Vec<_>>();
+                let applications = parse_tasklist(&String::from_utf8_lossy(&output.stdout))
+                    .into_iter()
+                    .filter(|application| {
+                        let process_name = application.process_name.to_ascii_lowercase();
+                        !bypassed.iter().any(|(name, wildcard)| {
+                            if *wildcard {
+                                process_name.contains(name.trim_matches('*'))
+                            } else {
+                                process_name == *name
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                info!(
+                    event = "rules.application_scan_completed",
+                    section = "rules",
+                    initiator = "tauri_command",
+                    cause = "user requested application list",
+                    trace_route = "tauri_command->list_running_applications->tasklist",
+                    application_count = applications.len(),
+                    "listed running applications without recording their names"
+                );
+                Ok(RunningApplications {
+                    supported: true,
+                    applications,
+                })
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                drop(app);
+                Ok(RunningApplications {
+                    supported: false,
+                    applications: Vec::new(),
+                })
+            }
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn set_application_route(
+    process_name: String,
+    outbound: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action(
+        "rules",
+        "tauri_command",
+        "set_application_route",
+        async move {
+            let services = services(&app)?;
+            let outbound = parse_outbound(&outbound)?;
+            if let Some(client_id) = outbound.client_id() {
+                let available = services
+                    .config_store
+                    .load()
+                    .map_err(|cause| cause.to_string())?
+                    .client(client_id)
+                    .is_some_and(|client| client.enabled);
+                if !available {
+                    return Err("selected application outbound is unavailable".into());
+                }
+            }
+            info!(
+                event = "rules.application_route_set",
+                section = "rules",
+                initiator = "tauri_command",
+                cause = "operator selected an application route",
+                trace_route = "tauri_command->rule_manager->mihomo_reload",
+                expected_revision,
+                outbound = ?outbound,
+                "saving an application route without recording its executable name"
+            );
+            let previous = services.rules.list().await;
+            let next = services
+                .rules
+                .set_application_route(&process_name, outbound, expected_revision)
+                .await;
+            persist_and_apply_rules(&app, previous, next, None).await
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+async fn remove_application_route(
+    process_name: String,
+    expected_revision: u64,
+    app: AppHandle,
+) -> Result<DirectRulesDocument, String> {
+    diagnostics::trace_action(
+        "rules",
+        "tauri_command",
+        "remove_application_route",
+        async move {
+            let services = services(&app)?;
+            info!(
+                event = "rules.application_route_removed",
+                section = "rules",
+                initiator = "tauri_command",
+                cause = "operator removed an application route",
+                trace_route = "tauri_command->rule_manager->mihomo_reload",
+                expected_revision,
+                "removing an application route without recording its executable name"
+            );
+            let previous = services.rules.list().await;
+            let next = services
+                .rules
+                .remove_application_route(&process_name, expected_revision)
+                .await;
+            persist_and_apply_rules(&app, previous, next, None).await
+        },
+    )
     .await
 }
 
@@ -3684,6 +3907,9 @@ pub fn run() {
             discard_client_pins,
             reassign_client_pins,
             list_direct_rules,
+            list_running_applications,
+            set_application_route,
+            remove_application_route,
             add_direct_rule,
             pin_route,
             remove_direct_rule,
@@ -3731,10 +3957,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_update_channels, packaged_rule_snapshot_dir, single_instance_dbus_id,
+        merge_update_channels, packaged_rule_snapshot_dir, parse_tasklist, single_instance_dbus_id,
         update_check_backoff, update_download_percent, UpdateProgress, UpdateStatus,
         BUNDLE_IDENTIFIER, UPDATE_CHECK_ATTEMPTS, UPDATE_CHECK_FIRST_BACKOFF,
     };
+
+    #[test]
+    fn tasklist_processes_are_deduplicated_and_internal_apps_are_hidden() {
+        let applications = parse_tasklist(
+            "\"kubectl.exe\",\"123\",\"Console\",\"1\",\"10 K\"\n\
+             \"kubectl.exe\",\"456\",\"Console\",\"1\",\"10 K\"\n\
+             \"BiFlow.exe\",\"789\",\"Console\",\"1\",\"10 K\"\n\
+             \"System\",\"4\",\"Services\",\"0\",\"8 K\"",
+        );
+        assert_eq!(applications.len(), 1);
+        assert_eq!(applications[0].process_name, "kubectl.exe");
+        assert_eq!(applications[0].instances, 2);
+    }
     use std::{fs, time::Duration};
 
     #[test]

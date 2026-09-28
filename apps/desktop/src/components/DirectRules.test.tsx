@@ -8,6 +8,10 @@ import { DirectRules } from "./DirectRules";
 
 vi.mock("../api/desktop", () => ({
   desktop: {
+    listRunningApplications: vi.fn().mockResolvedValue({
+      supported: true,
+      applications: [{ process_name: "kubectl.exe", instances: 1 }],
+    }),
     testRoute: vi.fn().mockResolvedValue({
       target: "example.ir",
       outbound: "direct",
@@ -43,6 +47,7 @@ const rules: DirectRulesDocument = {
     },
   ],
   lists: [],
+  applications: [],
 };
 
 describe("DirectRules", () => {
@@ -111,5 +116,21 @@ describe("DirectRules", () => {
     await userEvent.click(screen.getByRole("button", { name: /^Add rule$/ }));
     expect(addRule).toHaveBeenCalledWith("aparat.com");
     expect(screen.getByLabelText("Domain or IP")).toHaveValue("aparat.com");
+  });
+
+  it("routes a detected application and keeps its choice in the saved list", async () => {
+    const setApplicationRoute = vi.fn().mockResolvedValue(undefined);
+    useAppStore.setState({
+      settings: baseSettings(),
+      rules,
+      actionPending: false,
+      setApplicationRoute,
+    });
+    render(<DirectRules rules={rules} />);
+    const route = await screen.findByRole("combobox", {
+      name: "Route for kubectl.exe",
+    });
+    await userEvent.selectOptions(route, "direct");
+    expect(setApplicationRoute).toHaveBeenCalledWith("kubectl.exe", "direct");
   });
 });

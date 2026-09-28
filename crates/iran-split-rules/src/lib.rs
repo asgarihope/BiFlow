@@ -142,6 +142,14 @@ pub struct RuleListMeta {
     pub outbound: Outbound,
 }
 
+/// A process image name pinned to one outbound. The name is the executable
+/// basename used by Mihomo's `PROCESS-NAME` matcher (for example `kubectl.exe`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplicationRoute {
+    pub process_name: String,
+    pub outbound: Outbound,
+}
+
 /// User route pins. Schema 3 is a single list; older `rules` / `vpn_rules`
 /// documents are migrated on load when a legacy client id is supplied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -151,6 +159,8 @@ pub struct RoutePinsDocument {
     pub pins: Vec<PinnedRoute>,
     #[serde(default)]
     pub lists: Vec<RuleListMeta>,
+    #[serde(default)]
+    pub applications: Vec<ApplicationRoute>,
 }
 
 /// Compatibility name used by older call sites and the desktop IPC.
@@ -200,10 +210,14 @@ impl RoutePinsDocument {
 
     pub fn delete_client_pins(&mut self, id: ClientId) -> usize {
         let before = self.pins.len();
+        let applications_before = self.applications.len();
         self.pins.retain(|pin| pin.outbound != Outbound::client(id));
+        self.applications
+            .retain(|route| route.outbound != Outbound::client(id));
         self.lists
             .retain(|list| list.outbound != Outbound::client(id));
         before.saturating_sub(self.pins.len())
+            + applications_before.saturating_sub(self.applications.len())
     }
 
     pub fn move_client_pins(&mut self, from: ClientId, to: Outbound) -> usize {
@@ -211,6 +225,12 @@ impl RoutePinsDocument {
         for pin in &mut self.pins {
             if pin.outbound == Outbound::client(from) {
                 pin.outbound = to;
+                moved += 1;
+            }
+        }
+        for route in &mut self.applications {
+            if route.outbound == Outbound::client(from) {
+                route.outbound = to;
                 moved += 1;
             }
         }
@@ -451,6 +471,70 @@ impl RuleManager {
 
     pub async fn list(&self) -> DirectRulesDocument {
         self.document.lock().await.clone()
+    }
+
+    /// Pins one running executable to an outbound and persists it immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] when the name is invalid, the revision is stale,
+    /// or the updated document cannot be published atomically.
+    pub async fn set_application_route(
+        &self,
+        process_name: &str,
+        outbound: Outbound,
+        expected_revision: u64,
+    ) -> Result<DirectRulesDocument, RuleError> {
+        let process_name = normalize_process_name(process_name)?;
+        let mut current = self.document.lock().await;
+        ensure_revision(&current, expected_revision)?;
+        let mut document = current.clone();
+        if let Some(route) = document
+            .applications
+            .iter_mut()
+            .find(|route| route.process_name.eq_ignore_ascii_case(&process_name))
+        {
+            if route.outbound == outbound {
+                return Ok(document);
+            }
+            route.outbound = outbound;
+        } else {
+            document.applications.push(ApplicationRoute {
+                process_name,
+                outbound,
+            });
+        }
+        document
+            .applications
+            .sort_by_key(|route| route.process_name.to_lowercase());
+        document.revision = document.revision.saturating_add(1);
+        self.publish_and_replace(&mut current, document)
+    }
+
+    /// Removes an executable route and persists the new document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuleError`] when the name is invalid, the revision is stale,
+    /// or the updated document cannot be published atomically.
+    pub async fn remove_application_route(
+        &self,
+        process_name: &str,
+        expected_revision: u64,
+    ) -> Result<DirectRulesDocument, RuleError> {
+        let process_name = normalize_process_name(process_name)?;
+        let mut current = self.document.lock().await;
+        ensure_revision(&current, expected_revision)?;
+        let mut document = current.clone();
+        let before = document.applications.len();
+        document
+            .applications
+            .retain(|route| !route.process_name.eq_ignore_ascii_case(&process_name));
+        if before == document.applications.len() {
+            return Ok(document);
+        }
+        document.revision = document.revision.saturating_add(1);
+        self.publish_and_replace(&mut current, document)
     }
 
     /// Adds an exact domain or IP rule to the DIRECT list.
@@ -822,6 +906,20 @@ fn validate_list_name(name: &str) -> Result<String, RuleError> {
     Ok(name.to_owned())
 }
 
+fn normalize_process_name(name: &str) -> Result<String, RuleError> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.len() > 255
+        || name.contains([',', '/', '\\', '*'])
+        || name.chars().any(char::is_control)
+    {
+        return Err(RuleError::InvalidRule(
+            "application must be an executable name, not a path".into(),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
 fn canonicalize_document(mut document: RoutePinsDocument) -> RoutePinsDocument {
     let before = document.clone();
     document.pins = merge_canonical_pins(document.pins);
@@ -940,6 +1038,8 @@ struct RawPinsDocument {
     #[serde(default)]
     lists: Vec<RuleListMeta>,
     #[serde(default)]
+    applications: Vec<ApplicationRoute>,
+    #[serde(default)]
     rules: Vec<DirectRule>,
     #[serde(default)]
     vpn_rules: Vec<DirectRule>,
@@ -959,6 +1059,7 @@ fn decode_pins_document(
             revision: raw.revision,
             pins: raw.pins,
             lists: raw.lists,
+            applications: raw.applications,
         });
     }
     let mut pins = Vec::new();
@@ -979,6 +1080,7 @@ fn decode_pins_document(
         revision: raw.revision,
         pins,
         lists: raw.lists,
+        applications: raw.applications,
     })
 }
 
@@ -1303,6 +1405,20 @@ mod tests {
         assert!(normalize_domain("*.example.com").is_err());
     }
 
+    #[test]
+    fn application_process_names_cannot_inject_paths_or_mihomo_rules() {
+        assert_eq!(
+            normalize_process_name(" kubectl.exe ").expect("name"),
+            "kubectl.exe"
+        );
+        for unsafe_name in ["", "C:\\Apps\\kubectl.exe", "app,REJECT", "*.exe"] {
+            assert!(
+                normalize_process_name(unsafe_name).is_err(),
+                "{unsafe_name}"
+            );
+        }
+    }
+
     fn test_client() -> ClientId {
         ClientId::parse("11111111-1111-1111-1111-111111111111").expect("uuid")
     }
@@ -1337,6 +1453,35 @@ mod tests {
         assert!(directory.path().join("direct-rules.json.corrupt").exists());
         // The published replacement parses cleanly on the next load.
         RuleManager::load(&path, Arc::new(FixedResolver)).expect("reload");
+    }
+
+    #[tokio::test]
+    async fn application_route_is_persisted_updated_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("direct-rules.json");
+        let manager = RuleManager::load(&path, Arc::new(FixedResolver)).expect("manager");
+        let first = manager
+            .set_application_route("kubectl.exe", Outbound::Direct, 0)
+            .await
+            .expect("add app route");
+        assert_eq!(first.applications.len(), 1);
+        assert_eq!(first.applications[0].process_name, "kubectl.exe");
+        let loaded = RuleManager::load(&path, Arc::new(FixedResolver))
+            .expect("reloaded manager")
+            .list()
+            .await;
+        assert_eq!(loaded.applications, first.applications);
+        let updated = manager
+            .set_application_route("KUBECTL.EXE", test_outbound(), first.revision)
+            .await
+            .expect("update app route");
+        assert_eq!(updated.applications.len(), 1);
+        assert_eq!(updated.applications[0].outbound, test_outbound());
+        let removed = manager
+            .remove_application_route("kubectl.exe", updated.revision)
+            .await
+            .expect("remove app route");
+        assert!(removed.applications.is_empty());
     }
 
     #[tokio::test]
@@ -1607,6 +1752,7 @@ mod tests {
                 refreshed_at: None,
             }],
             lists: vec![],
+            applications: vec![],
         };
         let set = RuleSet::from_sources(
             &custom,
@@ -1699,6 +1845,7 @@ mod tests {
                 refreshed_at: None,
             }],
             lists: vec![],
+            applications: vec![],
         };
         let set =
             RuleSet::from_sources(&custom, [], cidrs, [], test_outbound(), &enabled_clients());
@@ -1805,6 +1952,7 @@ mod tests {
                 refreshed_at: None,
             }],
             lists: vec![],
+            applications: vec![],
         };
         fs::write(&path, serde_json::to_vec_pretty(&document).expect("json")).expect("write");
         let manager = RuleManager::load(path, Arc::new(FixedResolver)).expect("load");
@@ -1833,6 +1981,7 @@ mod tests {
                 refreshed_at: None,
             }],
             lists: vec![],
+            applications: vec![],
         };
         let set = iran_rule_set(&custom);
         for host in [
@@ -2087,6 +2236,7 @@ mod tests {
                 refreshed_at: None,
             }],
             lists: vec![],
+            applications: vec![],
         };
         let set = RuleSet::from_sources(&custom, [], [], [], test_outbound(), &enabled_clients());
         assert_eq!(
@@ -2108,6 +2258,7 @@ mod tests {
                 refreshed_at: None,
             }],
             lists: vec![],
+            applications: vec![],
         };
         let other = ClientId::parse("22222222-2222-2222-2222-222222222222").expect("uuid");
         assert_eq!(

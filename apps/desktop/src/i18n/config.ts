@@ -199,6 +199,20 @@ const resources = {
       listManagementTitle: "List Management",
       listManagementHelp:
         "Group domains and IPs into named lists and send each list through Direct or one of your clients.",
+      applicationRoutes: "Applications",
+      applicationRoutesHelp:
+        "Choose a running app and send it through Direct or any client. Saved routes apply immediately and stay after the app closes.",
+      refreshApplications: "Refresh apps",
+      scanningApplications: "Scanning…",
+      applicationsUnavailable: "Could not read the running application list.",
+      searchApplications: "Search running apps",
+      noApplicationsFound: "No running applications match this search.",
+      applicationInstances: "{{count}} running",
+      applicationNotRunning: "Not running",
+      defaultBiFlowRoute: "Default BiFlow route",
+      applicationRouteFor: "Route for {{name}}",
+      applicationResultsLimit:
+        "Showing first {{count}} apps. Search to find another.",
       newListName: "List name",
       newList: "New list",
       listOutbound: "Send through",
@@ -514,6 +528,20 @@ const resources = {
       listManagementTitle: "مدیریت لیست‌ها",
       listManagementHelp:
         "دامنه‌ها و آی‌پی‌ها را در لیست‌های نام‌دار بگذارید و هر لیست را از مسیر مستقیم یا یکی از کلاینت‌ها بفرستید.",
+      applicationRoutes: "برنامه‌ها",
+      applicationRoutesHelp:
+        "یک برنامهٔ در حال اجرا را انتخاب کنید و مسیر مستقیم یا یکی از کلاینت‌ها را برایش تعیین کنید. مسیر ذخیره می‌شود و همان لحظه اعمال می‌شود.",
+      refreshApplications: "به‌روزرسانی برنامه‌ها",
+      scanningApplications: "در حال بررسی…",
+      applicationsUnavailable: "فهرست برنامه‌های در حال اجرا خوانده نشد.",
+      searchApplications: "جست‌وجوی برنامه‌های در حال اجرا",
+      noApplicationsFound: "برنامه‌ای با این جست‌وجو پیدا نشد.",
+      applicationInstances: "{{count}} نمونهٔ در حال اجرا",
+      applicationNotRunning: "در حال اجرا نیست",
+      defaultBiFlowRoute: "مسیر پیش‌فرض BiFlow",
+      applicationRouteFor: "مسیر {{name}}",
+      applicationResultsLimit:
+        "فقط {{count}} برنامه نمایش داده شده؛ برای یافتن بقیه جست‌وجو کنید.",
       newListName: "نام لیست",
       newList: "لیست جدید",
       listOutbound: "ارسال از طریق",
