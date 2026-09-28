@@ -29,6 +29,10 @@ workflow signed AppImage and NSIS bundles, but not the Debian package.
   stack. A missing/invalid guard is not silently ignored, and a missing rules
   document leaves the guard in place so repeated startups keep showing the
   recovery state until the document is restored.
+- The Windows NSIS apply helper must write paths using the quoting function's
+  complete PowerShell literal directly. It must not add a second pair of
+  quotes, and its regression test must cover paths containing spaces and
+  apostrophes.
 
 ## Consequences
 

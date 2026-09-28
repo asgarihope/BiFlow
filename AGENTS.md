@@ -275,6 +275,8 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Windows may reserve the default Playwright port 1420 (for example, inside an excluded TCP range), making Vite fail with `EACCES` even when no process listens there. Use the validated `BIFLOW_E2E_PORT` override for local e2e runs instead of changing system port reservations.
 - When a List Management component loads running apps through `useEffect`, include its memoized `refresh` callback in the dependency array so the frontend zero-warning lint gate passes.
 - Normalize absolute POSIX artifact paths with `node:path.resolve` before comparing them on Windows; path joining converts separators while an unnormalized root string does not.
+- `powershell_single_quote` returns a complete quoted PowerShell literal. When interpolating it into a generated script, do not add another quote pair around the placeholder; double-quoted paths then become invalid PowerShell and the downloaded NSIS installer never starts. Assert the full generated assignment in the Rust regression test (ADR 0098).
+- On Windows with a small page file, the pre-commit workspace test can exhaust virtual memory when Cargo compiles crates in parallel (`os error 1455`), corrupting dependent rlib reads. Re-run the full hook with `CARGO_BUILD_JOBS=1`; do not interpret the follow-on metadata errors as source failures.
 
 - Older Pillow has no `Image.Resampling`; generate icons with `Image.LANCZOS` / `Image.BICUBIC`.
 - Inner `#![allow(...)]` attributes must be the first item in a Rust module, before `use`.

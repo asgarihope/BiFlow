@@ -449,8 +449,8 @@ fn nsis_update_script(
     format!(
         "$ErrorActionPreference = 'Stop'\n\
     $processId = {process_id}\n\
-    $installerPath = '{installer}'\n\
-    $applicationPath = '{application}'\n\
+    $installerPath = {installer}\n\
+    $applicationPath = {application}\n\
     $expectedVersion = '{version}'\n\
     $deadline = [DateTime]::UtcNow.AddMinutes(3)\n\
     $failure = $null\n\
@@ -641,6 +641,8 @@ mod tests {
         assert!(script.contains("AddMinutes(3)"));
         assert!(script.contains("-Verb RunAs -Wait -PassThru"));
         assert!(script.contains("$process.ExitCode -ne 0"));
+        assert!(script.contains("$installerPath = 'C:\\Users\\A User\\BiFlow''s setup.exe'"));
+        assert!(script.contains("$applicationPath = 'C:\\Program Files\\BiFlow\\BiFlow.exe'"));
         assert!(script.contains("$expectedVersion = '6.2.27'"));
         assert!(script.contains("$versionMatch.Groups['semver'].Value -ne $expectedVersion"));
         assert!(script.contains("1223"));

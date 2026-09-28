@@ -94,7 +94,6 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
       </header>
 
       <RuleLists rules={rules} clients={enabled} allClients={clients} />
-      <ApplicationRoutes rules={rules} clients={enabled} allClients={clients} />
 
       <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -296,6 +295,7 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
       </div>
 
       {route ? <FlowResult route={route} /> : null}
+      <ApplicationRoutes rules={rules} clients={enabled} allClients={clients} />
     </section>
   );
 }

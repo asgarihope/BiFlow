@@ -290,6 +290,9 @@ test.describe("primary BiFlow flows", () => {
       name: "Route for kubectl.exe",
     });
     await expect(route).toBeVisible();
+    await expect(
+      page.locator("section[aria-labelledby='rules-title'] > *").last(),
+    ).toHaveAttribute("data-testid", "application-routes");
     await route.selectOption({ label: "Hiddify" });
     await expect(route).toHaveValue("11111111-1111-1111-1111-111111111111");
     await expect(
