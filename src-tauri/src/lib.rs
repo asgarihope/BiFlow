@@ -14,6 +14,7 @@ mod version;
 mod window_state;
 
 use chrono::Utc;
+#[cfg(target_os = "windows")]
 use iran_split_clients::{process_bypass_union, DriverPlatform};
 use iran_split_config::{
     AppConfig, ClientId, ConfigStore, DefaultRoute, PresetId, ValidationIssue,
