@@ -2177,11 +2177,30 @@ fn spawn_environment_snapshot<R: Runtime>(app: &AppHandle<R>, trigger: &'static 
                 );
             })
             .ok();
+        let helper =
+            match tokio::time::timeout(Duration::from_secs(5), services.backend.helper_status())
+                .await
+            {
+                Ok(Ok(status)) => Ok(status),
+                Ok(Err(cause)) => Err(cause.to_string()),
+                Err(_) => Err("helper status timed out".to_owned()),
+            };
+        let data = services.paths.data.clone();
         let context = environment::CollectContext {
             app_version: version::app_version().to_owned(),
             config,
             rules,
-            stack_phase: format!("{:?}", services.engine.snapshot().phase).to_ascii_lowercase(),
+            stack: Some(services.engine.snapshot()),
+            helper: Some(helper),
+            install_kind: match github_update::detect_install_kind() {
+                github_update::InstallKind::Deb => "deb",
+                github_update::InstallKind::AppImage => "appimage",
+                github_update::InstallKind::Nsis => "nsis",
+            },
+            mihomo_path: deps::first_existing(&deps::mihomo_candidates(&data)),
+            hiddify_executable: deps::first_existing(&deps::hiddify_candidates(&data)),
+            hiddify_data_dir: hiddify_reset::resolve_data_dir(),
+            data_dir: Some(data),
         };
         environment::snapshot(trigger, context).await;
     });
@@ -2198,6 +2217,10 @@ fn environment_trigger(previous: Option<StackPhase>, current: StackPhase) -> Opt
         StackPhase::Running => Some("stack_running"),
         StackPhase::Degraded => Some("stack_degraded"),
         StackPhase::Error => Some("stack_error"),
+        // "Pause disconnects me" reports need the host state right after
+        // Pause/Disconnect: leftover TUN, OS proxy, DNS, client ports.
+        StackPhase::Paused => Some("stack_paused"),
+        StackPhase::Stopped => Some("stack_stopped"),
         _ => None,
     }
 }
@@ -4105,6 +4128,14 @@ mod tests {
         );
         assert_eq!(
             environment_trigger(Some(StackPhase::Running), StackPhase::Stopped),
+            Some("stack_stopped")
+        );
+        assert_eq!(
+            environment_trigger(Some(StackPhase::Stopping), StackPhase::Paused),
+            Some("stack_paused")
+        );
+        assert_eq!(
+            environment_trigger(Some(StackPhase::Running), StackPhase::CheckingReadiness),
             None
         );
     }

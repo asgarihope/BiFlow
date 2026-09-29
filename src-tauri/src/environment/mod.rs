@@ -1,4 +1,4 @@
-//! Host environment snapshot for bug reports (ADR 0106).
+//! Host environment snapshot for bug reports (ADR 0110).
 //!
 //! Every `debug.log` must say what else is running on the machine: operating
 //! system, firewall and security products, other VPN/proxy clients, adapters,
@@ -11,11 +11,24 @@
 //! proxy addresses, process lists beyond known VPN/proxy names, or cluster
 //! hosts. Ports are kept because they are what identifies a conflict.
 
+mod apps;
+// Each collector's parsers are unit-tested on every host; off their own
+// platform only the tests call them, so unused-item lints are expected there.
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+mod linux;
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code, unused_imports))]
+mod windows;
+
+use apps::{AppsInfo, ClockInfo, InstallInfo, RuntimeInfo};
 use iran_split_config::{AppConfig, ClientConfig, DefaultRoute};
+use iran_split_core::{HelperStatus, StackSnapshot};
 use iran_split_rules::{Outbound, RuleSet};
 use serde::Serialize;
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::{
@@ -29,6 +42,39 @@ use uuid::Uuid;
 
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Service and scheduled-task names worth reporting. Same matching rules as
+/// [`KNOWN_VPN_PROCESSES`].
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+const KNOWN_SERVICES: &[&str] = &[
+    "iran-split-helper",
+    "biflowhelper",
+    "openvpn*",
+    "ovpnagent",
+    "windscribe*",
+    "tailscale*",
+    "wireguard*",
+    "cloudflarewarp",
+    "warp-svc",
+    "zerotier*",
+    "nordvpn*",
+    "expressvpn*",
+    "protonvpn*",
+    "surfshark*",
+    "fortisslvpn*",
+    "fortinet*",
+    "vpnagent",
+    "pangps",
+    "dnscache",
+    "bfe",
+    "mpssvc",
+    "iphlpsvc",
+    "winhttpautoproxysvc",
+    "sharedaccess",
+    "networkmanager",
+    "systemd-resolved",
+    "docker",
+];
 
 /// Known VPN, proxy, and tunnel programs. Exact names are compared after
 /// lowercasing and removing `.exe`; entries ending in `*` are prefixes.
@@ -106,6 +152,16 @@ pub struct EnvironmentReport {
     pub hosts_file: HostsFileInfo,
     pub kube: KubeInfo,
     pub biflow: BiflowInfo,
+    /// Policy rules and non-trivial routes, addresses reduced to classes.
+    pub routing: RoutingInfo,
+    pub kernel: Option<KernelInfo>,
+    pub services: Vec<ServiceState>,
+    /// Outbound block rules that name a VPN, proxy, or `BiFlow` executable.
+    pub firewall_block_rules: Vec<String>,
+    pub runtime: RuntimeInfo,
+    pub apps: AppsInfo,
+    pub clock: ClockInfo,
+    pub install: InstallInfo,
     pub findings: Vec<String>,
     pub collection_errors: Vec<String>,
 }
@@ -183,6 +239,32 @@ pub struct HostsFileInfo {
     pub localhost: Vec<&'static str>,
 }
 
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct RoutingInfo {
+    pub rules: Vec<String>,
+    pub routes: Vec<String>,
+    /// Interfaces that carry an IPv6 default route.
+    pub ipv6_default_interfaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct KernelInfo {
+    pub tun_device: bool,
+    pub ipv6_disabled: Option<bool>,
+    pub ip_forward: Option<u8>,
+    /// `rp_filter` for `all`, `default`, and tunnel interfaces. `1` (strict)
+    /// drops replies that policy routing sends through TUN.
+    pub rp_filter: Vec<(String, u8)>,
+    pub modules: Vec<String>,
+    pub network_manager_active: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ServiceState {
+    pub name: String,
+    pub state: String,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct KubeInfo {
     pub config_files: usize,
@@ -226,7 +308,13 @@ pub struct CollectContext {
     pub app_version: String,
     pub config: Option<AppConfig>,
     pub rules: Option<RuleSet>,
-    pub stack_phase: String,
+    pub stack: Option<StackSnapshot>,
+    pub helper: Option<Result<HelperStatus, String>>,
+    pub data_dir: Option<PathBuf>,
+    pub install_kind: &'static str,
+    pub mihomo_path: Option<PathBuf>,
+    pub hiddify_executable: Option<PathBuf>,
+    pub hiddify_data_dir: Option<PathBuf>,
 }
 
 /// Raw platform data before the app-aware filtering.
@@ -234,6 +322,7 @@ pub struct CollectContext {
 struct PlatformData {
     processes: Vec<String>,
     listeners: Vec<Listener>,
+    services: Vec<ServiceState>,
 }
 
 static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -344,16 +433,64 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
         },
         ..EnvironmentReport::default()
     };
-    report.biflow = biflow_info(context.config.as_ref(), &context.stack_phase);
+    let stack_phase = context.stack.as_ref().map_or_else(
+        || "unknown".to_owned(),
+        |stack| format!("{:?}", stack.phase).to_ascii_lowercase(),
+    );
+    report.biflow = biflow_info(context.config.as_ref(), &stack_phase);
+    report.runtime = apps::runtime_info(context.stack.as_ref(), context.helper.as_ref());
+    report.install = apps::install_info(context.install_kind);
+    let data_dir = context.data_dir.as_deref();
+    let openvpn = apps::openvpn_candidates()
+        .into_iter()
+        .find(|path| path.exists());
+    let (mihomo, openvpn_binary, hiddify_binary, clock) = tokio::join!(
+        apps::binary_info(context.mihomo_path.as_deref(), "-v", data_dir),
+        apps::binary_info(openvpn.as_deref(), "--version", data_dir),
+        async {
+            // Hiddify is a GUI; running it with `--version` would open a
+            // window, so only its location is reported.
+            context
+                .hiddify_executable
+                .as_deref()
+                .map(|path| apps::BinaryInfo {
+                    found: true,
+                    location: apps::path_location(path, data_dir),
+                    version: None,
+                })
+        },
+        apps::clock_info(),
+    );
+    let mut hiddify = apps::hiddify_info(context.hiddify_data_dir.as_deref());
+    hiddify.executable = Some(hiddify_binary.unwrap_or(apps::BinaryInfo {
+        found: false,
+        location: "missing",
+        version: None,
+    }));
+    report.apps = AppsInfo {
+        hiddify: Some(hiddify),
+        mihomo: Some(mihomo),
+        openvpn: Some(openvpn_binary),
+        side_tunnels: apps::side_tunnel_profiles(context.config.as_ref(), data_dir),
+        system_proxy_saved_by_pause: data_dir
+            .is_some_and(|dir| dir.join("system-proxy-snapshot.json").exists()),
+    };
+    report.clock = clock;
     report.env_proxy = process_env_proxies(|name| std::env::var(name).ok());
     report.hosts_file = hosts_file_info(&hosts_path());
     report.kube = kube_info(context.config.as_ref(), context.rules.as_ref());
 
-    let platform = collect_platform(&mut report).await;
+    let tun_name = context
+        .config
+        .as_ref()
+        .map(|config| config.mihomo.tun_name.clone())
+        .unwrap_or_default();
+    let platform = collect_platform(&mut report, &tun_name).await;
     report.vpn_processes = known_vpn_processes(&platform.processes);
     report.listener_scan = !platform.listeners.is_empty();
     let ports = interesting_ports(context.config.as_ref());
     report.listeners = relevant_listeners(platform.listeners, &ports);
+    report.services = known_services(platform.services);
     report.findings = findings(&report, context.config.as_ref());
     report.collection_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     report
@@ -568,12 +705,7 @@ fn normalize_process(name: &str) -> String {
 }
 
 fn is_known_vpn_process(name: &str) -> bool {
-    let name = normalize_process(name);
-    KNOWN_VPN_PROCESSES.iter().any(|pattern| {
-        pattern
-            .strip_suffix('*')
-            .map_or(name == *pattern, |prefix| name.starts_with(prefix))
-    })
+    matches_known(KNOWN_VPN_PROCESSES, name)
 }
 
 fn known_vpn_processes(processes: &[String]) -> Vec<String> {
@@ -584,6 +716,25 @@ fn known_vpn_processes(processes: &[String]) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn matches_known(list: &[&str], name: &str) -> bool {
+    let name = normalize_process(name);
+    list.iter().any(|pattern| {
+        pattern
+            .strip_suffix('*')
+            .map_or(name == *pattern, |prefix| name.starts_with(prefix))
+    })
+}
+
+fn known_services(services: Vec<ServiceState>) -> Vec<ServiceState> {
+    let mut kept: Vec<ServiceState> = services
+        .into_iter()
+        .filter(|service| matches_known(KNOWN_SERVICES, &service.name))
+        .collect();
+    kept.sort_by(|left, right| left.name.cmp(&right.name));
+    kept.dedup();
+    kept
 }
 
 fn interesting_ports(config: Option<&AppConfig>) -> BTreeSet<u16> {
@@ -828,7 +979,173 @@ fn findings(report: &EnvironmentReport, config: Option<&AppConfig>) -> Vec<Strin
     port_findings(report, config, &biflow_ports, &mut findings);
     network_findings(report, config, &mut findings);
     host_findings(report, config, &mut findings);
+    state_findings(report, config, &mut findings);
+    apps::app_findings(report, config, &mut findings);
     findings
+}
+
+/// Leftovers after Pause/Disconnect, IPv6 escaping TUN, and host settings
+/// that silently break policy routing or the helper.
+fn state_findings(
+    report: &EnvironmentReport,
+    config: Option<&AppConfig>,
+    findings: &mut Vec<String>,
+) {
+    let phase = report.biflow.stack_phase.as_str();
+    if matches!(phase, "paused" | "stopped") {
+        idle_findings(report, config, findings);
+    }
+    if matches!(phase, "running" | "degraded") {
+        running_findings(report, config, findings);
+    }
+    host_state_findings(report, findings);
+}
+
+fn is_biflow_tun(config: Option<&AppConfig>, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "meta"
+        || config.is_some_and(|config| config.mihomo.tun_name.eq_ignore_ascii_case(&name))
+}
+
+fn idle_findings(
+    report: &EnvironmentReport,
+    config: Option<&AppConfig>,
+    findings: &mut Vec<String>,
+) {
+    let is_tun = |name: &str| is_biflow_tun(config, name);
+    {
+        for adapter in report
+            .adapters
+            .iter()
+            .filter(|adapter| is_tun(&adapter.name))
+        {
+            if matches!(
+                adapter.status.to_ascii_lowercase().as_str(),
+                "up" | "unknown"
+            ) {
+                findings.push(format!("leftover_tun_adapter:{}", adapter.name));
+            }
+        }
+        let leftover_rules = report
+            .routing
+            .rules
+            .iter()
+            .chain(&report.routing.routes)
+            .filter(|line| {
+                line.split_whitespace()
+                    .any(|token| is_tun(token.trim_end_matches(',')))
+            })
+            .count();
+        if leftover_rules > 0 {
+            findings.push(format!("leftover_tun_routes:{leftover_rules}"));
+        }
+        if report
+            .dns_servers
+            .iter()
+            .any(|entry| entry.servers.contains(&"fake_ip"))
+        {
+            findings.push("leftover_fake_ip_dns".into());
+        }
+        if let Some(mixed) = config.map(|config| config.mihomo.mixed_port) {
+            if report
+                .system_proxy
+                .iter()
+                .any(|setting| setting.enabled && setting.port == Some(mixed))
+            {
+                findings.push(format!("leftover_system_proxy_to_mihomo:{mixed}"));
+            }
+        }
+    }
+}
+
+fn running_findings(
+    report: &EnvironmentReport,
+    config: Option<&AppConfig>,
+    findings: &mut Vec<String>,
+) {
+    let is_tun = |name: &str| is_biflow_tun(config, name);
+    {
+        let client_ports: BTreeSet<u16> = config
+            .map(|config| {
+                config
+                    .clients
+                    .iter()
+                    .filter_map(|client| match client.config {
+                        ClientConfig::LocalProxy { port, .. } => Some(port),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for setting in &report.system_proxy {
+            if let (true, Some(port)) = (setting.enabled, setting.port) {
+                if client_ports.contains(&port) {
+                    findings.push(format!("system_proxy_bypasses_split_routing:{port}"));
+                }
+            }
+        }
+        let outside: Vec<&String> = report
+            .routing
+            .ipv6_default_interfaces
+            .iter()
+            .filter(|name| !is_tun(name))
+            .collect();
+        if !outside.is_empty()
+            && !report
+                .routing
+                .ipv6_default_interfaces
+                .iter()
+                .any(|name| is_tun(name))
+        {
+            findings.push(format!("ipv6_default_route_outside_tun:{}", outside[0]));
+        }
+    }
+}
+
+fn host_state_findings(report: &EnvironmentReport, findings: &mut Vec<String>) {
+    if let Some(kernel) = &report.kernel {
+        if !kernel.tun_device {
+            findings.push("tun_device_missing".into());
+        }
+        for (interface, value) in &kernel.rp_filter {
+            if *value == 1 {
+                findings.push(format!("rp_filter_strict:{interface}"));
+            }
+        }
+        for kind in &kernel.network_manager_active {
+            if matches!(kind.as_str(), "vpn" | "wireguard") {
+                findings.push(format!("network_manager_vpn_active:{kind}"));
+            }
+        }
+    }
+    for service in &report.services {
+        let name = service.name.to_ascii_lowercase();
+        let state = service.state.to_ascii_lowercase();
+        let active = matches!(state.as_str(), "active" | "running");
+        if (name == "iran-split-helper" || name == "biflowhelper") && !active {
+            findings.push(format!("helper_service:{}", service.state));
+        } else if active
+            && [
+                "windscribe",
+                "nordvpn",
+                "expressvpn",
+                "protonvpn",
+                "surfshark",
+                "cloudflarewarp",
+                "warp-svc",
+                "fortisslvpn",
+                "vpnagent",
+                "pangps",
+            ]
+            .iter()
+            .any(|vpn| name.starts_with(vpn))
+        {
+            findings.push(format!("other_vpn_service_running:{}", service.name));
+        }
+    }
+    for rule in &report.firewall_block_rules {
+        findings.push(format!("firewall_blocks_program:{rule}"));
+    }
 }
 
 fn client_findings(report: &EnvironmentReport, config: &AppConfig, findings: &mut Vec<String>) {
@@ -1025,6 +1342,21 @@ fn host_findings(
 
 #[cfg(any(windows, target_os = "linux"))]
 async fn run_command(program: &str, args: &[&str]) -> Result<String, String> {
+    run_command_timeout(OsStr::new(program), args, COMMAND_TIMEOUT).await
+}
+
+/// Runs a bounded command without a console window. Errors name only the
+/// program's file name and the I/O error kind.
+async fn run_command_timeout(
+    program: &OsStr,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    let label = Path::new(program).file_name().map_or_else(
+        || "command".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let program_label = label.as_str();
     let mut command = tokio::process::Command::new(program);
     command.args(args).kill_on_drop(true);
     #[cfg(windows)]
@@ -1032,596 +1364,24 @@ async fn run_command(program: &str, args: &[&str]) -> Result<String, String> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
+    let output = tokio::time::timeout(timeout, command.output())
         .await
-        .map_err(|_| format!("{program} timed out"))?
-        .map_err(|error| format!("{program} could not start: {}", error.kind()))?;
+        .map_err(|_| format!("{program_label} timed out"))?
+        .map_err(|error| format!("{program_label} could not start: {}", error.kind()))?;
     if !output.status.success() && output.stdout.is_empty() {
-        return Err(format!("{program} exited with {}", output.status));
+        return Err(format!("{program_label} exited with {}", output.status));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg(target_os = "linux")]
+use linux::collect_platform;
 #[cfg(windows)]
-async fn collect_platform(report: &mut EnvironmentReport) -> PlatformData {
-    let mut script = match tempfile::Builder::new()
-        .prefix("biflow-environment-")
-        .suffix(".ps1")
-        .tempfile()
-    {
-        Ok(file) => file,
-        Err(error) => {
-            report
-                .collection_errors
-                .push(format!("temp script: {}", error.kind()));
-            return PlatformData::default();
-        }
-    };
-    let written = {
-        use std::io::Write;
-        let file = script.as_file_mut();
-        file.write_all(WINDOWS_SCRIPT.as_bytes())
-            .and_then(|()| file.flush())
-    };
-    if let Err(error) = written {
-        report
-            .collection_errors
-            .push(format!("temp script write: {}", error.kind()));
-        return PlatformData::default();
-    }
-    let path = script.path().to_string_lossy().into_owned();
-    let output = run_command(
-        "powershell",
-        &[
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            &path,
-        ],
-    )
-    .await;
-    match output {
-        Ok(text) => match serde_json::from_str::<serde_json::Value>(text.trim()) {
-            Ok(value) => parse_windows(&value, report),
-            Err(error) => {
-                report
-                    .collection_errors
-                    .push(format!("powershell json: {error}"));
-                PlatformData::default()
-            }
-        },
-        Err(error) => {
-            report.collection_errors.push(error);
-            PlatformData::default()
-        }
-    }
-}
-
-/// Emits one JSON object. Every probe is independent and silently empty when
-/// a cmdlet is missing (Server SKUs have no `SecurityCenter2`, for example).
-#[cfg(any(windows, test))]
-const WINDOWS_SCRIPT: &str = r#"
-$ErrorActionPreference = 'SilentlyContinue'
-$o = [ordered]@{}
-$os = Get-CimInstance Win32_OperatingSystem
-$cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-$o.os_name = "$($os.Caption)"
-$o.os_version = "$($cv.DisplayVersion)"
-$o.os_build = "$($os.BuildNumber).$($cv.UBR)"
-$o.firewall = @(Get-NetFirewallProfile | ForEach-Object { [ordered]@{ name = "$($_.Name)"; enabled = [bool]$_.Enabled } })
-$o.security = @(foreach ($c in 'AntiVirusProduct','FirewallProduct') { Get-CimInstance -Namespace root/SecurityCenter2 -ClassName $c | ForEach-Object { [ordered]@{ kind = $c; name = "$($_.displayName)"; state = [int64]$_.productState } } })
-$o.adapters = @(Get-NetAdapter | ForEach-Object { [ordered]@{ name = "$($_.Name)"; description = "$($_.InterfaceDescription)"; status = "$($_.Status)" } })
-$metrics = @{}
-Get-NetIPInterface -AddressFamily IPv4 | ForEach-Object { $metrics[[int]$_.ifIndex] = [int]$_.InterfaceMetric }
-$o.routes = @(Get-NetRoute -AddressFamily IPv4 | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0','0.0.0.0/1','128.0.0.0/1') } | ForEach-Object { [ordered]@{ prefix = "$($_.DestinationPrefix)"; interface = "$($_.InterfaceAlias)"; next_hop = "$($_.NextHop)"; route_metric = [int]$_.RouteMetric; interface_metric = $metrics[[int]$_.ifIndex] } })
-$o.dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object { $_.ServerAddresses } | ForEach-Object { [ordered]@{ interface = "$($_.InterfaceAlias)"; servers = @($_.ServerAddresses) } })
-$is = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
-$o.inet = [ordered]@{ enable = [int]$is.ProxyEnable; server = "$($is.ProxyServer)"; pac = [bool]$is.AutoConfigURL; auto_detect = [int]$is.AutoDetect; bypass_local = ("$($is.ProxyOverride)" -like '*<local>*') }
-$o.winhttp = (netsh winhttp show proxy | Out-String)
-$o.env = @(foreach ($scope in 'User','Machine') { foreach ($n in 'HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY') { $v = [Environment]::GetEnvironmentVariable($n, $scope); if ($v) { [ordered]@{ scope = $scope; name = $n; value = "$v" } } } })
-$procs = @{}
-Get-Process | ForEach-Object { $procs[[int]$_.Id] = "$($_.ProcessName)" }
-$o.processes = @($procs.Values | Sort-Object -Unique)
-$o.listeners = @(Get-NetTCPConnection -State Listen | ForEach-Object { [ordered]@{ address = "$($_.LocalAddress)"; port = [int]$_.LocalPort; process = $procs[[int]$_.OwningProcess] } })
-$o | ConvertTo-Json -Compress -Depth 5
-"#;
-
-#[cfg(any(windows, test))]
-fn json_array(value: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
-    match value.get(key) {
-        Some(serde_json::Value::Array(items)) => items.clone(),
-        Some(serde_json::Value::Null) | None => Vec::new(),
-        Some(single) => vec![single.clone()],
-    }
-}
-
-#[cfg(any(windows, test))]
-fn json_str(value: &serde_json::Value, key: &str) -> String {
-    match value.get(key) {
-        Some(serde_json::Value::String(text)) => text.trim().to_owned(),
-        Some(serde_json::Value::Number(number)) => number.to_string(),
-        Some(serde_json::Value::Bool(flag)) => flag.to_string(),
-        _ => String::new(),
-    }
-}
-
-#[cfg(any(windows, test))]
-fn json_u32(value: &serde_json::Value, key: &str) -> Option<u32> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|number| u32::try_from(number).ok())
-}
-
-#[cfg(any(windows, test))]
-fn non_empty(text: String) -> Option<String> {
-    (!text.is_empty()).then_some(text)
-}
-
-/// `productState` byte 2 is `0x10` (on) or `0x11` (snoozed but running).
-#[cfg(any(windows, test))]
-fn security_product_enabled(state: i64) -> Option<bool> {
-    (state > 0).then_some(matches!((state >> 8) & 0xff, 0x10 | 0x11))
-}
-
-/// Reads `netsh winhttp show proxy`. The text is localized, so the only
-/// reliable signal is a `host:port` token.
-#[cfg(any(windows, test))]
-fn winhttp_setting(text: &str) -> ProxySetting {
-    let token = text
-        .split(|character: char| character.is_whitespace() || character == ';')
-        .map(|token| token.rsplit_once('=').map_or(token, |(_, value)| value))
-        .find(|token| {
-            token
-                .rsplit_once(':')
-                .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
-        });
-    match token {
-        Some(token) => proxy_setting("winhttp", token, None),
-        None => ProxySetting {
-            source: "winhttp".into(),
-            enabled: false,
-            scheme: None,
-            host: None,
-            port: None,
-            detail: Some("direct".into()),
-        },
-    }
-}
-
-/// Windows Internet Settings `ProxyServer` may be `host:port` or a
-/// per-protocol list such as `http=127.0.0.1:1;https=127.0.0.1:1`.
-#[cfg(any(windows, test))]
-fn internet_settings(inet: &serde_json::Value) -> Vec<ProxySetting> {
-    let enabled = json_u32(inet, "enable").unwrap_or(0) != 0;
-    let pac = inet.get("pac").and_then(serde_json::Value::as_bool) == Some(true);
-    let bypass_local = inet
-        .get("bypass_local")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true);
-    let detail = format!(
-        "pac={pac},auto_detect={},bypass_local={bypass_local}",
-        json_u32(inet, "auto_detect").unwrap_or(0) != 0
-    );
-    let server = json_str(inet, "server");
-    let mut settings: Vec<ProxySetting> = server
-        .split(';')
-        .filter(|entry| !entry.trim().is_empty())
-        .map(|entry| {
-            let (protocol, address) = entry.split_once('=').unwrap_or(("all", entry));
-            let mut setting = proxy_setting(
-                &format!("windows_internet_settings:{}", protocol.trim()),
-                address,
-                Some(detail.clone()),
-            );
-            setting.enabled = enabled && setting.enabled;
-            setting
-        })
-        .collect();
-    if settings.is_empty() {
-        settings.push(ProxySetting {
-            source: "windows_internet_settings".into(),
-            enabled: false,
-            scheme: None,
-            host: None,
-            port: None,
-            detail: Some(detail),
-        });
-    }
-    settings
-}
-
-#[cfg(any(windows, test))]
-fn parse_windows(value: &serde_json::Value, report: &mut EnvironmentReport) -> PlatformData {
-    report.system.os_name = non_empty(json_str(value, "os_name"));
-    report.system.os_version = non_empty(json_str(value, "os_version"));
-    report.system.os_build = non_empty(json_str(value, "os_build"));
-    report.firewall = json_array(value, "firewall")
-        .iter()
-        .map(|profile| FirewallProfile {
-            name: json_str(profile, "name"),
-            enabled: profile.get("enabled").and_then(serde_json::Value::as_bool) == Some(true),
-        })
-        .collect();
-    report.security_products = json_array(value, "security")
-        .iter()
-        .map(|product| SecurityProduct {
-            kind: json_str(product, "kind"),
-            name: json_str(product, "name"),
-            enabled: product
-                .get("state")
-                .and_then(serde_json::Value::as_i64)
-                .and_then(security_product_enabled),
-        })
-        .collect();
-    report.adapters = json_array(value, "adapters")
-        .iter()
-        .map(|adapter| {
-            let name = json_str(adapter, "name");
-            let description = json_str(adapter, "description");
-            Adapter {
-                kind: adapter_kind(&name, &description),
-                name,
-                description,
-                status: json_str(adapter, "status"),
-            }
-        })
-        .collect();
-    report.default_routes = json_array(value, "routes")
-        .iter()
-        .map(|route| RouteInfo {
-            prefix: json_str(route, "prefix"),
-            interface: json_str(route, "interface"),
-            gateway: classify_host(&json_str(route, "next_hop")),
-            route_metric: json_u32(route, "route_metric"),
-            interface_metric: json_u32(route, "interface_metric"),
-        })
-        .collect();
-    report.dns_servers = json_array(value, "dns")
-        .iter()
-        .map(|entry| DnsServers {
-            interface: json_str(entry, "interface"),
-            servers: json_array(entry, "servers")
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(classify_host)
-                .collect(),
-        })
-        .collect();
-    if let Some(inet) = value.get("inet") {
-        report.system_proxy.extend(internet_settings(inet));
-    }
-    report
-        .system_proxy
-        .push(winhttp_setting(&json_str(value, "winhttp")));
-    for entry in json_array(value, "env") {
-        let source = format!(
-            "registry_env:{}:{}",
-            json_str(&entry, "scope").to_ascii_lowercase(),
-            json_str(&entry, "name")
-        );
-        let raw = json_str(&entry, "value");
-        report.env_proxy.push(if source.ends_with("NO_PROXY") {
-            no_proxy_setting(&source, &raw)
-        } else {
-            proxy_setting(&source, &raw, None)
-        });
-    }
-    PlatformData {
-        processes: json_array(value, "processes")
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .collect(),
-        listeners: json_array(value, "listeners")
-            .iter()
-            .filter_map(|listener| {
-                Some(Listener {
-                    port: u16::try_from(listener.get("port")?.as_u64()?).ok()?,
-                    address: classify_host(&json_str(listener, "address")),
-                    process: non_empty(json_str(listener, "process")),
-                })
-            })
-            .collect(),
-    }
-}
-
-#[cfg(target_os = "linux")]
-async fn collect_platform(report: &mut EnvironmentReport) -> PlatformData {
-    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-    report.system.os_name = os_release_field(&os_release, "PRETTY_NAME");
-    report.system.os_version = os_release_field(&os_release, "VERSION_ID");
-    report.system.kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .ok()
-        .map(|text| text.trim().to_owned());
-    report.system.desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
-    report.system.session_type = std::env::var("XDG_SESSION_TYPE").ok();
-
-    report.firewall = linux_firewall().await;
-    report.adapters = linux_adapters();
-    report.default_routes = std::fs::read_to_string("/proc/net/route")
-        .map(|text| parse_proc_route(&text))
-        .unwrap_or_default();
-    report.dns_servers = linux_dns();
-    report.system_proxy = linux_system_proxy(&mut report.collection_errors).await;
-
-    let mut listeners = Vec::new();
-    for (file, v6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
-        if let Ok(text) = std::fs::read_to_string(file) {
-            listeners.extend(parse_proc_tcp_listeners(&text, v6));
-        }
-    }
-    PlatformData {
-        processes: linux_processes(),
-        listeners,
-    }
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn os_release_field(text: &str, key: &str) -> Option<String> {
-    text.lines()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")))
-        .map(|value| value.trim().trim_matches('"').to_owned())
-        .filter(|value| !value.is_empty())
-}
-
-#[cfg(target_os = "linux")]
-async fn linux_firewall() -> Vec<FirewallProfile> {
-    let units = ["ufw", "firewalld", "nftables", "iptables"];
-    let mut args = vec!["is-active"];
-    args.extend(units);
-    let states = run_command("systemctl", &args).await.unwrap_or_default();
-    let mut profiles: Vec<FirewallProfile> = units
-        .iter()
-        .zip(states.lines().chain(std::iter::repeat("unknown")))
-        .map(|(unit, state)| FirewallProfile {
-            name: format!("{unit}.service"),
-            enabled: state.trim() == "active",
-        })
-        .collect();
-    if let Ok(text) = std::fs::read_to_string("/etc/ufw/ufw.conf") {
-        profiles.push(FirewallProfile {
-            name: "ufw.conf".into(),
-            enabled: text
-                .lines()
-                .any(|line| line.trim().eq_ignore_ascii_case("ENABLED=yes")),
-        });
-    }
-    profiles
-}
-
-#[cfg(target_os = "linux")]
-fn linux_adapters() -> Vec<Adapter> {
-    let Ok(entries) = std::fs::read_dir("/sys/class/net") else {
-        return Vec::new();
-    };
-    let mut adapters: Vec<Adapter> = entries
-        .filter_map(Result::ok)
-        .map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let base = entry.path();
-            let read = |file: &str| {
-                std::fs::read_to_string(base.join(file))
-                    .map(|text| text.trim().to_owned())
-                    .unwrap_or_default()
-            };
-            let devtype = read("uevent")
-                .lines()
-                .find_map(|line| line.strip_prefix("DEVTYPE=").map(str::to_owned))
-                .unwrap_or_default();
-            let description = if base.join("tun_flags").exists() {
-                format!("tun {devtype}").trim().to_owned()
-            } else if devtype.is_empty() {
-                match read("type").as_str() {
-                    "1" => "ethernet".to_owned(),
-                    "772" => "loopback".to_owned(),
-                    other => format!("type {other}"),
-                }
-            } else {
-                devtype
-            };
-            Adapter {
-                kind: adapter_kind(&name, &description),
-                name,
-                description,
-                status: read("operstate"),
-            }
-        })
-        .collect();
-    adapters.sort_by(|left, right| left.name.cmp(&right.name));
-    adapters
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_proc_route(text: &str) -> Vec<RouteInfo> {
-    text.lines()
-        .skip(1)
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let interface = *fields.first()?;
-            let destination = u32::from_str_radix(fields.get(1)?, 16).ok()?;
-            let gateway = u32::from_str_radix(fields.get(2)?, 16).ok()?;
-            let metric = fields.get(6)?.parse::<u32>().ok();
-            let mask = u32::from_str_radix(fields.get(7)?, 16).ok()?;
-            let prefix_len = mask.count_ones();
-            if prefix_len > 1 {
-                return None;
-            }
-            let destination = std::net::Ipv4Addr::from(destination.swap_bytes());
-            Some(RouteInfo {
-                prefix: format!("{destination}/{prefix_len}"),
-                interface: interface.to_owned(),
-                gateway: classify_host(&std::net::Ipv4Addr::from(gateway.swap_bytes()).to_string()),
-                route_metric: metric,
-                interface_metric: None,
-            })
-        })
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn linux_dns() -> Vec<DnsServers> {
-    let mut servers = Vec::new();
-    for (label, file) in [
-        ("resolv.conf", "/etc/resolv.conf"),
-        (
-            "systemd-resolved-upstream",
-            "/run/systemd/resolve/resolv.conf",
-        ),
-    ] {
-        if let Ok(text) = std::fs::read_to_string(file) {
-            servers.push(DnsServers {
-                interface: label.into(),
-                servers: parse_resolv_conf(&text),
-            });
-        }
-    }
-    servers
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_resolv_conf(text: &str) -> Vec<&'static str> {
-    text.lines()
-        .filter_map(|line| line.trim().strip_prefix("nameserver"))
-        .map(|server| classify_host(server.trim()))
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-async fn linux_system_proxy(errors: &mut Vec<String>) -> Vec<ProxySetting> {
-    let mut settings = Vec::new();
-    match run_command("gsettings", &["get", "org.gnome.system.proxy", "mode"]).await {
-        Ok(mode) => {
-            let mode = mode.trim().trim_matches('\'').to_owned();
-            if mode == "manual" {
-                for schema in ["http", "https", "socks"] {
-                    let path = format!("org.gnome.system.proxy.{schema}");
-                    let host = run_command("gsettings", &["get", &path, "host"])
-                        .await
-                        .unwrap_or_default();
-                    let port = run_command("gsettings", &["get", &path, "port"])
-                        .await
-                        .unwrap_or_default();
-                    let host = host.trim().trim_matches('\'');
-                    if !host.is_empty() {
-                        settings.push(proxy_setting(
-                            &format!("gnome:{schema}"),
-                            &format!("{host}:{}", port.trim()),
-                            None,
-                        ));
-                    }
-                }
-            } else {
-                settings.push(ProxySetting {
-                    source: "gnome".into(),
-                    enabled: mode == "auto",
-                    scheme: None,
-                    host: None,
-                    port: None,
-                    detail: Some(format!("mode={mode}")),
-                });
-            }
-        }
-        Err(error) => errors.push(error),
-    }
-    if let Some(config) = dirs::config_dir() {
-        if let Ok(text) = std::fs::read_to_string(config.join("kioslaverc")) {
-            if let Some(kind) = kde_proxy_type(&text) {
-                settings.push(ProxySetting {
-                    source: "kde".into(),
-                    enabled: kind != "0",
-                    scheme: None,
-                    host: None,
-                    port: None,
-                    detail: Some(format!("proxy_type={kind}")),
-                });
-            }
-        }
-    }
-    settings
-}
-
-/// `ProxyType` under `[Proxy Settings]`: 0 none, 1 manual, 2 PAC, 3 WPAD,
-/// 4 environment variables.
-#[cfg(any(target_os = "linux", test))]
-fn kde_proxy_type(text: &str) -> Option<String> {
-    let mut in_section = false;
-    for line in text.lines().map(str::trim) {
-        if line.starts_with('[') {
-            in_section = line == "[Proxy Settings]";
-        } else if in_section {
-            if let Some(value) = line.strip_prefix("ProxyType=") {
-                let value = value.trim();
-                if value.bytes().all(|byte| byte.is_ascii_digit()) && !value.is_empty() {
-                    return Some(value.to_owned());
-                }
-            }
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn linux_processes() -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
-        })
-        .filter_map(|entry| std::fs::read_to_string(entry.path().join("comm")).ok())
-        .map(|name| name.trim().to_owned())
-        .collect()
-}
-
-/// `/proc/net/tcp{,6}` rows in state `0A` (LISTEN). Addresses are stored as
-/// little-endian 32-bit words.
-#[cfg(any(target_os = "linux", test))]
-fn parse_proc_tcp_listeners(text: &str, v6: bool) -> Vec<Listener> {
-    text.lines()
-        .skip(1)
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.get(3) != Some(&"0A") {
-                return None;
-            }
-            let (address, port) = fields.get(1)?.split_once(':')?;
-            let port = u16::from_str_radix(port, 16).ok()?;
-            let ip: IpAddr = if v6 {
-                let mut bytes = [0_u8; 16];
-                for (index, chunk) in bytes.chunks_mut(4).enumerate() {
-                    let word =
-                        u32::from_str_radix(address.get(index * 8..index * 8 + 8)?, 16).ok()?;
-                    chunk.copy_from_slice(&word.swap_bytes().to_be_bytes());
-                }
-                IpAddr::from(bytes)
-            } else {
-                IpAddr::from(
-                    u32::from_str_radix(address, 16)
-                        .ok()?
-                        .swap_bytes()
-                        .to_be_bytes(),
-                )
-            };
-            Some(Listener {
-                port,
-                address: classify_host(&ip.to_string()),
-                process: None,
-            })
-        })
-        .collect()
-}
+use windows::collect_platform;
 
 #[cfg(not(any(windows, target_os = "linux")))]
 #[allow(clippy::unused_async)]
-async fn collect_platform(_report: &mut EnvironmentReport) -> PlatformData {
+async fn collect_platform(_report: &mut EnvironmentReport, _tun_name: &str) -> PlatformData {
     PlatformData::default()
 }
 
@@ -1775,79 +1535,6 @@ clusters:
     }
 
     #[test]
-    fn windows_payload_is_parsed_and_classified() {
-        let value = serde_json::json!({
-            "os_name": "Microsoft Windows 11 Pro",
-            "os_version": "23H2",
-            "os_build": "22631.4317",
-            "firewall": [{"name": "Domain", "enabled": true}, {"name": "Public", "enabled": false}],
-            "security": {"kind": "AntiVirusProduct", "name": "Kaspersky", "state": 266_240},
-            "adapters": [
-                {"name": "Wi-Fi", "description": "Intel Wireless", "status": "Up"},
-                {"name": "OpenVPN Data Channel Offload", "description": "ovpn-dco", "status": "Disconnected"},
-                {"name": "Meta", "description": "Meta Tunnel", "status": "Up"}
-            ],
-            "routes": [
-                {"prefix": "0.0.0.0/0", "interface": "Wi-Fi", "next_hop": "192.168.1.1", "route_metric": 0, "interface_metric": 35},
-                {"prefix": "0.0.0.0/1", "interface": "Other VPN", "next_hop": "0.0.0.0", "route_metric": 0, "interface_metric": 5}
-            ],
-            "dns": [{"interface": "Wi-Fi", "servers": ["192.168.1.1", "8.8.8.8"]}],
-            "inet": {"enable": 1, "server": "http=127.0.0.1:10809;https=127.0.0.1:10809", "pac": false, "auto_detect": 0, "bypass_local": true},
-            "winhttp": "\r\nCurrent WinHTTP proxy settings:\r\n\r\n    Direct access (no proxy server).\r\n",
-            "env": [{"scope": "User", "name": "HTTPS_PROXY", "value": "http://127.0.0.1:10809"}],
-            "processes": ["Hiddify", "v2rayN", "chrome"],
-            "listeners": [
-                {"address": "127.0.0.1", "port": 12334, "process": "Hiddify"},
-                {"address": "0.0.0.0", "port": 19090, "process": "SomeService"}
-            ]
-        });
-        let mut report = EnvironmentReport::default();
-        let platform = parse_windows(&value, &mut report);
-        assert_eq!(report.system.os_build.as_deref(), Some("22631.4317"));
-        assert_eq!(report.firewall.len(), 2);
-        assert_eq!(report.security_products[0].enabled, Some(true));
-        assert_eq!(report.adapters[1].kind, "openvpn_dco");
-        assert_eq!(report.default_routes[0].gateway, "private");
-        assert_eq!(report.dns_servers[0].servers, vec!["private", "public_ip"]);
-        assert_eq!(report.system_proxy.len(), 3);
-        assert!(report.system_proxy[0].enabled);
-        assert_eq!(report.system_proxy[0].port, Some(10809));
-        assert!(!report.system_proxy[2].enabled);
-        assert_eq!(report.env_proxy[0].source, "registry_env:user:HTTPS_PROXY");
-        assert_eq!(platform.processes.len(), 3);
-        assert_eq!(platform.listeners.len(), 2);
-
-        let config = AppConfig::default();
-        let ports = interesting_ports(Some(&config));
-        report.vpn_processes = known_vpn_processes(&platform.processes);
-        report.listeners = relevant_listeners(platform.listeners, &ports);
-        report.findings = findings(&report, Some(&config));
-        let joined = report.findings.join("\n");
-        assert!(
-            joined.contains("system_proxy_unknown_local_port:windows_internet_settings:http:10809")
-        );
-        assert!(joined.contains("env_proxy_set:registry_env:user:HTTPS_PROXY"));
-        assert!(joined.contains("split_default_route:Other VPN"));
-        assert!(joined.contains("third_party_security:AntiVirusProduct:Kaspersky"));
-        assert!(joined.contains("other_vpn_process:v2rayn"));
-        assert!(!joined.contains("other_vpn_process:hiddify"));
-        assert!(!joined.contains("other_tunnel_adapter_up:Meta"));
-        let encoded = serde_json::to_string(&report).unwrap();
-        assert!(!encoded.contains("192.168.1.1"));
-        assert!(!encoded.contains("8.8.8.8"));
-    }
-
-    #[test]
-    fn winhttp_proxy_token_is_found_in_localized_text() {
-        let setting =
-            winhttp_setting("    Proxy-Server(s) :  http=10.1.1.1:8080;https=10.1.1.1:8080\n");
-        assert!(setting.enabled);
-        assert_eq!(setting.host, Some("private"));
-        assert_eq!(setting.port, Some(8080));
-        assert!(!winhttp_setting("Direct access (no proxy server).").enabled);
-    }
-
-    #[test]
     fn missing_client_listener_and_port_conflicts_are_findings() {
         let config = AppConfig::default();
         let report = EnvironmentReport {
@@ -1886,13 +1573,6 @@ clusters:
     }
 
     #[test]
-    fn kde_proxy_type_reads_only_the_proxy_section() {
-        let text = "[General]\nProxyType=Settings\n[Proxy Settings]\nProxyType=1\n";
-        assert_eq!(kde_proxy_type(text).as_deref(), Some("1"));
-        assert_eq!(kde_proxy_type("[General]\nProxyType=2\n"), None);
-    }
-
-    #[test]
     fn own_side_tunnel_adapter_is_not_another_vpn() {
         let config = AppConfig::default();
         let prefix = &config.clients[0].id.as_hyphenated()[..8];
@@ -1920,65 +1600,6 @@ clusters:
         assert_eq!(info.clients[0].host, Some("loopback"));
     }
 
-    #[test]
-    fn proc_route_keeps_default_and_split_default_routes() {
-        let text = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
-                    wlp1s0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\n\
-                    tun0\t00000000\t00000000\t0001\t0\t0\t0\t00000080\n\
-                    wlp1s0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\n";
-        let routes = parse_proc_route(text);
-        assert_eq!(routes.len(), 2);
-        assert_eq!(routes[0].prefix, "0.0.0.0/0");
-        assert_eq!(routes[0].gateway, "private");
-        assert_eq!(routes[0].route_metric, Some(600));
-        assert_eq!(routes[1].prefix, "0.0.0.0/1");
-    }
-
-    #[test]
-    fn proc_tcp_listeners_decode_little_endian_addresses() {
-        let v4 = "  sl  local_address rem_address   st\n   0: 0100007F:3039 00000000:0000 0A\n   1: 0100007F:3039 0100007F:1234 01\n";
-        let listeners = parse_proc_tcp_listeners(v4, false);
-        assert_eq!(listeners.len(), 1);
-        assert_eq!(listeners[0].port, 12345);
-        assert_eq!(listeners[0].address, "loopback");
-        let v6 = "  sl local\n   0: 00000000000000000000000001000000:0050 00000000000000000000000000000000:0000 0A\n";
-        let listeners = parse_proc_tcp_listeners(v6, true);
-        assert_eq!(listeners[0].address, "loopback");
-        assert_eq!(listeners[0].port, 80);
-    }
-
-    #[test]
-    fn os_release_and_resolv_conf_are_parsed() {
-        assert_eq!(
-            os_release_field("NAME=x\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\n", "PRETTY_NAME")
-                .as_deref(),
-            Some("Ubuntu 24.04 LTS")
-        );
-        assert_eq!(
-            parse_resolv_conf("nameserver 127.0.0.53\noptions edns0\nnameserver 1.1.1.1\n"),
-            vec!["loopback", "public_ip"]
-        );
-    }
-
-    #[test]
-    fn windows_script_emits_every_parsed_key() {
-        for key in [
-            "os_name",
-            "firewall",
-            "security",
-            "adapters",
-            "routes",
-            "dns",
-            "inet",
-            "winhttp",
-            "env",
-            "processes",
-            "listeners",
-        ] {
-            assert!(WINDOWS_SCRIPT.contains(&format!("$o.{key} =")), "{key}");
-        }
-    }
-
     #[tokio::test]
     async fn live_collection_completes_on_this_host_without_leaking_config() {
         let config = AppConfig::default();
@@ -1986,7 +1607,13 @@ clusters:
             app_version: "0.0.0-test".into(),
             config: Some(config.clone()),
             rules: None,
-            stack_phase: "stopped".into(),
+            stack: Some(StackSnapshot::default()),
+            helper: Some(Err("not connected in tests".into())),
+            data_dir: None,
+            install_kind: "deb",
+            mihomo_path: None,
+            hiddify_executable: None,
+            hiddify_data_dir: crate::hiddify_reset::resolve_data_dir(),
         })
         .await;
         assert_eq!(report.system.os, std::env::consts::OS);

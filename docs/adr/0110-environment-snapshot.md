@@ -49,6 +49,65 @@ into a round of questions.
   hostnames or user paths, and no process names outside the known
   VPN/proxy list.
 
+## Functional signals (6.2.48)
+
+Host inventory alone did not explain the recurring functional reports.
+Examples: "Windscribe does not connect", "Pause cuts my internet", and
+"Connect fails" when the user had changed Hiddify behind BiFlow. The
+snapshot now also records the following.
+
+- **Runtime:** the live `StackSnapshot` (component phases, messages, the
+  per-client status, and the `last_error` code with technical details) and
+  the helper's availability, authorization, and version. Exit IPs are
+  dropped and addresses in messages are replaced with their class.
+- **Hiddify as it really runs:** from `shared_preferences.json`, only
+  `service-mode`, `region`, and `started_by_user`. From
+  `data/current-config.json`, only inbound types, listen classes, and
+  ports, plus the clash-API port. Both files' modification times are
+  included. Profiles, outbounds, and subscriptions are never read. The
+  executable location is a class; it is not run, because it is a GUI.
+- **Side tunnels:** the OpenVPN binary location and `--version`. Per
+  profile: the helper audit result, `proto`, `dev`, the remote count with
+  host classes and port, `auth-user-pass` against saved credentials,
+  cipher directives, compression, inline blocks, the number of referenced
+  key or certificate files missing next to the profile, and whether the
+  filtered remote is pinned in `side-tunnel-remotes.json`.
+- **The Mihomo binary** location and `-v`.
+- **Clock skew** against an HTTP `Date` header. A skewed clock breaks
+  vmess/reality and OpenVPN TLS.
+- **Install:** the kind, dev profile, elevated (root or Administrator),
+  uptime, and locale.
+- **Linux:** `ip rule`, and `ip route show table all` for IPv4 and IPv6
+  with addresses classified. Also `rp_filter`, `/dev/net/tun`,
+  `disable_ipv6`, `ip_forward`, and the relevant loaded modules; the
+  active NetworkManager connection types; active services plus the helper
+  unit state; and listener owners from socket inodes.
+- **Windows:** the IPv6 default and split-default routes, route counts per
+  interface, and service states. Also the `BiFlowHelper` scheduled-task
+  state, and enabled firewall block rules that name a VPN, proxy, or
+  BiFlow executable.
+- **Pause and Disconnect** are snapshot triggers
+  (`stack_paused`/`stack_stopped`).
+
+New findings include:
+
+- Runtime: `helper_version_mismatch`, `helper_unreachable`,
+  `helper_service`, `stack_last_error`, and `client_status`.
+- Hiddify: `hiddify_tun_mode_conflicts_with_biflow_tun` and
+  `hiddify_port_mismatch`.
+- Side tunnels: `side_tunnel_profile_rejected`,
+  `side_tunnel_profile_missing_files`, `side_tunnel_credentials_missing`,
+  `side_tunnel_remote_not_pinned`, `side_tunnel_tap_without_adapter`, and
+  `openvpn_binary_missing`.
+- Pause and Disconnect: `pause_cleared_hiddify_system_proxy` and the
+  `leftover_*` family (TUN adapter, TUN routes, fake-ip DNS, and an OS
+  proxy pointing at Mihomo).
+- Routing: `system_proxy_bypasses_split_routing` and
+  `ipv6_default_route_outside_tun`.
+- Host: `rp_filter_strict`, `tun_device_missing`,
+  `other_vpn_service_running`, `firewall_blocks_program`, `clock_skew_seconds`,
+  and `app_running_elevated`.
+
 ## Consequences
 
 Every report says what else is on the host, even after the log was cleared.
