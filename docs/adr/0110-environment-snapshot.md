@@ -108,6 +108,27 @@ New findings include:
   `other_vpn_service_running`, `firewall_blocks_program`, `clock_skew_seconds`,
   and `app_running_elevated`.
 
+## Loopback self-test and a robust Windows collector (6.2.49)
+
+A Windows field log reported "localhost does not open while connected". Its
+snapshot held only `powershell exited with exit code: 1`: the `-File`
+temp-script run failed in about 190 ms with no output (execution policy
+or temp-file access), so there was no host data at all.
+
+- The Windows script now runs via `-EncodedCommand` (UTF-16LE Base64).
+  That needs no temp file, and the script execution policy does not
+  apply. The output is forced to UTF-8.
+- A failed collector command records its first stderr line, with
+  addresses classified.
+- `loopback` is probed on every snapshot:
+  - the classes `localhost` resolves to, in order;
+  - an ephemeral listener on `127.0.0.1` and on `::1`, connected to
+    within 1.5 s;
+  - each enabled local-proxy port on both families.
+- Loopback findings: `loopback_ipv4_blocked`, `loopback_ipv6_blocked`,
+  `localhost_resolves_non_loopback`, `client_port_refused_on_loopback`,
+  and `client_ipv4_only_but_localhost_prefers_ipv6`.
+
 ## Consequences
 
 Every report says what else is on the host, even after the log was cleared.

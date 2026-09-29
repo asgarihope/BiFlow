@@ -17,41 +17,20 @@ pub(super) async fn collect_platform(
     report: &mut EnvironmentReport,
     _tun_name: &str,
 ) -> PlatformData {
-    let mut script = match tempfile::Builder::new()
-        .prefix("biflow-environment-")
-        .suffix(".ps1")
-        .tempfile()
-    {
-        Ok(file) => file,
-        Err(error) => {
-            report
-                .collection_errors
-                .push(format!("temp script: {}", error.kind()));
-            return PlatformData::default();
-        }
-    };
-    let written = {
-        use std::io::Write;
-        let file = script.as_file_mut();
-        file.write_all(WINDOWS_SCRIPT.as_bytes())
-            .and_then(|()| file.flush())
-    };
-    if let Err(error) = written {
-        report
-            .collection_errors
-            .push(format!("temp script write: {}", error.kind()));
-        return PlatformData::default();
-    }
-    let path = script.path().to_string_lossy().into_owned();
+    // `-EncodedCommand` needs no temp file and is not subject to the
+    // script execution policy; a GPO `AllSigned`/`Restricted` policy made
+    // `-File` exit 1 with no output on a field machine.
+    let encoded = encoded_command(WINDOWS_SCRIPT);
     let output = run_command(
         "powershell",
         &[
+            "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-File",
-            &path,
+            "-EncodedCommand",
+            &encoded,
         ],
     )
     .await;
@@ -72,10 +51,33 @@ pub(super) async fn collect_platform(
     }
 }
 
+/// `powershell -EncodedCommand` takes Base64 of the UTF-16LE script.
+fn encoded_command(script: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = chunk.iter().enumerate().fold(0_u32, |acc, (index, byte)| {
+            acc | (u32::from(*byte) << (16 - 8 * index))
+        });
+        for index in 0..4 {
+            if index <= chunk.len() {
+                let sextet = (triple >> (18 - 6 * index)) & 0x3f;
+                encoded.push(char::from(ALPHABET[sextet as usize]));
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    encoded
+}
+
 /// Emits one JSON object. Every probe is independent and silently empty when
 /// a cmdlet is missing (Server SKUs have no `SecurityCenter2`, for example).
 const WINDOWS_SCRIPT: &str = r#"
 $ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $o = [ordered]@{}
 $os = Get-CimInstance Win32_OperatingSystem
 $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -470,5 +472,13 @@ mod tests {
         ] {
             assert!(WINDOWS_SCRIPT.contains(&format!("$o.{key} =")), "{key}");
         }
+    }
+
+    #[test]
+    fn encoded_command_is_utf16le_base64_within_the_command_line_limit() {
+        // "ab" -> 61 00 62 00 -> YQBiAA==
+        assert_eq!(encoded_command("ab"), "YQBiAA==");
+        assert_eq!(encoded_command("abc"), "YQBiAGMA");
+        assert!(encoded_command(WINDOWS_SCRIPT).len() < 30_000);
     }
 }

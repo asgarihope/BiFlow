@@ -158,6 +158,7 @@ pub struct EnvironmentReport {
     pub services: Vec<ServiceState>,
     /// Outbound block rules that name a VPN, proxy, or `BiFlow` executable.
     pub firewall_block_rules: Vec<String>,
+    pub loopback: LoopbackInfo,
     pub runtime: RuntimeInfo,
     pub apps: AppsInfo,
     pub clock: ClockInfo,
@@ -237,6 +238,32 @@ pub struct HostsFileInfo {
     pub readable: bool,
     pub entries: usize,
     pub localhost: Vec<&'static str>,
+}
+
+/// Whether loopback works while `BiFlow` is up. A throwaway listener on each
+/// family proves the path itself; client ports show what `localhost:<port>`
+/// reaches.
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct LoopbackInfo {
+    /// Address classes `localhost` resolves to, in resolver order.
+    pub localhost_resolves: Vec<&'static str>,
+    pub ipv4: Option<LoopbackProbe>,
+    pub ipv6: Option<LoopbackProbe>,
+    pub clients: Vec<ClientLoopback>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LoopbackProbe {
+    pub connected: bool,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClientLoopback {
+    pub preset: &'static str,
+    pub port: u16,
+    pub ipv4: bool,
+    pub ipv6: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
@@ -476,6 +503,7 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
             .is_some_and(|dir| dir.join("system-proxy-snapshot.json").exists()),
     };
     report.clock = clock;
+    report.loopback = loopback_info(context.config.as_ref()).await;
     report.env_proxy = process_env_proxies(|name| std::env::var(name).ok());
     report.hosts_file = hosts_file_info(&hosts_path());
     report.kube = kube_info(context.config.as_ref(), context.rules.as_ref());
@@ -494,6 +522,110 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
     report.findings = findings(&report, context.config.as_ref());
     report.collection_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     report
+}
+
+// ---------------------------------------------------------------------------
+// Loopback self-test.
+// ---------------------------------------------------------------------------
+
+const LOOPBACK_TIMEOUT: Duration = Duration::from_millis(1500);
+
+async fn connects(address: std::net::SocketAddr) -> Option<u64> {
+    let started = Instant::now();
+    match tokio::time::timeout(LOOPBACK_TIMEOUT, tokio::net::TcpStream::connect(address)).await {
+        Ok(Ok(_)) => Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        _ => None,
+    }
+}
+
+/// Binds an ephemeral listener and connects to it. `None` when the family
+/// cannot even bind (IPv6 disabled), which is not a `BiFlow` problem.
+async fn loopback_probe(address: IpAddr) -> Option<LoopbackProbe> {
+    let listener = tokio::net::TcpListener::bind((address, 0)).await.ok()?;
+    let target = listener.local_addr().ok()?;
+    let accept = tokio::spawn(async move { listener.accept().await.is_ok() });
+    let started = Instant::now();
+    let connected = connects(target).await.is_some();
+    accept.abort();
+    Some(LoopbackProbe {
+        connected,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
+async fn loopback_info(config: Option<&AppConfig>) -> LoopbackInfo {
+    let localhost_resolves = tokio::net::lookup_host("localhost:0")
+        .await
+        .map(|addresses| {
+            let mut classes = Vec::new();
+            for address in addresses {
+                let class = match address.ip() {
+                    IpAddr::V4(ip) if ip.is_loopback() => "loopback_v4",
+                    IpAddr::V6(ip) if ip.is_loopback() => "loopback_v6",
+                    other => classify_host(&other.to_string()),
+                };
+                if !classes.contains(&class) {
+                    classes.push(class);
+                }
+            }
+            classes
+        })
+        .unwrap_or_default();
+    let v4 = IpAddr::from([127, 0, 0, 1]);
+    let v6 = IpAddr::from(std::net::Ipv6Addr::LOCALHOST);
+    let (ipv4, ipv6) = tokio::join!(loopback_probe(v4), loopback_probe(v6));
+    let mut clients = Vec::new();
+    for client in config.map(AppConfig::enabled_clients).unwrap_or_default() {
+        if let ClientConfig::LocalProxy { port, .. } = client.config {
+            let (on_v4, on_v6) =
+                tokio::join!(connects((v4, port).into()), connects((v6, port).into()));
+            clients.push(ClientLoopback {
+                preset: client.spec().id,
+                port,
+                ipv4: on_v4.is_some(),
+                ipv6: on_v6.is_some(),
+            });
+        }
+    }
+    LoopbackInfo {
+        localhost_resolves,
+        ipv4,
+        ipv6,
+        clients,
+    }
+}
+
+fn loopback_findings(report: &EnvironmentReport, findings: &mut Vec<String>) {
+    let loopback = &report.loopback;
+    if loopback.ipv4.as_ref().is_some_and(|probe| !probe.connected) {
+        findings.push("loopback_ipv4_blocked".into());
+    }
+    if loopback.ipv6.as_ref().is_some_and(|probe| !probe.connected) {
+        findings.push("loopback_ipv6_blocked".into());
+    }
+    if loopback
+        .localhost_resolves
+        .iter()
+        .any(|class| !class.starts_with("loopback"))
+    {
+        findings.push("localhost_resolves_non_loopback".into());
+    }
+    let v6_first = loopback.localhost_resolves.first() == Some(&"loopback_v6");
+    for client in &loopback.clients {
+        if !client.ipv4 && !client.ipv6 {
+            findings.push(format!(
+                "client_port_refused_on_loopback:{}:{}",
+                client.preset, client.port
+            ));
+        } else if client.ipv4 && !client.ipv6 && v6_first {
+            // `localhost:<port>` tries ::1 first; an IPv4-only listener then
+            // depends on the caller falling back to 127.0.0.1.
+            findings.push(format!(
+                "client_ipv4_only_but_localhost_prefers_ipv6:{}:{}",
+                client.preset, client.port
+            ));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -980,6 +1112,7 @@ fn findings(report: &EnvironmentReport, config: Option<&AppConfig>) -> Vec<Strin
     network_findings(report, config, &mut findings);
     host_findings(report, config, &mut findings);
     state_findings(report, config, &mut findings);
+    loopback_findings(report, &mut findings);
     apps::app_findings(report, config, &mut findings);
     findings
 }
@@ -1369,7 +1502,18 @@ async fn run_command_timeout(
         .map_err(|_| format!("{program_label} timed out"))?
         .map_err(|error| format!("{program_label} could not start: {}", error.kind()))?;
     if !output.status.success() && output.stdout.is_empty() {
-        return Err(format!("{program_label} exited with {}", output.status));
+        // The first stderr line is the only clue a field report carries.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| apps::redact_addresses(&line.chars().take(240).collect::<String>()))
+            .unwrap_or_default();
+        return Err(format!(
+            "{program_label} exited with {}: {reason}",
+            output.status
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -1626,5 +1770,58 @@ clusters:
                 serde_json::to_string_pretty(&report).unwrap_or_default()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn loopback_self_test_connects_on_this_host() {
+        let info = loopback_info(Some(&AppConfig::default())).await;
+        assert!(info.ipv4.as_ref().is_some_and(|probe| probe.connected));
+        assert!(info
+            .localhost_resolves
+            .iter()
+            .all(|class| class.starts_with("loopback")));
+        assert_eq!(info.clients.len(), 1);
+    }
+
+    #[test]
+    fn loopback_findings_name_blocked_families_and_ipv4_only_clients() {
+        let report = EnvironmentReport {
+            loopback: LoopbackInfo {
+                localhost_resolves: vec!["loopback_v6", "loopback_v4"],
+                ipv4: Some(LoopbackProbe {
+                    connected: true,
+                    elapsed_ms: 1,
+                }),
+                ipv6: Some(LoopbackProbe {
+                    connected: false,
+                    elapsed_ms: 1500,
+                }),
+                clients: vec![
+                    ClientLoopback {
+                        preset: "hiddify",
+                        port: 12334,
+                        ipv4: true,
+                        ipv6: false,
+                    },
+                    ClientLoopback {
+                        preset: "happ",
+                        port: 10808,
+                        ipv4: false,
+                        ipv6: false,
+                    },
+                ],
+            },
+            ..EnvironmentReport::default()
+        };
+        let mut found = Vec::new();
+        loopback_findings(&report, &mut found);
+        assert_eq!(
+            found,
+            vec![
+                "loopback_ipv6_blocked",
+                "client_ipv4_only_but_localhost_prefers_ipv6:hiddify:12334",
+                "client_port_refused_on_loopback:happ:10808",
+            ]
+        );
     }
 }

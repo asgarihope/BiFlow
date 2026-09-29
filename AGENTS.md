@@ -279,6 +279,8 @@ If a required command fails or emits a warning from project code, fix it in the 
 - `powershell_single_quote` returns a complete quoted PowerShell literal. When interpolating it into a generated script, do not add another quote pair around the placeholder; double-quoted paths then become invalid PowerShell and the downloaded NSIS installer never starts. Assert the full generated assignment in the Rust regression test (ADR 0098).
 - On Windows with a small page file, the pre-commit workspace test can exhaust virtual memory when Cargo compiles crates in parallel (`os error 1455`), corrupting dependent rlib reads. Re-run the full hook with `CARGO_BUILD_JOBS=1`; do not interpret the follow-on metadata errors as source failures.
 
+- A Windows diagnostic PowerShell run with `-File <temp .ps1>` can exit 1 in milliseconds with no stdout (execution policy set by GPO, or temp-file access), and a stdout-only runner then logs a bare exit code. Run scripts with `-EncodedCommand` (UTF-16LE Base64), force UTF-8 output, and keep the first stderr line in the error (ADR 0110).
+
 - Older Pillow has no `Image.Resampling`; generate icons with `Image.LANCZOS` / `Image.BICUBIC`.
 - Inner `#![allow(...)]` attributes must be the first item in a Rust module, before `use`.
 - Vitest coverage config requires `provider: "v8"` (or `istanbul`) in this Vite version.
