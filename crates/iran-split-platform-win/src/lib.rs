@@ -1660,6 +1660,7 @@ impl PlatformBackend for WindowsBackend {
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError> {
         let config = self.config.read().await.clone();
         let generation_id = Uuid::new_v4();
+        prune_staging(&self.paths.generation_staging_dir);
         let staging_root = self
             .paths
             .generation_staging_dir
@@ -2368,6 +2369,33 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), CoreError> {
         .persist(path)
         .map_err(|error| platform_error(&error.error))?;
     Ok(())
+}
+
+/// Keeps staged generations bounded; a failure is logged and ignored
+/// because staging a new generation does not depend on it.
+fn prune_staging(root: &Path) {
+    match iran_split_core::prune_staged_generations(root, iran_split_core::STAGED_GENERATIONS_KEPT)
+    {
+        Ok(0) => {}
+        Ok(removed) => info!(
+            event = "runtime.staging_pruned",
+            section = "runtime_generation",
+            initiator = "windows_platform_backend",
+            cause = "bounded_staging",
+            trace_route = "engine->windows_platform_backend->staging",
+            removed,
+            "removed old staged runtime generations"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => warn!(
+            event = "runtime.staging_prune_failed",
+            section = "runtime_generation",
+            initiator = "windows_platform_backend",
+            cause = %error.kind(),
+            trace_route = "engine->windows_platform_backend->staging",
+            "could not list staged runtime generations"
+        ),
+    }
 }
 
 #[cfg(test)]

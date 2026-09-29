@@ -2246,6 +2246,80 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<(), CoreError> {
     }
 }
 
+/// Staged generations the desktop keeps: the newest few cover a reload that
+/// reads the just-registered config and a rollback.
+pub const STAGED_GENERATIONS_KEPT: usize = 4;
+
+/// Deletes all but the `keep` most recently modified staged generation
+/// directories under `root`. Only UUID-named directories are touched, so a
+/// misconfigured root never loses unrelated files. The helper copies a
+/// generation on register, so a staged copy is never the running one.
+///
+/// Every failed Live apply staged a new generation, and nothing removed
+/// them: a retry loop grew the directory by ~1 MB every 10 seconds.
+///
+/// # Errors
+///
+/// Returns the I/O error when `root` cannot be listed. A directory that
+/// cannot be removed is skipped and not counted.
+pub fn prune_staged_generations(root: &std::path::Path, keep: usize) -> std::io::Result<usize> {
+    let mut staged: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(root)?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| Uuid::parse_str(name).is_ok())
+        })
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (modified, entry.path())
+        })
+        .collect();
+    staged.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut removed = 0;
+    for (_, path) in staged.into_iter().skip(keep) {
+        if std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::prune_staged_generations;
+
+    #[test]
+    fn prune_keeps_the_newest_uuid_directories_and_ignores_other_entries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut ids = Vec::new();
+        for _ in 0..6 {
+            let id = uuid::Uuid::new_v4().to_string();
+            let path = root.path().join(&id);
+            std::fs::create_dir(&path).expect("dir");
+            std::fs::write(path.join("config.yaml"), b"x").expect("file");
+            // Creation order is the mtime order; a short pause keeps it
+            // strict on every filesystem (a directory cannot be opened for
+            // `set_modified` on Windows).
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            ids.push(id);
+        }
+        std::fs::create_dir(root.path().join("not-a-generation")).expect("other");
+        std::fs::write(root.path().join("notes.txt"), b"keep").expect("file");
+        assert_eq!(prune_staged_generations(root.path(), 4).expect("prune"), 2);
+        for (index, id) in ids.iter().enumerate() {
+            assert_eq!(root.path().join(id).exists(), index >= 2, "{id}");
+        }
+        assert!(root.path().join("not-a-generation").exists());
+        assert!(root.path().join("notes.txt").exists());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -776,43 +776,52 @@ async fn get_traffic_totals(app: AppHandle) -> Result<traffic::TrafficTotals, St
         "traffic",
         "tauri_command",
         "get_traffic_totals",
-        async move {
-            let services = services(&app)?;
-            let mut store = services.traffic.lock().await;
-            let connected = matches!(
-                services.engine.snapshot().phase,
-                StackPhase::Running | StackPhase::Degraded
-            );
-            let (session_sent, session_received) = if connected {
-                match session_connection_totals(services).await {
-                    Ok(totals) => totals,
-                    Err(cause) => {
-                        warn!(
-                            event = "traffic.session_probe_failed",
-                            section = "traffic",
-                            initiator = "get_traffic_totals",
-                            cause = %cause,
-                            trace_route = "tauri_command->mihomo_controller",
-                            "session traffic totals were unavailable; using last known session"
-                        );
-                        store.last_generation()
-                    }
-                }
-            } else {
-                (0, 0)
-            };
-            Ok(traffic::accumulate(
-                &mut store,
-                session_sent,
-                session_received,
-                connected,
-            ))
-        },
+        async move { Ok::<_, String>(sample_traffic(services(&app)?).await) },
     )
     .await
 }
 
-async fn session_connection_totals(services: &AppServices) -> Result<(u64, u64), String> {
+/// Samples Mihomo once and folds it into the session totals. Called by the
+/// status bar and by a 2 s backend loop, so closed client-upstream
+/// connections are still subtracted while the window is hidden.
+async fn sample_traffic(services: &AppServices) -> traffic::TrafficTotals {
+    // Hold the store across the request: two overlapping samples applied out
+    // of order would look like a counter reset and re-add the whole total.
+    let mut store = services.traffic.lock().await;
+    let connected = matches!(
+        services.engine.snapshot().phase,
+        StackPhase::Running | StackPhase::Degraded
+    );
+    let (sample, bypass_names) = if connected {
+        match session_traffic_sample(services).await {
+            Ok((sample, names)) => (Some(sample), names),
+            Err(cause) => {
+                warn!(
+                    event = "traffic.session_probe_failed",
+                    section = "traffic",
+                    initiator = "get_traffic_totals",
+                    cause = %cause,
+                    trace_route = "tauri_command->mihomo_controller",
+                    "session traffic sample was unavailable; keeping the last total"
+                );
+                (None, std::collections::BTreeSet::new())
+            }
+        }
+    } else {
+        (None, std::collections::BTreeSet::new())
+    };
+    traffic::accumulate(&mut store, sample.as_ref(), &bypass_names, connected)
+}
+
+async fn session_traffic_sample(
+    services: &AppServices,
+) -> Result<
+    (
+        iran_split_mihomo::TrafficSample,
+        std::collections::BTreeSet<String>,
+    ),
+    String,
+> {
     let config = services
         .config_store
         .load()
@@ -824,10 +833,19 @@ async fn session_connection_totals(services: &AppServices) -> Result<(u64, u64),
         &config.mihomo.controller_secret,
     )
     .map_err(|error| error.to_string())?;
-    tokio::time::timeout(TRAFFIC_PROBE_TIMEOUT, client.connection_totals())
+    let platform = if cfg!(windows) {
+        iran_split_mihomo::Platform::Windows
+    } else {
+        iran_split_mihomo::Platform::Linux
+    };
+    let sample = tokio::time::timeout(TRAFFIC_PROBE_TIMEOUT, client.traffic_sample())
         .await
         .map_err(|_| "traffic probe timed out".to_owned())?
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    Ok((
+        sample,
+        iran_split_mihomo::process_bypass_names(&config, platform),
+    ))
 }
 
 #[tauri::command]
@@ -3761,6 +3779,24 @@ fn initialize_diagnostics() {
         .unwrap_or_else(|error| panic!("BiFlow debug.log initialization failed: {error}"));
 }
 
+/// Samples session traffic every 2 s while connected, independent of the
+/// webview (whose timers are throttled when the window is hidden).
+fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if let Ok(services) = services(&handle) {
+                if matches!(
+                    services.engine.snapshot().phase,
+                    StackPhase::Running | StackPhase::Degraded
+                ) {
+                    sample_traffic(services).await;
+                }
+            }
+        }
+    });
+}
+
 /// Refreshes health and rejoins late local proxies every 10 seconds.
 fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
     tauri::async_runtime::spawn(async move {
@@ -3852,6 +3888,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         }
     });
     spawn_health_loop(health_engine);
+    spawn_traffic_loop(app.handle().clone());
     if let Some(window) = app.get_webview_window("main") {
         restore_main_window_size(&window, &data_dir);
     }

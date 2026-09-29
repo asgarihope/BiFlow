@@ -1509,12 +1509,9 @@ impl PlatformBackend for LinuxBackend {
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError> {
         let config = self.config.read().await.clone();
         let generation_id = Uuid::new_v4();
-        let staging_root = self
-            .paths
-            .user_data_dir
-            .join("runtime")
-            .join("generations")
-            .join(generation_id.to_string());
+        let staging_parent = self.paths.user_data_dir.join("runtime").join("generations");
+        prune_staging(&staging_parent);
+        let staging_root = staging_parent.join(generation_id.to_string());
         fs::create_dir_all(&staging_root).map_err(|error| platform_error(&error))?;
         let runtime_paths = RuntimePaths {
             private_networks: PathBuf::from("private.txt"),
@@ -1637,16 +1634,22 @@ impl PlatformBackend for LinuxBackend {
             .await?
         {
             HelperReply::ProcessStatus(status) if status.running => {
-                let Some(generation_id) = status.generation_id else {
+                if status.generation_id.is_none() {
                     return Err(CoreError::Platform(
                         "running Mihomo has no generation to reload".into(),
                     ));
-                };
+                }
+                // The overlay copied this generation byte for byte (the
+                // helper checks its SHA-256) into the root-only
+                // `/var/lib/iran-split` workdir, which the desktop cannot
+                // read: every Live apply failed with EACCES. Send the
+                // desktop's own staged copy of the same bytes.
                 let config_path = self
                     .paths
-                    .system_runtime_dir
+                    .user_data_dir
+                    .join("runtime")
                     .join("generations")
-                    .join(generation_id.to_string())
+                    .join(generation.generation_id.to_string())
                     .join("config.yaml");
                 self.hot_reload_running(rebind_host.as_deref(), &config_path)
                     .await
@@ -2158,6 +2161,33 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), CoreError> {
 #[allow(dead_code)]
 fn hash_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// Keeps staged generations bounded; a failure is logged and ignored
+/// because staging a new generation does not depend on it.
+fn prune_staging(root: &Path) {
+    match iran_split_core::prune_staged_generations(root, iran_split_core::STAGED_GENERATIONS_KEPT)
+    {
+        Ok(0) => {}
+        Ok(removed) => info!(
+            event = "runtime.staging_pruned",
+            section = "runtime_generation",
+            initiator = "linux_platform_backend",
+            cause = "bounded_staging",
+            trace_route = "engine->linux_platform_backend->staging",
+            removed,
+            "removed old staged runtime generations"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => warn!(
+            event = "runtime.staging_prune_failed",
+            section = "runtime_generation",
+            initiator = "linux_platform_backend",
+            cause = %error.kind(),
+            trace_route = "engine->linux_platform_backend->staging",
+            "could not list staged runtime generations"
+        ),
+    }
 }
 
 #[cfg(test)]

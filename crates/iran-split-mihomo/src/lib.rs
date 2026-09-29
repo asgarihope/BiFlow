@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -557,6 +557,16 @@ fn direct_nameserver_policy(resolvers: &[String]) -> BTreeMap<String, Vec<String
     .collect()
 }
 
+/// Process names the generated config sends DIRECT as client/app overhead
+/// (the `PROCESS-NAME` payloads of [`process_bypass_rules`]).
+#[must_use]
+pub fn process_bypass_names(app: &AppConfig, platform: Platform) -> BTreeSet<String> {
+    process_bypass_rules(app, platform)
+        .iter()
+        .filter_map(|rule| rule.split(',').nth(1).map(str::to_owned))
+        .collect()
+}
+
 fn process_bypass_rules(app: &AppConfig, platform: Platform) -> Vec<String> {
     let driver_platform = match platform {
         Platform::Linux => DriverPlatform::Linux,
@@ -867,6 +877,30 @@ impl ControllerClient {
     pub async fn connection_totals(&self) -> Result<(u64, u64), MihomoError> {
         let snapshot = self.connections_snapshot().await?;
         Ok((snapshot.upload_total, snapshot.download_total))
+    }
+
+    /// Reads lifetime totals and per-connection byte counters in one request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the controller request or response decoding fails.
+    pub async fn traffic_sample(&self) -> Result<TrafficSample, MihomoError> {
+        let snapshot = self.connections_snapshot().await?;
+        Ok(TrafficSample {
+            upload_total: snapshot.upload_total,
+            download_total: snapshot.download_total,
+            connections: snapshot
+                .connections
+                .into_iter()
+                .map(|entry| ConnectionBytes {
+                    id: entry.id,
+                    rule: entry.rule,
+                    rule_payload: entry.rule_payload,
+                    upload: entry.upload,
+                    download: entry.download,
+                })
+                .collect(),
+        })
     }
 
     /// Reads live connections from the controller.
@@ -1280,6 +1314,39 @@ struct ConnectionEntry {
     chains: Vec<String>,
     #[serde(default)]
     rule: String,
+    #[serde(rename = "rulePayload", default)]
+    rule_payload: String,
+    #[serde(default)]
+    upload: u64,
+    #[serde(default)]
+    download: u64,
+}
+
+/// Mihomo process-lifetime totals plus per-connection byte counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrafficSample {
+    pub upload_total: u64,
+    pub download_total: u64,
+    pub connections: Vec<ConnectionBytes>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionBytes {
+    pub id: String,
+    /// Mihomo rule type, e.g. `ProcessName`, `DomainSuffix`, `Match`.
+    pub rule: String,
+    pub rule_payload: String,
+    pub upload: u64,
+    pub download: u64,
+}
+
+impl ConnectionBytes {
+    /// True for a connection matched by one of our process bypass rules:
+    /// a proxy client's own upstream, not traffic the user generated.
+    #[must_use]
+    pub fn is_process_bypass(&self, bypass_names: &BTreeSet<String>) -> bool {
+        self.rule.starts_with("ProcessName") && bypass_names.contains(&self.rule_payload)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2204,6 +2271,36 @@ mod tests {
             source.contains("Hiddify egress probe failed"),
             "probe failures must not reuse the Mihomo controller error"
         );
+    }
+
+    #[test]
+    fn traffic_sample_marks_only_our_process_bypass_as_overhead() {
+        let parsed: ConnectionsSnapshot = serde_json::from_value(serde_json::json!({
+            "uploadTotal": 100,
+            "downloadTotal": 200,
+            "connections": [
+                {"id": "a", "rule": "ProcessName", "rulePayload": "hiddify", "upload": 40, "download": 60, "chains": ["DIRECT"]},
+                {"id": "b", "rule": "ProcessName", "rulePayload": "kubectl", "upload": 1, "download": 2, "chains": ["DIRECT"]},
+                {"id": "c", "rule": "Match", "rulePayload": "", "upload": 5, "download": 6, "chains": ["x"]}
+            ]
+        }))
+        .expect("connections snapshot");
+        let names = process_bypass_names(&AppConfig::default(), Platform::Linux);
+        assert!(names.contains("hiddify"));
+        let overhead: Vec<&str> = parsed
+            .connections
+            .iter()
+            .map(|entry| ConnectionBytes {
+                id: entry.id.clone(),
+                rule: entry.rule.clone(),
+                rule_payload: entry.rule_payload.clone(),
+                upload: entry.upload,
+                download: entry.download,
+            })
+            .filter(|entry| entry.is_process_bypass(&names))
+            .map(|entry| if entry.id == "a" { "a" } else { "other" })
+            .collect();
+        assert_eq!(overhead, vec!["a"]);
     }
 
     #[test]
