@@ -2544,6 +2544,9 @@ mod tests {
         assert!(config.contains("strict-route: true"));
         assert!(config.contains("find-process-mode: always"));
         assert!(config.contains("auto-redirect: false"));
+        // Top-level `ipv6: true` (strict-route must not block `::1`, ADR
+        // 0112); only the DNS section stays IPv4-only.
+        assert!(config.contains("ipv6: true"));
         assert!(config.contains("ipv6: false"));
         // DoH is pinned to the default client's group (client registry
         // replaced the fixed "VPN" group name).

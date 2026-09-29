@@ -281,6 +281,8 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 - A Windows diagnostic PowerShell run with `-File <temp .ps1>` can exit 1 in milliseconds with no stdout (execution policy set by GPO, or temp-file access), and a stdout-only runner then logs a bare exit code. Run scripts with `-EncodedCommand` (UTF-16LE Base64), force UTF-8 output, and keep the first stderr line in the error (ADR 0110).
 
+- On Windows, top-level `ipv6: false` makes Mihomo drop the TUN inet6 address. sing-tun `strict-route` then installs an unconditional WFP "block ipv6" connect filter that only exempts Mihomo, so `localhost` -> `::1` fails instantly while connected. A route exclusion cannot fix a WFP block. Keep top-level `ipv6: true` on Windows and restrict AAAA through `dns.ipv6: false` instead (ADR 0112).
+
 - Older Pillow has no `Image.Resampling`; generate icons with `Image.LANCZOS` / `Image.BICUBIC`.
 - Inner `#![allow(...)]` attributes must be the first item in a Rust module, before `use`.
 - Vitest coverage config requires `provider: "v8"` (or `istanbul`) in this Vite version.

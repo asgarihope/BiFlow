@@ -296,15 +296,27 @@ pub struct ServiceState {
 pub struct KubeInfo {
     pub config_files: usize,
     pub clusters: Vec<KubeCluster>,
+    /// File names of `exec` credential plugins (e.g. `kubelogin`). They
+    /// reach their own identity servers, routed separately from the cluster.
+    pub auth_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct KubeCluster {
     pub host: &'static str,
+    /// `ipv4`, `ipv6`, or `domain`. An IPv6 API server was invisible behind
+    /// `public_ip` while Windows strict-route blocked all IPv6 (ADR 0112).
+    pub family: &'static str,
     pub port: Option<u16>,
     pub proxy_url: bool,
     pub route: Option<String>,
     pub route_reason: Option<String>,
+    /// TCP connect from this process; comparing stopped vs running shows
+    /// whether `BiFlow` is what breaks the cluster. The address is not logged.
+    pub tcp_connect: Option<bool>,
+    pub tcp_connect_ms: Option<u64>,
+    #[serde(skip)]
+    pub target: Option<(String, u16)>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -507,6 +519,7 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
     report.env_proxy = process_env_proxies(|name| std::env::var(name).ok());
     report.hosts_file = hosts_file_info(&hosts_path());
     report.kube = kube_info(context.config.as_ref(), context.rules.as_ref());
+    probe_kube_clusters(&mut report.kube.clusters).await;
 
     let tun_name = context
         .config
@@ -1027,6 +1040,11 @@ fn kube_info(config: Option<&AppConfig>, rules: Option<&RuleSet>) -> KubeInfo {
         info.clusters.extend(parse_kubeconfig(&text, |host| {
             route_for(config, rules, host)
         }));
+        for command in parse_kube_auth_commands(&text) {
+            if !info.auth_commands.contains(&command) {
+                info.auth_commands.push(command);
+            }
+        }
     }
     info
 }
@@ -1068,18 +1086,29 @@ fn parse_kubeconfig(
                 .as_ref()
                 .map_or("", |endpoint| endpoint.host.as_str());
             let decision = endpoint.as_ref().and_then(|_| route(host));
+            let port = endpoint.as_ref().and_then(|endpoint| {
+                endpoint.port.or(match endpoint.scheme.as_deref() {
+                    Some("https") => Some(443),
+                    Some("http") => Some(80),
+                    _ => None,
+                })
+            });
             clusters.push(KubeCluster {
                 host: classify_host(host),
-                port: endpoint.as_ref().and_then(|endpoint| {
-                    endpoint.port.or(match endpoint.scheme.as_deref() {
-                        Some("https") => Some(443),
-                        Some("http") => Some(80),
-                        _ => None,
-                    })
-                }),
+                family: match host.parse::<IpAddr>() {
+                    Ok(IpAddr::V4(_)) => "ipv4",
+                    Ok(IpAddr::V6(_)) => "ipv6",
+                    Err(_) => "domain",
+                },
+                port,
                 proxy_url: false,
                 route: decision.as_ref().map(|(outbound, _)| outbound.clone()),
                 route_reason: decision.map(|(_, reason)| reason),
+                tcp_connect: None,
+                tcp_connect_ms: None,
+                target: port
+                    .filter(|_| !host.is_empty())
+                    .map(|port| (host.to_owned(), port)),
             });
         } else if trimmed.starts_with("proxy-url:") {
             if let Some(cluster) = clusters.last_mut() {
@@ -1088,6 +1117,48 @@ fn parse_kubeconfig(
         }
     }
     clusters
+}
+
+/// `command:` values under `exec:` credential plugins, reduced to a file name.
+fn parse_kube_auth_commands(text: &str) -> Vec<String> {
+    let mut commands = BTreeSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim().trim_start_matches("- ").trim();
+        if let Some(value) = trimmed.strip_prefix("command:") {
+            let value = value.trim().trim_matches(['"', '\'']);
+            let name = value
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(40)
+                .collect::<String>();
+            if !name.is_empty() {
+                commands.insert(name);
+            }
+        }
+    }
+    commands.into_iter().collect()
+}
+
+/// Connects to each cluster endpoint once (TCP only, 3 s). Resolves names
+/// through the system resolver, exactly like kubectl.
+async fn probe_kube_clusters(clusters: &mut [KubeCluster]) {
+    for cluster in clusters.iter_mut().take(8) {
+        let Some((host, port)) = cluster.target.clone() else {
+            continue;
+        };
+        let started = Instant::now();
+        let connected = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect((host.as_str(), port)),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+        cluster.tcp_connect = Some(connected);
+        cluster.tcp_connect_ms =
+            Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+    }
 }
 
 /// Heuristics that point at the conflicts reports keep hitting. Each entry
@@ -1255,7 +1326,14 @@ fn host_state_findings(report: &EnvironmentReport, findings: &mut Vec<String>) {
         let name = service.name.to_ascii_lowercase();
         let state = service.state.to_ascii_lowercase();
         let active = matches!(state.as_str(), "active" | "running");
-        if (name == "iran-split-helper" || name == "biflowhelper") && !active {
+        // A SYSTEM scheduled task is invisible to a standard user's
+        // `Get-ScheduledTask`; only report it when the helper is also down.
+        let helper_reachable = report
+            .runtime
+            .helper
+            .as_ref()
+            .is_some_and(|helper| helper.available);
+        if (name == "iran-split-helper" || name == "biflowhelper") && !active && !helper_reachable {
             findings.push(format!("helper_service:{}", service.state));
         } else if active
             && [
@@ -1368,6 +1446,13 @@ fn network_findings(
         if cluster.proxy_url {
             findings.push(format!("kube_cluster_proxy_url:{}", cluster.host));
         }
+        if cluster.tcp_connect == Some(false) {
+            findings.push(format!(
+                "kube_cluster_unreachable:{}:{}",
+                cluster.family,
+                cluster.route.as_deref().unwrap_or("unknown")
+            ));
+        }
         if cluster.route.as_deref() == Some("direct") {
             findings.push(format!(
                 "kube_cluster_direct:{}:{}",
@@ -1390,16 +1475,22 @@ fn network_findings(
             findings.push(format!("other_tunnel_adapter_up:{}", adapter.name));
         }
     }
-    let full_defaults = report
-        .default_routes
-        .iter()
-        .filter(|route| route.prefix.ends_with("/0"))
-        .count();
-    if full_defaults > 1 {
-        findings.push(format!("multiple_default_routes:{full_defaults}"));
+    // One IPv4 and one IPv6 default route is normal; count per family.
+    for family_is_v6 in [false, true] {
+        let full_defaults = report
+            .default_routes
+            .iter()
+            .filter(|route| route.prefix.contains(':') == family_is_v6)
+            .filter(|route| route.prefix.ends_with("/0"))
+            .count();
+        if full_defaults > 1 {
+            let family = if family_is_v6 { "v6" } else { "v4" };
+            findings.push(format!("multiple_default_routes:{family}:{full_defaults}"));
+        }
     }
     for route in &report.default_routes {
-        if route.prefix.ends_with("/1") {
+        // Mihomo's own TUN installs the split-default routes.
+        if route.prefix.ends_with("/1") && !is_biflow_tun(config, &route.interface) {
             findings.push(format!("split_default_route:{}", route.interface));
         }
     }
@@ -1436,8 +1527,9 @@ fn host_findings(
         if !ours
             && !process.starts_with("mihomo")
             && !process.starts_with("openvpn")
-            && !process.starts_with("docker")
-            && !process.starts_with("vmmem")
+            && !["docker", "vmmem", "wsl"]
+                .iter()
+                .any(|name| process.contains(name))
         {
             findings.push(format!("other_vpn_process:{process}"));
         }
@@ -1647,6 +1739,13 @@ clusters:
     proxy-url: socks5://127.0.0.1:1080
   name: cloud
 "#;
+        assert_eq!(parse_kube_auth_commands(text), Vec::<String>::new());
+        assert_eq!(
+            parse_kube_auth_commands(
+                "users:\n- user:\n    exec:\n      command: /usr/local/bin/kubelogin\n"
+            ),
+            vec!["kubelogin"]
+        );
         let clusters = parse_kubeconfig(text, |host| {
             Some((
                 if host.starts_with("10.") {
@@ -1659,6 +1758,9 @@ clusters:
         });
         assert_eq!(clusters.len(), 2);
         assert_eq!(clusters[0].host, "private");
+        assert_eq!(clusters[0].family, "ipv4");
+        assert_eq!(clusters[1].family, "domain");
+        assert_eq!(clusters[0].target, Some(("10.20.30.40".to_owned(), 6443)));
         assert_eq!(clusters[0].port, Some(6443));
         assert_eq!(clusters[0].route.as_deref(), Some("direct"));
         assert!(!clusters[0].proxy_url);
@@ -1823,5 +1925,57 @@ clusters:
                 "client_port_refused_on_loopback:happ:10808",
             ]
         );
+    }
+
+    #[test]
+    fn own_tun_split_routes_dual_stack_defaults_and_hidden_helper_task_are_not_findings() {
+        let config = AppConfig::default();
+        let route = |prefix: &str, interface: &str| RouteInfo {
+            prefix: prefix.into(),
+            interface: interface.into(),
+            gateway: "private",
+            route_metric: None,
+            interface_metric: None,
+        };
+        let mut report = EnvironmentReport {
+            default_routes: vec![
+                route("128.0.0.0/1", &config.mihomo.tun_name),
+                route("0.0.0.0/0", "Ethernet 2"),
+                route("::/0", "Ethernet 2"),
+            ],
+            services: vec![ServiceState {
+                name: "BiFlowHelper".into(),
+                state: "missing".into(),
+            }],
+            vpn_processes: vec!["com.docker.backend".into(), "wslservice".into()],
+            ..EnvironmentReport::default()
+        };
+        report.runtime.helper = Some(apps::HelperSummary {
+            available: true,
+            authorized: true,
+            version: None,
+        });
+        assert_eq!(findings(&report, Some(&config)), Vec::<String>::new());
+        report.runtime.helper = None;
+        assert_eq!(
+            findings(&report, Some(&config)),
+            vec!["helper_service:missing".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn kube_probe_reports_connect_result_without_the_address() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("listener");
+        let port = listener.local_addr().expect("addr").port();
+        let text = format!("clusters:\n- cluster:\n    server: https://127.0.0.1:{port}\n");
+        let mut clusters = parse_kubeconfig(&text, |_| None);
+        probe_kube_clusters(&mut clusters).await;
+        assert_eq!(clusters[0].tcp_connect, Some(true));
+        drop(listener);
+        let encoded = serde_json::to_string(&clusters).expect("json");
+        assert!(!encoded.contains("127.0.0.1"));
+        assert!(!encoded.contains("target"));
     }
 }

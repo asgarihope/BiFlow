@@ -115,3 +115,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0109](./0109-application-routes-in-list-management.md)        | Route running applications from List Management                     | Accepted   |
 | [0110](./0110-environment-snapshot.md)                         | Log a host environment snapshot in every debug.log                  | Accepted   |
 | [0111](./0111-traffic-overhead-and-staged-reload.md)           | Count user traffic once, reload from the staged copy, bound staging | Accepted   |
+| [0112](./0112-windows-tun-keeps-ipv6.md)                       | Windows TUN keeps IPv6 so strict-route does not block ::1           | Accepted   |

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; the `::1` half is corrected by ADR 0112 (the block was a WFP filter, not a route).
 
 ## Context
 

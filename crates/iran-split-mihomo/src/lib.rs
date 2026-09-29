@@ -309,7 +309,12 @@ pub fn generate_config_with_handles(
             app.mihomo.controller_host, app.mihomo.controller_port
         ),
         secret: app.mihomo.controller_secret.clone(),
-        ipv6: platform != Platform::Windows,
+        // Windows must keep IPv6 on: with `ipv6: false` Mihomo drops the TUN's
+        // inet6 address, and sing-tun `strict-route` then installs an
+        // unconditional WFP "block ipv6" connect filter that only exempts
+        // Mihomo itself. Every `localhost` -> `::1` connection failed while
+        // connected (ADR 0112). DNS below still answers IPv4 only there.
+        ipv6: true,
         find_process_mode: "always".into(),
         tun: TunConfig {
             enable: true,
@@ -1618,7 +1623,12 @@ mod tests {
         assert!(generated.yaml.contains("- ::1/128"));
         assert!(generated.yaml.contains("find-process-mode: always"));
         assert!(generated.yaml.contains("auto-redirect: false"));
-        assert!(generated.yaml.contains("ipv6: false"));
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(&generated.yaml).expect("generated YAML parses");
+        // Top-level IPv6 keeps the TUN inet6 address, so strict-route does
+        // not block `::1`; the fake-ip DNS still answers IPv4 only.
+        assert_eq!(document["ipv6"], serde_yaml::Value::Bool(true));
+        assert_eq!(document["dns"]["ipv6"], serde_yaml::Value::Bool(false));
         assert!(generated.yaml.contains("dns-query#client-"));
         assert!(generated.yaml.contains("PROCESS-NAME,Hiddify.exe,DIRECT"));
         assert!(generated
