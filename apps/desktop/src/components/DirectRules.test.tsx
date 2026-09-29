@@ -64,6 +64,7 @@ describe("DirectRules", () => {
         snapshot_revision: "767ef8bf5673",
         sets: [],
       },
+      pageTabs: { rules: "iran" },
     });
     render(<DirectRules rules={rules} />);
     expect(screen.getByText(/62[,\u00a0\s]?829/)).toBeVisible();
@@ -73,49 +74,87 @@ describe("DirectRules", () => {
     ).toBeEnabled();
   });
 
-  it("adds a custom direct rule without leaving the page", async () => {
-    const addRule = vi.fn().mockResolvedValue(undefined);
+  it("adds a pasted site through the chosen route and confirms it", async () => {
+    const pinRoute = vi.fn().mockResolvedValue(undefined);
+    const showToast = vi.fn();
     useAppStore.setState({
       settings: baseSettings(),
       rules,
       actionPending: false,
-      cloudRules: {
-        domain_count: 1,
-        ip_count: 1,
-        last_synced_at: null,
-        source: "bundled",
-        snapshot_revision: null,
-        sets: [],
-      },
-      addRule,
+      pageTabs: {},
+      pinRoute,
+      showToast,
     });
     render(<DirectRules rules={rules} />);
-    await userEvent.type(screen.getByLabelText("Domain or IP"), "aparat.com");
-    await userEvent.click(screen.getByRole("button", { name: /^Add rule$/ }));
-    expect(addRule).toHaveBeenCalledWith("aparat.com");
+    expect(screen.getByRole("tab", { name: "Sites" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await userEvent.type(
+      screen.getByLabelText("Site or IP"),
+      "https://www.aparat.com/v/1",
+    );
+    await userEvent.click(screen.getByRole("radio", { name: "DIRECT" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    expect(pinRoute).toHaveBeenCalledWith("www.aparat.com", "direct");
+    expect(showToast).toHaveBeenCalledWith("www.aparat.com → DIRECT");
+    expect(screen.getByLabelText("Site or IP")).toHaveValue("");
   });
 
-  it("keeps the input when adding a rule fails", async () => {
-    const addRule = vi.fn().mockRejectedValue(new Error("rules changed"));
+  it("keeps the input when adding a site fails", async () => {
+    const pinRoute = vi.fn().mockRejectedValue(new Error("rules changed"));
     useAppStore.setState({
       settings: baseSettings(),
       rules,
       actionPending: false,
-      cloudRules: {
-        domain_count: 1,
-        ip_count: 1,
-        last_synced_at: null,
-        source: "bundled",
-        snapshot_revision: null,
-        sets: [],
-      },
-      addRule,
+      pageTabs: {},
+      pinRoute,
     });
     render(<DirectRules rules={rules} />);
-    await userEvent.type(screen.getByLabelText("Domain or IP"), "aparat.com");
-    await userEvent.click(screen.getByRole("button", { name: /^Add rule$/ }));
-    expect(addRule).toHaveBeenCalledWith("aparat.com");
-    expect(screen.getByLabelText("Domain or IP")).toHaveValue("aparat.com");
+    await userEvent.type(screen.getByLabelText("Site or IP"), "aparat.com");
+    await userEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    expect(pinRoute).toHaveBeenCalled();
+    expect(screen.getByLabelText("Site or IP")).toHaveValue("aparat.com");
+  });
+
+  it("marks an empty site instead of submitting it", async () => {
+    const pinRoute = vi.fn();
+    useAppStore.setState({
+      settings: baseSettings(),
+      rules,
+      pageTabs: {},
+      pinRoute,
+    });
+    render(<DirectRules rules={rules} />);
+    await userEvent.type(screen.getByLabelText("Site or IP"), "   ");
+    await userEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    expect(pinRoute).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Site or IP")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+  });
+
+  it("switches sections with the tab strip and arrow keys", async () => {
+    useAppStore.setState({
+      settings: baseSettings(),
+      rules,
+      pageTabs: {},
+    });
+    render(<DirectRules rules={rules} />);
+    const sites = screen.getByRole("tab", { name: "Sites" });
+    sites.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(screen.getByRole("tab", { name: "Lists" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByTestId("rule-lists")).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: "Iran rules" }));
+    expect(
+      screen.getByRole("button", { name: /update from cloud/i }),
+    ).toBeVisible();
+    expect(useAppStore.getState().pageTabs.rules).toBe("iran");
   });
 
   it("routes a detected application and keeps its choice in the saved list", async () => {
@@ -125,6 +164,7 @@ describe("DirectRules", () => {
       rules,
       actionPending: false,
       setApplicationRoute,
+      pageTabs: { rules: "apps" },
     });
     render(<DirectRules rules={rules} />);
     const route = await screen.findByRole("combobox", {

@@ -16,7 +16,7 @@ const settings: AppConfig = baseSettings();
 
 describe("Settings", () => {
   beforeEach(() => {
-    useAppStore.setState({ actionPending: false });
+    useAppStore.setState({ actionPending: false, pageTabs: {} });
   });
 
   it("lets the operator pick a DIRECT DNS preset including Mokhaberat", async () => {
@@ -25,7 +25,7 @@ describe("Settings", () => {
       .mockResolvedValue(true);
     useAppStore.setState({ saveSettings });
     render(<Settings settings={settings} />);
-    await userEvent.click(screen.getByRole("tab", { name: "Mihomo" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Network" }));
     const dns = screen.getByLabelText("DIRECT DNS");
     expect(dns).toHaveValue("fake_ip");
     expect(screen.getByRole("option", { name: "Fake-ip" })).toBeInTheDocument();

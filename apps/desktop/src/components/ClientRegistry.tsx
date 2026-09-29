@@ -20,11 +20,7 @@ import {
   INITIAL_SIDE_TUNNEL_CONNECT_TIMEOUT,
   nextSideTunnelRetryTimeout,
 } from "../lib/sideTunnelConnect";
-import {
-  defaultRouteFromKey,
-  outboundKey,
-  outboundLabel,
-} from "../lib/outbound";
+import { outboundLabel } from "../lib/outbound";
 import {
   downloadLinksFor,
   downloadUrlFor,
@@ -37,6 +33,7 @@ import {
 } from "../lib/presets";
 import { useAppStore } from "../store/app";
 import { StatusPill } from "./StatusPill";
+import { PageHeader } from "./ui/PageHeader";
 
 export function ClientRegistry() {
   const { t } = useTranslation();
@@ -49,7 +46,6 @@ export function ClientRegistry() {
     setClientEnabled,
     setClientAllowDirectWhenDown,
     updateClient,
-    setDefaultRoute,
     pinRoute,
     removeRule,
     routeFallbackNotice,
@@ -78,21 +74,27 @@ export function ClientRegistry() {
   if (!settings) return null;
 
   return (
-    <section data-testid="client-registry" className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">{t("clientsTitle")}</h2>
-          <p className="mt-1 text-sm text-muted">{t("clientsHelp")}</p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setCatalogOpen((open) => !open)}
-          className="inline-flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 font-semibold text-white"
-        >
-          <Plus size={18} aria-hidden />
-          {t("addClient")}
-        </button>
-      </div>
+    <section
+      data-testid="client-registry"
+      aria-labelledby="clients-title"
+      className="ui-enter flex flex-col gap-3 pb-2"
+    >
+      <PageHeader
+        id="clients-title"
+        title={t("ui.nav.clients")}
+        info={t("clientsHelp")}
+        actions={
+          <button
+            type="button"
+            aria-expanded={catalogOpen}
+            onClick={() => setCatalogOpen((open) => !open)}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-brand px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-brand/90"
+          >
+            <Plus size={16} aria-hidden />
+            {t("addClient")}
+          </button>
+        }
+      />
 
       {routeFallbackNotice ? (
         <p
@@ -144,47 +146,6 @@ export function ClientRegistry() {
           {t("sideTunnelStartExhausted", { seconds: 60 })}
         </p>
       ) : null}
-
-      <label className="flex max-w-xl flex-col gap-1 text-sm font-medium">
-        <span>{t("defaultRouteLabel")}</span>
-        <select
-          data-testid="default-route"
-          value={outboundKey(settings.default_route)}
-          disabled={actionPending}
-          onChange={(event) =>
-            void setDefaultRoute(defaultRouteFromKey(event.target.value))
-          }
-          className="rounded-xl border-ink/15 bg-surface"
-        >
-          <option value="direct">{t("direct")}</option>
-          {enabledClients(clients).map((client) => {
-            const reported = snapshot?.clients.find(
-              (item) => item.id === client.id,
-            );
-            const down =
-              (snapshot?.phase === "running" ||
-                snapshot?.phase === "degraded") &&
-              (reported?.status.phase === "stopped" ||
-                reported?.status.phase === "error" ||
-                reported?.status.phase === "unavailable");
-            const title = presetById(client.preset as PresetId).title;
-            return (
-              <option key={client.id} value={client.id} disabled={down}>
-                {down
-                  ? `${title} — ${reported?.status.message ?? t("disabled")}`
-                  : title}
-              </option>
-            );
-          })}
-        </select>
-        {snapshot?.live_route?.match_proxy ? (
-          <p className="text-xs font-semibold" data-testid="live-match">
-            {t("mihomoUsing", {
-              name: outboundLabel(snapshot.live_route.match_proxy, clients),
-            })}
-          </p>
-        ) : null}
-      </label>
 
       {catalogOpen ? (
         <div

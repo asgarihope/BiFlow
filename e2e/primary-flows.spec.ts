@@ -38,9 +38,48 @@ async function expectNoDocumentOverflow(page: Page) {
   expect(overflow.vertical).toBe(false);
 }
 
+function nav(page: Page, name: string) {
+  return page
+    .getByRole("navigation", { name: "Primary navigation" })
+    .getByRole("button", { name, exact: true });
+}
+
+/** Opens one of the five sections, and optionally one of its tabs. */
+async function goTo(page: Page, name: string, tab?: string) {
+  await nav(page, name).click();
+  if (tab) {
+    await page.getByRole("tab", { name: tab, exact: true }).click();
+  }
+}
+
+/** The add-site bar on Home and Routing: host, route, Add. */
+async function addSite(page: Page, host: string, route: string) {
+  await page.getByLabel("Site or IP").fill(host);
+  await page.getByRole("radio", { name: route, exact: true }).click();
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+}
+
+/** Home keeps component detail behind the Health tile. */
+async function openHealth(page: Page) {
+  const toggle = page.getByRole("button", { name: /^Health/ });
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+    await toggle.click();
+  }
+}
+
+async function installMissing(page: Page) {
+  await openHealth(page);
+  const install = page.getByRole("button", { name: "Install", exact: true });
+  while ((await install.count()) > 0) {
+    const before = await install.count();
+    await install.first().click();
+    await expect(install).toHaveCount(before - 1);
+  }
+}
+
 async function walkAdvancedPages(page: Page, labels: string[]) {
   for (const name of labels) {
-    await page.getByRole("button", { name }).click();
+    await nav(page, name).click();
     await expectNoDocumentOverflow(page);
   }
 }
@@ -84,7 +123,7 @@ test.describe("primary BiFlow flows", () => {
   }) => {
     await openFresh(page);
     await expect(
-      page.getByRole("heading", { name: "Ready when you are" }),
+      page.getByRole("heading", { name: "Not connected" }),
     ).toBeVisible();
     const statusBar = page.locator("footer[role='status']");
     await expect(statusBar).toContainText("Internet connected");
@@ -94,6 +133,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(statusBar).toContainText("Received: 2.00 MiB");
     await expect(page.getByText("unknown", { exact: true })).toHaveCount(0);
 
+    await openHealth(page);
     const installButtons = page.getByRole("button", {
       name: "Install",
       exact: true,
@@ -110,7 +150,7 @@ test.describe("primary BiFlow flows", () => {
 
     await connectButton(page).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
     await expect(page.getByText("203.0.113.42")).toBeVisible();
     await expect(
@@ -122,31 +162,62 @@ test.describe("primary BiFlow flows", () => {
 
     await page.getByRole("button", { name: "Pause" }).click();
     await expect(
-      page.getByRole("heading", { name: "Split routing is paused" }),
+      page.getByRole("heading", { name: "Paused", exact: true }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
     await page.getByRole("button", { name: "Resume" }).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
 
     await disconnectButton(page).click();
     await expect(
-      page.getByRole("heading", { name: "Ready when you are" }),
+      page.getByRole("heading", { name: "Not connected" }),
     ).toBeVisible();
     await expect(page.locator(".traffic-flow-route")).toHaveCount(0);
+  });
+
+  test("adds a pasted site from Home and reroutes it in place", async ({
+    page,
+  }) => {
+    await openFresh(page);
+    await addSite(page, "https://www.aparat.com/v/abc", "Hiddify");
+    await expect(page.getByTestId("toast")).toContainText(
+      "www.aparat.com → Hiddify",
+    );
+    await expect(page.getByLabel("Site or IP")).toHaveValue("");
+    const recent = page.getByRole("region", { name: "Your sites" });
+    const row = recent
+      .getByRole("listitem")
+      .filter({ hasText: "www.aparat.com" });
+    await expect(row.getByRole("combobox")).toHaveValue(
+      "11111111-1111-1111-1111-111111111111",
+    );
+    await row.getByRole("combobox").selectOption("direct");
+    await expect(row.getByRole("combobox")).toHaveValue("direct");
+    await recent.getByRole("button", { name: /^All \d+/ }).click();
+    await expect(page.getByRole("heading", { name: "Routing" })).toBeVisible();
+    await expect(
+      page.getByRole("cell", { name: "www.aparat.com", exact: true }),
+    ).toBeVisible();
+  });
+
+  test("adds a site from Basic mode without switching to Advanced", async ({
+    page,
+  }) => {
+    await openFresh(page, "basic");
+    await addSite(page, "digikala.com", "DIRECT");
+    await expect(page.getByTestId("toast")).toContainText(
+      "digikala.com → DIRECT",
+    );
+    await expect(nav(page, "Routing")).toHaveCount(0);
   });
 
   test("shows why Mihomo or TUN stopped instead of a bare error", async ({
     page,
   }) => {
     await openFresh(page);
-    const installButtons = page.getByRole("button", {
-      name: "Install",
-      exact: true,
-    });
-    await installButtons.nth(0).click();
-    await page.getByRole("button", { name: "Install", exact: true }).click();
+    await installMissing(page);
     const detail =
       "platform operation failed: Mihomo exited immediately: wintun.dll was not found";
     await page.evaluate((reason) => {
@@ -164,12 +235,7 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
-    const installButtons = page.getByRole("button", {
-      name: "Install",
-      exact: true,
-    });
-    await installButtons.nth(0).click();
-    await page.getByRole("button", { name: "Install", exact: true }).click();
+    await installMissing(page);
     const connect = page.locator("[data-connection-action='connect']");
     await expect(connect).toHaveAttribute("data-connect-glow", "available");
     await page.evaluate(() => {
@@ -199,7 +265,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(connect).toHaveAttribute("data-connect-glow", "off");
     await connect.click({ force: true });
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Pause" })).toBeEnabled();
     await expect(disconnectButton(page)).toBeEnabled();
@@ -216,12 +282,13 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
+    await openHealth(page);
     await expect(
       page.getByRole("button", { name: "Install", exact: true }),
     ).toHaveCount(2);
     await connectButton(page).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
     await expect(
       page.getByRole("button", { name: "Install", exact: true }),
@@ -239,7 +306,7 @@ test.describe("primary BiFlow flows", () => {
     await page.reload();
     await expect(page.getByText("BiFlow")).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "Setup needs attention" }),
+      page.getByRole("heading", { name: "Needs attention" }),
     ).toBeVisible();
     await expect(
       page.getByText("Helper service is not installed or running"),
@@ -258,10 +325,8 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "List Management" }).click();
-    await expect(
-      page.getByRole("heading", { name: "List Management" }),
-    ).toBeVisible();
+    await goTo(page, "Routing", "Iran rules");
+    await expect(page.getByRole("heading", { name: "Routing" })).toBeVisible();
     await expect(
       page.getByText("62,828").or(page.getByText("62828")),
     ).toBeVisible();
@@ -274,8 +339,8 @@ test.describe("primary BiFlow flows", () => {
       page.getByText("63,104").or(page.getByText("63104")),
     ).toBeVisible();
 
-    await page.getByLabel("Domain or IP").fill("aparat.com");
-    await page.getByRole("button", { name: "Add rule" }).click();
+    await page.getByRole("tab", { name: "Sites", exact: true }).click();
+    await addSite(page, "aparat.com", "DIRECT");
     await expect(
       page.getByRole("cell", { name: "aparat.com", exact: true }),
     ).toBeVisible();
@@ -285,14 +350,12 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "List Management" }).click();
+    await goTo(page, "Routing", "Apps");
     const route = page.getByRole("combobox", {
       name: "Route for kubectl.exe",
     });
     await expect(route).toBeVisible();
-    await expect(
-      page.locator("section[aria-labelledby='rules-title'] > *").last(),
-    ).toHaveAttribute("data-testid", "application-routes");
+    await expect(page.getByTestId("application-routes")).toBeVisible();
     await route.selectOption({ label: "Hiddify" });
     await expect(route).toHaveValue("11111111-1111-1111-1111-111111111111");
     await expect(
@@ -302,7 +365,7 @@ test.describe("primary BiFlow flows", () => {
 
   test("diagnoses whether a host is direct or vpn", async ({ page }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot", "Test");
     await page.getByLabel("Test IP or domain").fill("openai.com");
     await page.getByRole("button", { name: "Test flow" }).click();
     await expect(page.getByText("openai.com → Hiddify")).toBeVisible();
@@ -328,6 +391,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(page.getByRole("dialog")).toContainText("Press Connect first");
     await page.getByRole("button", { name: "Close" }).click();
 
+    await page.getByRole("tab", { name: "Tools", exact: true }).click();
     await expect(
       page.getByRole("heading", { name: "Permanent debug.log", exact: true }),
     ).toBeVisible();
@@ -348,8 +412,7 @@ test.describe("primary BiFlow flows", () => {
 
   test("saves a DIRECT DNS preset from Settings", async ({ page }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "Settings" }).click();
-    await page.getByRole("tab", { name: "Mihomo" }).click();
+    await goTo(page, "Settings", "Network");
     const dns = page.getByLabel("DIRECT DNS");
     await expect(dns).toHaveValue("fake_ip");
     await dns.selectOption("mokhaberat");
@@ -367,6 +430,7 @@ test.describe("primary BiFlow flows", () => {
     const shell = page.locator("[data-connection-glow]");
     await expect(shell).toHaveAttribute("data-connection-glow", "none");
 
+    await openHealth(page);
     const installButtons = page.getByRole("button", {
       name: "Install",
       exact: true,
@@ -397,7 +461,7 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot", "Test");
     await page.getByLabel("Test IP or domain").fill("https://www.rade.ir/");
     await page.getByRole("button", { name: "Test flow" }).click();
     // The bundled Iran list keeps every .ir host direct until it is pinned.
@@ -409,7 +473,7 @@ test.describe("primary BiFlow flows", () => {
     await flow.locator("select").selectOption({ label: "Hiddify" });
     await expect(flow.getByText("www.rade.ir → Hiddify")).toBeVisible();
 
-    await page.getByRole("button", { name: "List Management" }).click();
+    await goTo(page, "Routing", "Sites");
     // Pins stay exactly as typed; the moved host keeps its www label.
     const pinned = page.getByRole("row").filter({
       has: page.getByText("www.rade.ir", { exact: true }),
@@ -420,7 +484,7 @@ test.describe("primary BiFlow flows", () => {
 
     await pinned.locator("select").selectOption("direct");
     await expect(pinned.locator("select")).toHaveValue("direct");
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot");
     await page.getByLabel("Test IP or domain").fill("www.rade.ir");
     await page.getByRole("button", { name: "Test flow" }).click();
     await expect(page.getByText("www.rade.ir → DIRECT")).toBeVisible();
@@ -428,7 +492,7 @@ test.describe("primary BiFlow flows", () => {
 
   test("restarts Hiddify on clean state from diagnostics", async ({ page }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot", "Tools");
     await expect(
       page.getByRole("heading", { name: "Fresh Hiddify start", exact: true }),
     ).toBeVisible();
@@ -452,7 +516,7 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot", "Tools");
     await page.getByRole("button", { name: "Test tunnel egress" }).click();
     await expect(page.getByText(/on-link gateway 0\.0\.0\.0/)).toBeVisible();
   });
@@ -461,6 +525,7 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
+    await goTo(page, "Clients");
     await page.getByRole("button", { name: "Add client" }).click();
     await expect(page.getByTestId("client-catalog")).toBeVisible();
     await page.getByRole("button", { name: /v2rayN/ }).click();
@@ -470,7 +535,11 @@ test.describe("primary BiFlow flows", () => {
     await card.getByPlaceholder("example.com").fill("openai.com");
     await card.getByRole("button", { name: "Pin" }).click();
     await expect(card.getByText("openai.com")).toBeVisible();
+    // Where unmatched traffic goes is chosen on Home, next to Connect.
+    await goTo(page, "Home");
     await page.getByTestId("default-route").selectOption("direct");
+    await goTo(page, "Clients");
+    await card.getByText("Settings & pinned hosts").click();
     await card.getByRole("button", { name: "Delete" }).click();
     const confirm = card.getByRole("dialog");
     await expect(confirm).toContainText(
@@ -481,9 +550,10 @@ test.describe("primary BiFlow flows", () => {
     await confirm.getByRole("button", { name: "Delete" }).click();
     await expect(page.getByTestId("client-card-v2rayn")).toHaveCount(0);
 
+    await goTo(page, "Home");
     await connectButton(page).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
   });
 
@@ -492,7 +562,8 @@ test.describe("primary BiFlow flows", () => {
   }) => {
     await openFresh(page);
     await connectButton(page).click();
-    await expect(page.getByTestId("mihomo-using")).toContainText("Hiddify");
+    await expect(page.getByTestId("live-match")).toContainText("Hiddify");
+    await openHealth(page);
     await page.getByRole("button", { name: /View config/ }).click();
     const config = page.getByTestId("mihomo-config");
     await expect(config).toBeVisible();
@@ -505,6 +576,7 @@ test.describe("primary BiFlow flows", () => {
 
   test("picks a config file for OpenVPN and Windscribe", async ({ page }) => {
     await openFresh(page);
+    await goTo(page, "Clients");
     await page.getByRole("button", { name: "Add client" }).click();
     await page
       .getByTestId("client-catalog")
@@ -547,20 +619,10 @@ test.describe("primary BiFlow flows", () => {
     page,
   }) => {
     await openFresh(page);
-    const installButtons = page.getByRole("button", {
-      name: "Install",
-      exact: true,
-    });
-    const count = await installButtons.count();
-    for (let index = 0; index < count; index += 1) {
-      await page
-        .getByRole("button", { name: "Install", exact: true })
-        .first()
-        .click();
-    }
+    await installMissing(page);
     await connectButton(page).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
 
     await page.getByTestId("default-route").selectOption("direct");
@@ -579,7 +641,7 @@ test.describe("primary BiFlow flows", () => {
     await expect(banner).toHaveCount(0);
     await expect(page.getByTestId("default-route")).toHaveValue("direct");
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
   });
 
@@ -588,11 +650,11 @@ test.describe("primary BiFlow flows", () => {
   }) => {
     await openFresh(page);
     await walkAdvancedPages(page, [
-      "Dashboard",
-      "List Management",
-      "Diagnostics",
+      "Home",
+      "Routing",
+      "Clients",
+      "Troubleshoot",
       "Settings",
-      "About",
     ]);
 
     await page.evaluate(() => {
@@ -601,11 +663,11 @@ test.describe("primary BiFlow flows", () => {
     await page.reload();
     await expect(page.getByText("BiFlow")).toBeVisible();
     await walkAdvancedPages(page, [
-      "داشبورد",
-      "مدیریت لیست‌ها",
+      "خانه",
+      "مسیرها",
+      "کلاینت‌ها",
       "عیب‌یابی",
       "تنظیمات",
-      "درباره",
     ]);
   });
 
@@ -614,24 +676,20 @@ test.describe("primary BiFlow flows", () => {
   }) => {
     await openFresh(page, "basic");
     await expect(connectButton(page)).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "List Management" }),
-    ).toHaveCount(0);
+    await expect(nav(page, "Routing")).toHaveCount(0);
     await expectNoDocumentOverflow(page);
 
     await connectButton(page).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
     await disconnectButton(page).click();
 
     await page.getByRole("radio", { name: "Advanced" }).click();
     await expect(
-      page.getByRole("heading", { name: "Ready when you are" }),
+      page.getByRole("heading", { name: "Not connected" }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "List Management" }),
-    ).toBeVisible();
+    await expect(nav(page, "Routing")).toBeVisible();
   });
 
   test("hides advanced chrome in Basic mode and can return to Advanced", async ({
@@ -640,40 +698,36 @@ test.describe("primary BiFlow flows", () => {
     await openFresh(page);
     await page.getByRole("radio", { name: "Basic" }).click();
     await expect(connectButton(page)).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "List Management" }),
-    ).toHaveCount(0);
+    await expect(nav(page, "Routing")).toHaveCount(0);
     await expectNoDocumentOverflow(page);
 
     await connectButton(page).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
     await page.getByRole("button", { name: "Pause" }).click();
     await expect(
-      page.getByRole("heading", { name: "Split routing is paused" }),
+      page.getByRole("heading", { name: "Paused", exact: true }),
     ).toBeVisible();
     await page.getByRole("button", { name: "Resume" }).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
     await disconnectButton(page).click();
     await expect(connectButton(page)).toBeVisible();
 
     await page.getByRole("radio", { name: "Advanced" }).click();
     await expect(
-      page.getByRole("heading", { name: "Ready when you are" }),
+      page.getByRole("heading", { name: "Not connected" }),
     ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "List Management" }),
-    ).toBeVisible();
+    await expect(nav(page, "Routing")).toBeVisible();
   });
 
   test("offers select all, copy, cut, and paste on text inputs", async ({
     page,
   }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot", "Test");
     const field = page.getByLabel("Test IP or domain");
     await field.fill("example.ir");
     await field.evaluate((node) => {
@@ -709,15 +763,15 @@ test.describe("primary BiFlow flows", () => {
       navigator.clipboard.writeText("pasted.example.ir"),
     );
 
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot", "Test");
     const diagnosticsField = page.getByLabel("Test IP or domain");
     await diagnosticsField.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Paste" }).click();
     await expect(diagnosticsField).toHaveValue("pasted.example.ir");
 
     await page.evaluate(() => navigator.clipboard.writeText("kavenegar.com"));
-    await page.getByRole("button", { name: "List Management" }).click();
-    const ruleField = page.getByLabel("Domain or IP");
+    await goTo(page, "Routing", "Sites");
+    const ruleField = page.getByLabel("Site or IP");
     await ruleField.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Paste" }).click();
     await expect(ruleField).toHaveValue("kavenegar.com");
@@ -729,9 +783,9 @@ test.describe("primary BiFlow flows", () => {
     await openFresh(page);
     await connectButton(page).click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot", "Live");
     const card = page.getByTestId("live-connections");
     await expect(card).toBeVisible();
     // The actions column is an outbound <select> that also lists DIRECT, so
@@ -763,7 +817,7 @@ test.describe("primary BiFlow flows", () => {
 
   test("shows About author, version, and update check", async ({ page }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "About" }).click();
+    await goTo(page, "Settings", "About");
     await expect(page.getByText("Dariush Vesal")).toBeVisible();
     await expect(page.getByText(/Version \d+\.\d+\.\d+/)).toBeVisible();
     await page.getByRole("button", { name: "Check for updates" }).click();
@@ -784,14 +838,13 @@ test.describe("primary BiFlow flows", () => {
 
   test("keeps a subdomain pin exact while connected", async ({ page }) => {
     await openFresh(page);
-    await page.getByRole("button", { name: "List Management" }).click();
-    await page.getByLabel("Domain or IP").fill("api.shop.example.com");
-    await page.getByRole("button", { name: "Add rule" }).click();
+    await goTo(page, "Routing", "Sites");
+    await addSite(page, "api.shop.example.com", "DIRECT");
     await expect(
       page.getByRole("cell", { name: "api.shop.example.com", exact: true }),
     ).toBeVisible();
 
-    await page.getByRole("button", { name: "Diagnostics" }).click();
+    await goTo(page, "Troubleshoot", "Test");
     await page.getByLabel("Test IP or domain").fill("www.technolife.com");
     await page.getByRole("button", { name: "Test flow" }).click();
     await expect(page.getByText("www.technolife.com → DIRECT")).toBeVisible();

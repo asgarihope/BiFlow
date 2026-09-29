@@ -17,21 +17,22 @@ async function openAdvanced(page: Page) {
   await expect(page.getByRole("radio", { name: "Advanced" })).toBeVisible();
 }
 
+function nav(page: Page, name: string) {
+  return page
+    .getByRole("navigation", { name: "Primary navigation" })
+    .getByRole("button", { name, exact: true });
+}
+
 async function connectStack(page: Page) {
-  const installButtons = page.getByRole("button", {
-    name: "Install",
-    exact: true,
-  });
-  const count = await installButtons.count();
-  for (let index = 0; index < count; index += 1) {
-    await page
-      .getByRole("button", { name: "Install", exact: true })
-      .first()
-      .click();
+  await page.getByRole("button", { name: /^Health/ }).click();
+  const install = page.getByRole("button", { name: "Install", exact: true });
+  while ((await install.count()) > 0) {
+    await install.first().click();
   }
+  await page.getByRole("button", { name: /^Health/ }).click();
   await page.locator("[data-connection-action='connect']").click();
   await expect(
-    page.getByRole("heading", { name: "Protected split routing is active" }),
+    page.getByRole("heading", { name: "Connected", exact: true }),
   ).toBeVisible();
 }
 
@@ -46,27 +47,27 @@ test.describe("readme screenshots", () => {
     await page.setViewportSize({ width: 1120, height: 760 });
     await openAdvanced(page);
     await connectStack(page);
+    await page.getByLabel("Site or IP").fill("aparat.com");
+    await page.getByRole("radio", { name: "DIRECT", exact: true }).click();
+    await page.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(page.getByTestId("toast")).toBeVisible();
+    await expect(page.getByTestId("toast")).toHaveCount(0, { timeout: 5_000 });
     await page.screenshot({
       path: join(screenshotDir, "desktop.png"),
       animations: "disabled",
     });
 
-    // Diagnostics with Reachability probes and the live-connections table.
-    await page.getByRole("button", { name: "Diagnostics" }).click();
-    const reachability = page.getByTestId("reachability");
-    await expect(reachability).toBeVisible();
-    await expect(reachability.getByText("google.com")).toBeVisible();
-    await expect(reachability.getByText("iran.ir")).toBeVisible();
+    // Troubleshoot opens on the live-connections table.
+    await nav(page, "Troubleshoot").click();
     const connections = page.getByTestId("live-connections");
     await expect(connections).toBeVisible();
     await expect(connections.getByText("digikala.ir")).toBeVisible();
-    await reachability.scrollIntoViewIfNeeded();
     await page.screenshot({
       path: join(screenshotDir, "diagnostics.png"),
       animations: "disabled",
     });
 
-    await page.getByRole("button", { name: "Dashboard" }).click();
+    await nav(page, "Home").click();
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByTestId("bottom-nav")).toBeVisible();
     await page.screenshot({

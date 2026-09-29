@@ -7,6 +7,12 @@ import { useAppStore } from "../store/app";
 import { baseSettings, baseSnapshot } from "../test/fixtures";
 import { Diagnostics } from "./Diagnostics";
 
+/** Opens Troubleshoot on `tab`, the way the store restores the last tab. */
+function renderOn(tab: "live" | "test" | "tools" | "logs") {
+  useAppStore.setState({ pageTabs: { diagnostics: tab } });
+  return render(<Diagnostics report={null} />);
+}
+
 vi.mock("../api/desktop", () => ({
   desktop: {
     queryLogs: vi.fn().mockResolvedValue([]),
@@ -92,6 +98,7 @@ describe("Diagnostics", () => {
     vi.clearAllMocks();
     vi.mocked(desktop.listActiveConnections).mockResolvedValue([]);
     useAppStore.setState({
+      pageTabs: {},
       snapshot: null,
       settings: baseSettings(),
       actionPending: false,
@@ -99,7 +106,7 @@ describe("Diagnostics", () => {
   });
 
   it("tests whether a host is direct or vpn", async () => {
-    render(<Diagnostics report={null} />);
+    renderOn("test");
     await userEvent.type(
       screen.getByLabelText("Test IP or domain"),
       "openai.com",
@@ -111,7 +118,7 @@ describe("Diagnostics", () => {
   });
 
   it("shows the permanent debug log location and size", async () => {
-    render(<Diagnostics report={null} />);
+    renderOn("tools");
     expect(await screen.findByTestId("debug-log-size")).toHaveTextContent(
       "47 KiB",
     );
@@ -121,7 +128,7 @@ describe("Diagnostics", () => {
   });
 
   it("accepts a full URL and tests only its host", async () => {
-    render(<Diagnostics report={null} />);
+    renderOn("test");
     await userEvent.type(
       screen.getByLabelText("Test IP or domain"),
       "https://www.rade.ir/some/path?a=1",
@@ -137,7 +144,7 @@ describe("Diagnostics", () => {
     const previous = useAppStore.getState().pinRoute;
     useAppStore.setState({ pinRoute });
     try {
-      render(<Diagnostics report={null} />);
+      renderOn("test");
       await userEvent.type(
         screen.getByLabelText("Test IP or domain"),
         "openai.com",
@@ -172,7 +179,7 @@ describe("Diagnostics", () => {
       tested_at: new Date().toISOString(),
     });
     try {
-      render(<Diagnostics report={null} />);
+      renderOn("test");
       await userEvent.type(
         screen.getByLabelText("Test IP or domain"),
         "iran.ir",
@@ -199,7 +206,7 @@ describe("Diagnostics", () => {
       reachable: true,
       tested_at: new Date().toISOString(),
     });
-    render(<Diagnostics report={null} />);
+    renderOn("test");
     await userEvent.type(
       screen.getByLabelText("Test IP or domain"),
       "192.168.1.1",
@@ -221,7 +228,7 @@ describe("Diagnostics", () => {
       reachable: true,
       tested_at: new Date().toISOString(),
     });
-    render(<Diagnostics report={null} />);
+    renderOn("test");
     await userEvent.type(
       screen.getByLabelText("Test IP or domain"),
       "example.ir",
@@ -237,7 +244,7 @@ describe("Diagnostics", () => {
 
   it("restarts Hiddify on clean state and reports the backup", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    render(<Diagnostics report={null} />);
+    renderOn("tools");
     await userEvent.click(
       screen.getByRole("button", { name: /Fresh Hiddify start/ }),
     );
@@ -256,7 +263,7 @@ describe("Diagnostics", () => {
 
   it("does not touch Hiddify when the confirmation is declined", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
-    render(<Diagnostics report={null} />);
+    renderOn("tools");
     await userEvent.click(
       screen.getByRole("button", { name: /Fresh Hiddify start/ }),
     );
@@ -268,7 +275,7 @@ describe("Diagnostics", () => {
 
   it("requires confirmation before deleting the log", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
-    render(<Diagnostics report={null} />);
+    renderOn("tools");
     await screen.findByTestId("debug-log-size");
     await userEvent.click(screen.getByRole("button", { name: "Delete log" }));
     expect(confirm).toHaveBeenCalledOnce();
@@ -482,7 +489,7 @@ describe("Diagnostics", () => {
   });
 
   it("shows a reachability row per fixed probe domain", async () => {
-    render(<Diagnostics report={null} />);
+    renderOn("test");
     expect(
       await screen.findByRole("heading", { name: "Reachability" }),
     ).toBeVisible();
@@ -497,7 +504,7 @@ describe("Diagnostics", () => {
   });
 
   it("opens likely causes for an unreachable domain and retries", async () => {
-    render(<Diagnostics report={null} />);
+    renderOn("test");
     await screen.findByText("google.com");
     const googleRow = screen.getAllByTitle("Click for likely causes")[0];
     if (!googleRow) throw new Error("expected a clickable reachability row");
@@ -525,7 +532,7 @@ describe("Diagnostics", () => {
         detail: null,
       },
     ]);
-    render(<Diagnostics report={null} />);
+    renderOn("test");
     await userEvent.click(await screen.findByTitle("Click for likely causes"));
     expect(await screen.findByRole("dialog")).toHaveTextContent(
       "Press Connect first",
@@ -533,7 +540,7 @@ describe("Diagnostics", () => {
   });
 
   it("shows why a side-tunnel adapter cannot deliver packets", async () => {
-    render(<Diagnostics report={null} />);
+    renderOn("tools");
     await userEvent.click(
       screen.getByRole("button", { name: "Test tunnel egress" }),
     );

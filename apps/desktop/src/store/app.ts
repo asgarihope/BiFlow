@@ -37,7 +37,23 @@ import {
   type SettingsApplyNotice,
 } from "../lib/settingsApply";
 
-type Page = "dashboard" | "rules" | "diagnostics" | "settings" | "about";
+export type Page =
+  | "dashboard"
+  | "rules"
+  | "clients"
+  | "diagnostics"
+  | "settings"
+  | "about";
+
+export type ToastTone = "success" | "info" | "danger";
+
+export interface Toast {
+  id: number;
+  text: string;
+  tone: ToastTone;
+}
+
+const TOAST_MS = 2_800;
 
 const initialUpdateProgress = (): UpdateProgress => ({
   phase: "idle",
@@ -54,6 +70,10 @@ interface AppStore {
   actionPending: boolean;
   installingId: string | null;
   page: Page;
+  /** Last selected tab per page, so returning to a page keeps its tab and
+   * other screens (tray, links) can open a page on a specific tab. */
+  pageTabs: Partial<Record<Page, string>>;
+  toast: Toast | null;
   boot: BootstrapResult | null;
   snapshot: StackSnapshot | null;
   settings: AppConfig | null;
@@ -68,7 +88,10 @@ interface AppStore {
   error: string | null;
   installGuide: InstallGuide | null;
   update: UpdateProgress;
-  setPage: (page: Page) => void;
+  setPage: (page: Page, tab?: string) => void;
+  setPageTab: (page: Page, tab: string) => void;
+  showToast: (text: string, tone?: ToastTone) => void;
+  dismissToast: () => void;
   initialize: () => Promise<() => void>;
   toggleConnection: () => Promise<void>;
   pauseConnection: () => Promise<void>;
@@ -169,6 +192,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   actionPending: false,
   installingId: null,
   page: "dashboard",
+  pageTabs: {},
+  toast: null,
   boot: null,
   snapshot: null,
   settings: null,
@@ -187,7 +212,28 @@ export const useAppStore = create<AppStore>((set, get) => ({
   update: initialUpdateProgress(),
   sideTunnelLastTimeout: null,
   clientActionError: null,
-  setPage: (page) => set({ page }),
+  setPage: (page, tab) => {
+    // About lives in Settings now; keep the old page id working for the
+    // tray menu and any stored navigation.
+    const target: Page = page === "about" ? "settings" : page;
+    const targetTab = page === "about" ? "about" : tab;
+    set((state) => ({
+      page: target,
+      pageTabs: targetTab
+        ? { ...state.pageTabs, [target]: targetTab }
+        : state.pageTabs,
+    }));
+  },
+  setPageTab: (page, tab) =>
+    set((state) => ({ pageTabs: { ...state.pageTabs, [page]: tab } })),
+  showToast: (text, tone = "success") => {
+    const id = Date.now();
+    set({ toast: { id, text, tone } });
+    window.setTimeout(() => {
+      if (get().toast?.id === id) set({ toast: null });
+    }, TOAST_MS);
+  },
+  dismissToast: () => set({ toast: null }),
   initialize: async () => {
     try {
       const boot = await desktop.bootstrap();

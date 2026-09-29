@@ -1,9 +1,20 @@
-import { Download, Pause, Play, Power, PowerOff, X } from "lucide-react";
+import {
+  Download,
+  Pause,
+  Play,
+  Power,
+  PowerOff,
+  ShieldCheck,
+  ShieldOff,
+  X,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { StackSnapshot } from "../api/models";
 import { failureReason } from "../lib/failureReason";
 import { controlsLocked, isOperating } from "../lib/lifecycle";
+import { outboundLabel } from "../lib/outbound";
 import { useAppStore } from "../store/app";
+import { AddSiteBar } from "./AddSiteBar";
 import { AppButton, BUTTON_ICON_PX } from "./AppButton";
 import { ConnectionActionButton } from "./ConnectionActionButton";
 import { LifecycleCancelButton } from "./LifecycleCancelButton";
@@ -19,6 +30,7 @@ export function BasicDashboard({ snapshot }: { snapshot: StackSnapshot }) {
     error,
     installDependency,
     installingId,
+    settings,
   } = useAppStore();
   const active = snapshot.phase === "running" || snapshot.phase === "degraded";
   const paused = snapshot.phase === "paused";
@@ -31,20 +43,40 @@ export function BasicDashboard({ snapshot }: { snapshot: StackSnapshot }) {
     error ??
     (snapshot.last_error ? failureReason(snapshot.last_error, t) : null);
 
+  const liveName = snapshot.live_route?.match_proxy
+    ? outboundLabel(snapshot.live_route.match_proxy, settings?.clients ?? [])
+    : null;
+
   return (
     <section
       aria-labelledby="basic-dashboard-title"
-      className="flex h-full flex-col items-center justify-center gap-6 px-4 text-center"
+      className="ui-enter flex min-h-full flex-col items-center justify-center gap-6 px-4 py-6 text-center"
     >
-      <div className="max-w-md space-y-2">
+      <div className="flex flex-col items-center gap-3">
+        <span
+          aria-hidden
+          className={`relative flex h-16 w-16 items-center justify-center rounded-full ${
+            active
+              ? "status-orb-live bg-success/12 text-success"
+              : paused
+                ? "bg-amber-400/15 text-amber-500"
+                : "bg-ink/[0.06] text-muted"
+          }`}
+        >
+          {active ? <ShieldCheck size={30} /> : <ShieldOff size={30} />}
+        </span>
         <h1 id="basic-dashboard-title" className="text-2xl font-semibold">
           {active
-            ? t("activeTitle")
+            ? t("ui.hero.connected")
             : paused
-              ? t("pausedTitle")
-              : t("readyTitle")}
+              ? t("ui.hero.paused")
+              : t("ui.hero.disconnected")}
         </h1>
-        <p className="text-sm text-muted">{t("basicModeHelp")}</p>
+        <p className="text-sm text-muted">
+          {active && liveName
+            ? t("ui.basic.routing", { name: liveName })
+            : t("ui.basic.hint")}
+        </p>
       </div>
 
       {showError ? (
@@ -112,6 +144,10 @@ export function BasicDashboard({ snapshot }: { snapshot: StackSnapshot }) {
           }
           variant={paused ? "secondary" : "primary"}
         />
+      </div>
+
+      <div className="w-full max-w-xl text-start">
+        <AddSiteBar />
       </div>
     </section>
   );

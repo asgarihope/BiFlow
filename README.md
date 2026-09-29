@@ -24,11 +24,11 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/desktop.png" alt="BiFlow desktop dashboard while split routing is active" width="800" />
+  <img src="docs/screenshots/desktop.png" alt="BiFlow Home while connected: status and controls, the add-site bar, health, the live traffic diagram, and your routed sites" width="800" />
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/diagnostics.png" alt="Diagnostics with Reachability probes for Google, Facebook, and iran.ir, plus the live connections table" width="800" />
+  <img src="docs/screenshots/diagnostics.png" alt="Troubleshoot on the Live tab with the live connections table" width="800" />
 </p>
 
 <p align="center">

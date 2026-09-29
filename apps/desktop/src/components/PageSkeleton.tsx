@@ -1,4 +1,4 @@
-type Page = "dashboard" | "rules" | "diagnostics" | "settings" | "about";
+import type { Page } from "../store/app";
 
 function Bone({ className = "" }: { className?: string }) {
   return <div className={`animate-pulse rounded-lg bg-ink/10 ${className}`} />;
@@ -66,23 +66,23 @@ function TileRowBones({ count }: { count: number }) {
 }
 
 function DashboardSkeleton() {
+  // Mirrors Home: connection hero, add-site bar, three facts.
   return (
     <>
-      <HeaderBones />
+      <CardBone className="flex items-center gap-3.5 p-4">
+        <Bone className="h-12 w-12 rounded-full" />
+        <div className="flex-1 space-y-2">
+          <Bone className="h-5 w-40" />
+          <Bone className="h-3 w-64 max-w-full" />
+        </div>
+        <Bone className="h-14 w-36 rounded-2xl" />
+      </CardBone>
+      <CardBone className="flex gap-2 p-2">
+        <Bone className="h-10 flex-1 rounded-xl" />
+        <Bone className="h-10 w-40 rounded-xl" />
+        <Bone className="h-10 w-20 rounded-xl" />
+      </CardBone>
       <TileRowBones count={3} />
-      <TileRowBones count={5} />
-      <div className="grid gap-3 lg:grid-cols-2">
-        <CardBone>
-          <Bone className="h-5 w-28" />
-          <Bone className="mt-2 h-3 w-44" />
-          <Bone className="mt-3 h-9 w-full" />
-        </CardBone>
-        <CardBone>
-          <Bone className="h-5 w-28" />
-          <Bone className="mt-2 h-3 w-44" />
-          <Bone className="mt-3 h-9 w-full" />
-        </CardBone>
-      </div>
     </>
   );
 }
@@ -183,7 +183,7 @@ export function PageSkeleton({ page }: { page: Page }) {
       className="flex flex-col gap-3 pb-2"
     >
       {page === "dashboard" ? <DashboardSkeleton /> : null}
-      {page === "rules" ? <RulesSkeleton /> : null}
+      {page === "rules" || page === "clients" ? <RulesSkeleton /> : null}
       {page === "diagnostics" ? <DiagnosticsSkeleton /> : null}
       {page === "settings" ? <SettingsSkeleton /> : null}
       {page === "about" ? <AboutSkeleton /> : null}

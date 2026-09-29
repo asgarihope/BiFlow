@@ -1,10 +1,4 @@
-import {
-  Download,
-  ExternalLink,
-  Info,
-  RefreshCw,
-  RotateCw,
-} from "lucide-react";
+import { Download, ExternalLink, RefreshCw, RotateCw } from "lucide-react";
 import { AppButton, BUTTON_ICON_PX } from "./AppButton";
 import { useTranslation } from "react-i18next";
 import { APP_VERSION } from "../version";
@@ -29,15 +23,7 @@ export function About() {
   const showRetry = update.phase === "failed";
 
   return (
-    <section className="flex flex-col gap-3 pb-2">
-      <header className="flex items-start gap-3">
-        <Info className="mt-1 text-brand" size={24} aria-hidden />
-        <div>
-          <h1 className="text-2xl font-semibold">{t("about")}</h1>
-          <p className="mt-1 text-sm text-muted">{t("aboutUpdatesHelp")}</p>
-        </div>
-      </header>
-
+    <section aria-label={t("about")} className="flex flex-col gap-3">
       <dl className="grid gap-4 rounded-2xl border border-ink/10 bg-surface p-3.5 sm:grid-cols-2">
         <div>
           <dt className="text-xs uppercase tracking-wide text-muted">

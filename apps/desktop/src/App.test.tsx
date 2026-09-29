@@ -26,32 +26,36 @@ beforeEach(() => {
     error: null,
     installGuide: null,
     settingsApplyNotice: null,
+    pageTabs: {},
+    toast: null,
   });
 });
 
+async function homeHeading() {
+  return screen.findByRole("heading", { level: 1 });
+}
+
 describe("App", () => {
-  it("boots BiFlow and walks the primary screens", async () => {
+  it("boots BiFlow and walks the five sections and their tabs", async () => {
     render(<App />);
-    expect(
-      await screen.findByRole("heading", { name: "Ready when you are" }),
-    ).toBeVisible();
+    expect(await homeHeading()).toHaveTextContent("Not connected");
     expect(screen.getByText("BiFlow")).toBeVisible();
+    expect(screen.getByTestId("add-site")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: /Health/ }));
     expect(screen.getAllByRole("button", { name: /^Install$/ })).toHaveLength(
       2,
     );
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "List Management" }),
-    );
-    expect(
-      screen.getByRole("heading", { name: "List Management" }),
-    ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Routing" }));
+    expect(screen.getByRole("heading", { name: "Routing" })).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: "Iran rules" }));
     expect(
       screen.getByRole("button", { name: /update from cloud/i }),
     ).toBeEnabled();
 
-    await userEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
-    expect(screen.getByRole("heading", { name: "Diagnostics" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Troubleshoot" }));
+    expect(screen.getByRole("heading", { name: "Troubleshoot" })).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: "Test" }));
     expect(screen.getByRole("button", { name: "Test flow" })).toBeDisabled();
     await userEvent.type(
       screen.getByLabelText("Test IP or domain"),
@@ -61,49 +65,62 @@ describe("App", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByRole("heading", { name: "Settings" })).toBeVisible();
-
-    await userEvent.click(screen.getByRole("button", { name: "About" }));
-    expect(screen.getByRole("heading", { name: "About" })).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: "About" }));
     expect(screen.getByText(APP_VERSION)).toBeVisible();
     expect(screen.getByText("Dariush Vesal")).toBeVisible();
+
+    // Coming back to Routing keeps the tab the user left it on.
+    await userEvent.click(screen.getByRole("button", { name: "Routing" }));
+    expect(screen.getByRole("tab", { name: "Iran rules" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("opens the legacy About page as the Settings About tab", async () => {
+    render(<App />);
+    await homeHeading();
+    useAppStore.getState().setPage("about");
+    expect(
+      await screen.findByRole("heading", { name: "Settings" }),
+    ).toBeVisible();
+    expect(screen.getByRole("tab", { name: "About" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 
   it("opens Basic mode on a first launch with no stored preference", async () => {
     localStorage.removeItem(UI_MODE_STORAGE_KEY);
     render(<App />);
+    expect(await homeHeading()).toHaveTextContent("Not connected");
     expect(
-      await screen.findByRole("heading", { name: "Ready when you are" }),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "List Management" }),
+      screen.queryByRole("button", { name: "Routing" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect" })).toBeVisible();
+    expect(screen.getByTestId("add-site")).toBeVisible();
   });
 
   it("hides advanced chrome in Basic mode", async () => {
     render(<App />);
-    expect(
-      await screen.findByRole("heading", { name: "Ready when you are" }),
-    ).toBeVisible();
+    await homeHeading();
 
     await userEvent.click(screen.getByRole("radio", { name: "Basic" }));
     expect(
-      screen.queryByRole("button", { name: "List Management" }),
+      screen.queryByRole("button", { name: "Routing" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toBeVisible();
     expect(screen.getByRole("button", { name: "Connect" })).toBeVisible();
   });
 
-  it("leaves About for the Basic dashboard when Basic is selected", async () => {
+  it("returns to the Basic home when Basic is picked from Settings", async () => {
     render(<App />);
-    expect(
-      await screen.findByRole("heading", { name: "Ready when you are" }),
-    ).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "About" }));
-    expect(screen.getByRole("heading", { name: "About" })).toBeVisible();
+    await homeHeading();
+    await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeVisible();
     await userEvent.click(screen.getByRole("radio", { name: "Basic" }));
     expect(
-      screen.queryByRole("heading", { name: "About" }),
+      screen.queryByRole("heading", { name: "Settings" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect" })).toBeVisible();
   });
@@ -120,9 +137,8 @@ describe("App", () => {
 
   it("picks a profile file for OpenVPN instead of typing a path", async () => {
     render(<App />);
-    expect(
-      await screen.findByRole("heading", { name: "Ready when you are" }),
-    ).toBeVisible();
+    await homeHeading();
+    await userEvent.click(screen.getByRole("button", { name: "Clients" }));
     await userEvent.click(screen.getByRole("button", { name: "Add client" }));
     await userEvent.click(screen.getByRole("button", { name: /^OpenVPN/ }));
     const card = await screen.findByTestId("client-card-openvpn");
@@ -135,9 +151,7 @@ describe("App", () => {
 
   it("exposes the version file through bootstrap", async () => {
     render(<App />);
-    expect(
-      await screen.findByRole("heading", { name: "Ready when you are" }),
-    ).toBeVisible();
+    await homeHeading();
     expect(APP_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });

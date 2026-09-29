@@ -8,6 +8,7 @@ import { MOCK_HIDDIFY_ID } from "../lib/outbound";
 import { baseSettings, baseSnapshot } from "../test/fixtures";
 import { useAppStore } from "../store/app";
 import { ClientRegistry } from "./ClientRegistry";
+import { DefaultRouteSelect } from "./DefaultRouteSelect";
 
 async function openDetails(card: HTMLElement) {
   await userEvent.click(within(card).getByText("Settings & pinned hosts"));
@@ -98,8 +99,13 @@ describe("ClientRegistry live Mihomo", () => {
         },
       }),
     });
-    render(<ClientRegistry />);
-    expect(screen.getByTestId("live-match")).toHaveTextContent("Hiddify");
+    // The default-route select lives on Home; the card explains the mismatch.
+    render(
+      <>
+        <DefaultRouteSelect />
+        <ClientRegistry />
+      </>,
+    );
     expect(screen.getByTestId("client-card-windscribe")).toHaveTextContent(
       "Mihomo is not using Windscribe",
     );
@@ -135,7 +141,12 @@ describe("ClientRegistry live Mihomo", () => {
         ],
       }),
     });
-    render(<ClientRegistry />);
+    render(
+      <>
+        <DefaultRouteSelect />
+        <ClientRegistry />
+      </>,
+    );
     expect(screen.getByTestId("client-card-windscribe")).toHaveTextContent(
       "tunnel did not come up",
     );

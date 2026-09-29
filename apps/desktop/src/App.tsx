@@ -1,17 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import {
-  Activity,
-  BookOpen,
-  Download,
-  ExternalLink,
-  Info,
-  Languages,
-  LayoutDashboard,
-  Moon,
-  SettingsIcon,
-  Sun,
-  X,
-} from "lucide-react";
+import { Download, ExternalLink, Languages, Moon, Sun, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import logo from "./assets/logo.png";
@@ -23,7 +11,6 @@ import {
   BUTTON_ICON_PX,
   IconOnlyButton,
 } from "./components/AppButton";
-import { About } from "./components/About";
 import { BasicDashboard } from "./components/BasicDashboard";
 import { Dashboard } from "./components/Dashboard";
 import { AppStatusBar } from "./components/AppStatusBar";
@@ -34,6 +21,9 @@ import { Settings } from "./components/Settings";
 import { PageSkeleton } from "./components/PageSkeleton";
 import { SettingsApplyBanner } from "./components/SettingsApplyBanner";
 import { BottomNav } from "./components/BottomNav";
+import { ClientRegistry } from "./components/ClientRegistry";
+import { ToastViewport } from "./components/ui/Toast";
+import { NAV_ITEMS, type NavPage } from "./lib/navigation";
 import { UiModeSwitch } from "./components/UiModeSwitch";
 import { isMobileViewport, subscribeMobileViewport } from "./lib/viewport";
 import { readUiMode, writeUiMode, type UiMode } from "./lib/uiMode";
@@ -118,6 +108,7 @@ export function App() {
   }
 
   const advanced = uiMode === "advanced";
+  const sidebar = advanced && !mobile;
   const missing =
     store.snapshot?.last_error?.remediation === "install_dependency";
   const missingId =
@@ -126,78 +117,87 @@ export function App() {
       : "hiddify";
 
   const glow = connectionGlow(store.snapshot?.phase);
+  const changeMode = (mode: UiMode) => {
+    setUiMode(mode);
+    if (mode === "basic") {
+      useAppStore.getState().setPage("dashboard");
+    }
+  };
+  const basicHome = !advanced && store.page === "dashboard";
 
   return (
     <div
       data-connection-glow={glow ?? "none"}
       className={`app-shell grid h-full overflow-hidden ${
-        advanced ? "app-shell-advanced md:grid-cols-[15rem_1fr]" : "grid-cols-1"
+        advanced ? "app-shell-advanced md:grid-cols-[14rem_1fr]" : "grid-cols-1"
       } ${glow ? `connection-glow connection-glow-${glow}` : ""}`}
     >
-      {advanced && !mobile ? (
+      {sidebar ? (
         <aside
           data-testid="sidebar-nav"
-          className="app-sidebar hidden h-full min-h-0 flex-col border-r border-ink/10 bg-surface/85 p-4 backdrop-blur md:flex"
+          className="app-sidebar hidden h-full min-h-0 flex-col border-r border-ink/10 bg-surface/85 p-3 backdrop-blur md:flex"
         >
-          <div className="flex items-center gap-3 px-2 py-2">
+          <div className="flex items-center gap-2.5 px-2 py-2">
             <img
               src={logo}
               alt=""
-              className="h-10 w-10 rounded-xl object-contain"
+              className="h-9 w-9 rounded-xl object-contain"
             />
-            <div className="min-w-0">
-              <p className="font-semibold">{t("appName")}</p>
-              <p className="text-xs text-muted">{t("tagline")}</p>
-            </div>
+            <p className="font-semibold">{t("appName")}</p>
           </div>
           <nav
             aria-label="Primary navigation"
-            className="mt-4 grid flex-1 content-start gap-1"
+            className="mt-4 grid flex-1 content-start gap-0.5"
           >
-            <NavButton
-              page="dashboard"
-              label={t("dashboard")}
-              icon={<LayoutDashboard />}
-            />
-            <NavButton page="rules" label={t("rules")} icon={<BookOpen />} />
-            <NavButton
-              page="diagnostics"
-              label={t("diagnostics")}
-              icon={<Activity />}
-            />
-            <NavButton
-              page="settings"
-              label={t("settings")}
-              icon={<SettingsIcon />}
-            />
-            <NavButton page="about" label={t("about")} icon={<Info />} />
+            {NAV_ITEMS.map(({ page, labelKey, icon: Icon }) => (
+              <NavButton
+                key={page}
+                page={page}
+                label={t(labelKey)}
+                icon={<Icon size={18} />}
+              />
+            ))}
           </nav>
-          <div className="mt-auto flex gap-1 px-1 pt-4">
-            <ThemeButton dark={dark} setDark={setDark} />
-            <LanguageButton
-              language={i18n.language}
-              change={(lng) => void i18n.changeLanguage(lng)}
-            />
+          <div className="mt-auto flex flex-col gap-2 pt-4">
+            <UiModeSwitch mode={uiMode} onChange={changeMode} />
+            <div className="flex gap-1 px-1">
+              <ThemeButton dark={dark} setDark={setDark} />
+              <LanguageButton
+                language={i18n.language}
+                change={(lng) => void i18n.changeLanguage(lng)}
+              />
+            </div>
           </div>
         </aside>
       ) : null}
 
       <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-        <main className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col overflow-hidden p-3 sm:p-5">
-          <div className="shrink-0 pb-4">
-            <UiModeSwitch
-              mode={uiMode}
-              onChange={(mode) => {
-                setUiMode(mode);
-                if (mode === "basic") {
-                  useAppStore.getState().setPage("dashboard");
-                }
-              }}
-            />
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto">
+        <main className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col overflow-hidden p-3 sm:p-5">
+          {!sidebar ? (
+            <div className="flex shrink-0 items-center gap-2 pb-3">
+              <img
+                src={logo}
+                alt=""
+                className="h-8 w-8 rounded-lg object-contain"
+              />
+              <div className="ms-auto flex min-w-0 flex-1 items-center justify-end gap-1">
+                <div className="w-full max-w-[15rem]">
+                  <UiModeSwitch mode={uiMode} onChange={changeMode} />
+                </div>
+                <ThemeButton dark={dark} setDark={setDark} />
+                <LanguageButton
+                  language={i18n.language}
+                  change={(lng) => void i18n.changeLanguage(lng)}
+                />
+              </div>
+            </div>
+          ) : null}
+          <div
+            key={`${uiMode}:${store.page}`}
+            className="ui-enter min-h-0 flex-1 overflow-y-auto"
+          >
             <SettingsApplyBanner />
-            {!advanced && store.page !== "about" && store.snapshot ? (
+            {basicHome && store.snapshot ? (
               <BasicDashboard snapshot={store.snapshot} />
             ) : null}
             {advanced && store.page === "dashboard" && store.snapshot ? (
@@ -206,23 +206,19 @@ export function App() {
             {advanced && store.page === "rules" && store.rules ? (
               <DirectRules rules={store.rules} />
             ) : null}
+            {advanced && store.page === "clients" ? <ClientRegistry /> : null}
             {advanced && store.page === "diagnostics" ? (
               <Diagnostics report={store.diagnostics} />
             ) : null}
-            {advanced && store.page === "settings" && store.settings ? (
+            {store.page === "settings" && store.settings ? (
               <Settings settings={store.settings} />
             ) : null}
-            {store.page === "about" ? <About /> : null}
           </div>
         </main>
         {mobile ? (
           <BottomNav
             onNavigate={(page) => {
-              if (
-                uiMode === "basic" &&
-                page !== "dashboard" &&
-                page !== "about"
-              ) {
+              if (uiMode === "basic" && page !== "dashboard") {
                 writeUiMode("advanced");
                 setUiMode("advanced");
               }
@@ -232,6 +228,7 @@ export function App() {
         ) : null}
         <AppStatusBar />
         <InputContextMenu />
+        <ToastViewport />
       </div>
 
       {advanced ? (
@@ -336,7 +333,7 @@ function NavButton({
   label,
   icon,
 }: {
-  page: "dashboard" | "rules" | "diagnostics" | "settings" | "about";
+  page: NavPage;
   label: string;
   icon: React.ReactNode;
 }) {
@@ -347,7 +344,7 @@ function NavButton({
       type="button"
       aria-current={active ? "page" : undefined}
       onClick={() => setPage(page)}
-      className={`flex min-w-0 items-center gap-2 rounded-xl px-3 py-3 text-sm font-medium transition ${
+      className={`flex min-w-0 items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium transition-colors ${
         active
           ? "bg-brand/10 text-brand"
           : "text-muted hover:bg-ink/5 hover:text-ink"

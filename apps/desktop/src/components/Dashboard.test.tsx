@@ -31,13 +31,19 @@ vi.mock("../api/desktop", () => ({
 }));
 
 const now = new Date().toISOString();
+
+async function openHealth() {
+  await userEvent.click(screen.getByRole("button", { name: /Health/ }));
+}
 const stopped = baseSnapshot({ updated_at: now });
 
 describe("Dashboard", () => {
   it("shows real component state and starts without blocking the UI", async () => {
     useAppStore.setState({ snapshot: stopped, actionPending: false });
     render(<Dashboard snapshot={stopped} />);
-    expect(screen.getAllByText("stopped")).toHaveLength(5);
+    await openHealth();
+    // Helper runs in the fixture; the client, Mihomo, TUN, and DNS are stopped.
+    expect(screen.getAllByText("stopped")).toHaveLength(4);
     const connect = screen.getByRole("button", { name: "Connect" });
     expect(connect.querySelector("svg")).not.toBeNull();
     expect(connect).toHaveAttribute("data-connect-glow", "available");
@@ -138,6 +144,7 @@ describe("Dashboard", () => {
       installDependency: install,
     });
     render(<Dashboard snapshot={stopped} />);
+    await openHealth();
     const buttons = screen.getAllByRole("button", { name: /^Install$/ });
     expect(buttons).toHaveLength(2);
     await userEvent.click(buttons[0]!);
@@ -177,11 +184,14 @@ describe("Dashboard", () => {
       installHelper,
     });
     render(<Dashboard snapshot={unavailable} />);
+    expect(screen.getByText("1 issue")).toBeVisible();
+    // A real problem opens the component rows without a click.
+    expect(screen.getByTestId("health-details")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: /^Install$/ }));
     expect(installHelper).toHaveBeenCalledOnce();
   });
 
-  it("hides install actions when Hiddify and Mihomo are already installed", () => {
+  it("hides install actions when Hiddify and Mihomo are already installed", async () => {
     useAppStore.setState({
       snapshot: stopped,
       actionPending: false,
@@ -204,8 +214,10 @@ describe("Dashboard", () => {
       ],
     });
     render(<Dashboard snapshot={stopped} />);
+    await openHealth();
     expect(screen.queryByRole("button", { name: /^Install$/ })).toBeNull();
-    expect(screen.getAllByText("stopped")).toHaveLength(5);
+    // Helper runs in the fixture; the client, Mihomo, TUN, and DNS are stopped.
+    expect(screen.getAllByText("stopped")).toHaveLength(4);
   });
 
   it("shows animated direct and VPN routes only while connected", () => {
@@ -284,11 +296,34 @@ describe("Dashboard", () => {
     expect(useAppStore.getState().actionPending).toBe(true);
   });
 
-  it("lets metric values wrap instead of clipping on narrow columns", () => {
+  it("keeps facts on one line and exposes the full value on hover", () => {
     render(<Dashboard snapshot={stopped} />);
-    const exitIp = screen.getByText("Available after connection");
-    expect(exitIp.className).toMatch(/break-words/);
-    expect(exitIp.className).not.toMatch(/truncate/);
+    const exitIp = screen.getByText("After connect");
+    expect(exitIp.className).toMatch(/truncate/);
+    expect(exitIp).toHaveAttribute("title", "After connect");
+  });
+
+  it("summarizes health in one line and says All good while running", () => {
+    const running = { phase: "running" as const, message: "Ready", since: now };
+    render(
+      <Dashboard
+        snapshot={{
+          ...stopped,
+          phase: "running",
+          helper: running,
+          clients: stopped.clients.map((client) => ({
+            ...client,
+            status: running,
+          })),
+          mihomo: running,
+          tun: running,
+          dns: running,
+        }}
+      />,
+    );
+    expect(screen.getByText("All good")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Connected" })).toBeVisible();
+    expect(screen.queryByTestId("health-details")).toBeNull();
   });
 
   it("lets the shell scroll overflowing dashboard content", () => {
@@ -315,9 +350,10 @@ describe("Dashboard", () => {
         }}
       />,
     );
-    expect(screen.getByTestId("mihomo-using")).toHaveTextContent(
+    expect(screen.getByTestId("live-match")).toHaveTextContent(
       "Mihomo sends unmatched traffic through DIRECT",
     );
+    await openHealth();
     await userEvent.click(screen.getByRole("button", { name: /View config/ }));
     const config = await screen.findByTestId("mihomo-config");
     expect(config).toHaveTextContent("MATCH,DIRECT");

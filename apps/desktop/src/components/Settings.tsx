@@ -18,6 +18,12 @@ import {
   parseDirectDnsServers,
 } from "../lib/directDns";
 import { useAppStore } from "../store/app";
+import { About } from "./About";
+import { PageHeader } from "./ui/PageHeader";
+import { TabBar, TabPanel } from "./ui/Tabs";
+import { usePageTab } from "./ui/usePageTab";
+
+const SETTINGS_TABS = ["mihomo", "behavior", "about"] as const;
 
 const formSchema = z
   .object({
@@ -58,7 +64,6 @@ const formSchema = z
   });
 
 type FormValues = z.infer<typeof formSchema>;
-type SettingsTab = "mihomo" | "behavior";
 
 function toValues(config: AppConfig): FormValues {
   return {
@@ -107,7 +112,7 @@ function merge(config: AppConfig, values: FormValues): AppConfig {
 export function Settings({ settings }: { settings: AppConfig }) {
   const { t } = useTranslation();
   const { saveSettings, actionPending } = useAppStore();
-  const [tab, setTab] = useState<SettingsTab>("mihomo");
+  const [tab, setTab] = usePageTab("settings", SETTINGS_TABS);
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const {
     register,
@@ -131,231 +136,186 @@ export function Settings({ settings }: { settings: AppConfig }) {
   });
 
   return (
-    <section aria-labelledby="settings-title" className="flex flex-col pb-2">
-      <header className="shrink-0">
-        <h1
-          id="settings-title"
-          className="text-2xl font-semibold tracking-tight"
+    <section
+      aria-labelledby="settings-title"
+      className="flex flex-col gap-3 pb-2"
+    >
+      <PageHeader id="settings-title" title={t("ui.nav.settings")} />
+      <TabBar
+        label={t("ui.nav.settings")}
+        idPrefix="settings"
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { id: "mihomo", label: t("ui.tabs.network") },
+          { id: "behavior", label: t("ui.tabs.behavior") },
+          { id: "about", label: t("ui.tabs.about") },
+        ]}
+      />
+      {tab === "about" ? (
+        <TabPanel idPrefix="settings" value="about">
+          <About />
+        </TabPanel>
+      ) : (
+        <form
+          onSubmit={(event) => void submit(event)}
+          className="ui-enter flex flex-col"
         >
-          Settings
-        </h1>
-        <p className="mt-1 text-sm text-muted">
-          Advanced ports stay on loopback and are checked for conflicts before
-          publication.
-        </p>
-      </header>
-
-      <div
-        role="tablist"
-        aria-label="Settings sections"
-        className="mt-4 flex shrink-0 gap-1 rounded-xl border border-ink/10 bg-canvas p-1"
-      >
-        <TabButton
-          id="settings-tab-mihomo"
-          selected={tab === "mihomo"}
-          controls="settings-panel-mihomo"
-          onSelect={() => setTab("mihomo")}
-        >
-          Mihomo
-        </TabButton>
-        <TabButton
-          id="settings-tab-behavior"
-          selected={tab === "behavior"}
-          controls="settings-panel-behavior"
-          onSelect={() => setTab("behavior")}
-        >
-          Behavior
-        </TabButton>
-      </div>
-
-      <form
-        onSubmit={(event) => void submit(event)}
-        className="mt-4 flex flex-col"
-      >
-        <div className="min-h-0 flex-1 overflow-y-auto pe-1">
-          {tab === "mihomo" ? (
-            <Fieldset
-              id="settings-panel-mihomo"
-              labelledBy="settings-tab-mihomo"
-              legend="Mihomo and network"
-            >
-              <Field
-                label="Controller port"
-                error={errors.controllerPort?.message}
+          <div className="min-h-0 flex-1 overflow-y-auto pe-1">
+            {tab === "mihomo" ? (
+              <Fieldset
+                id="settings-panel-mihomo"
+                labelledBy="settings-tab-mihomo"
+                legend="Mihomo and network"
               >
-                <input
-                  type="number"
-                  {...register("controllerPort")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <Field label="Mixed port" error={errors.mixedPort?.message}>
-                <input
-                  type="number"
-                  {...register("mixedPort")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <Field label="DNS port" error={errors.dnsPort?.message}>
-                <input
-                  type="number"
-                  {...register("dnsPort")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <Field
-                className="sm:col-span-2"
-                label={t("settingsDns.label")}
-                hint={t("settingsDns.help")}
-                error={errors.directDnsPreset?.message}
-              >
-                <select
-                  {...register("directDnsPreset")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                >
-                  {DIRECT_DNS_PRESETS.map((preset) => (
-                    <option key={preset} value={preset}>
-                      {directDnsOptionLabel(preset, t(`settingsDns.${preset}`))}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              {directDnsPreset === "custom" ? (
                 <Field
-                  className="sm:col-span-2"
-                  label={t("settingsDns.customLabel")}
-                  hint={t("settingsDns.customHelp")}
-                  error={errors.directDnsServers?.message}
+                  label="Controller port"
+                  error={errors.controllerPort?.message}
                 >
                   <input
-                    {...register("directDnsServers")}
-                    placeholder={t("settingsDns.customPlaceholder")}
+                    type="number"
+                    {...register("controllerPort")}
                     className="w-full rounded-xl border-ink/15 bg-canvas"
                   />
                 </Field>
-              ) : null}
-              <Field label="TUN name" error={errors.tunName?.message}>
-                <input
-                  {...register("tunName")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <Field label="Log level" error={errors.logLevel?.message}>
-                <select
-                  {...register("logLevel")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
+                <Field label="Mixed port" error={errors.mixedPort?.message}>
+                  <input
+                    type="number"
+                    {...register("mixedPort")}
+                    className="w-full rounded-xl border-ink/15 bg-canvas"
+                  />
+                </Field>
+                <Field label="DNS port" error={errors.dnsPort?.message}>
+                  <input
+                    type="number"
+                    {...register("dnsPort")}
+                    className="w-full rounded-xl border-ink/15 bg-canvas"
+                  />
+                </Field>
+                <Field
+                  className="sm:col-span-2"
+                  label={t("settingsDns.label")}
+                  hint={t("settingsDns.help")}
+                  error={errors.directDnsPreset?.message}
                 >
-                  <option value="error">Error</option>
-                  <option value="warn">Warning</option>
-                  <option value="info">Info</option>
-                  <option value="debug">Debug</option>
-                </select>
-              </Field>
-            </Fieldset>
-          ) : null}
+                  <select
+                    {...register("directDnsPreset")}
+                    className="w-full rounded-xl border-ink/15 bg-canvas"
+                  >
+                    {DIRECT_DNS_PRESETS.map((preset) => (
+                      <option key={preset} value={preset}>
+                        {directDnsOptionLabel(
+                          preset,
+                          t(`settingsDns.${preset}`),
+                        )}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                {directDnsPreset === "custom" ? (
+                  <Field
+                    className="sm:col-span-2"
+                    label={t("settingsDns.customLabel")}
+                    hint={t("settingsDns.customHelp")}
+                    error={errors.directDnsServers?.message}
+                  >
+                    <input
+                      {...register("directDnsServers")}
+                      placeholder={t("settingsDns.customPlaceholder")}
+                      className="w-full rounded-xl border-ink/15 bg-canvas"
+                    />
+                  </Field>
+                ) : null}
+                <Field label="TUN name" error={errors.tunName?.message}>
+                  <input
+                    {...register("tunName")}
+                    className="w-full rounded-xl border-ink/15 bg-canvas"
+                  />
+                </Field>
+                <Field label="Log level" error={errors.logLevel?.message}>
+                  <select
+                    {...register("logLevel")}
+                    className="w-full rounded-xl border-ink/15 bg-canvas"
+                  >
+                    <option value="error">Error</option>
+                    <option value="warn">Warning</option>
+                    <option value="info">Info</option>
+                    <option value="debug">Debug</option>
+                  </select>
+                </Field>
+              </Fieldset>
+            ) : null}
 
-          {tab === "behavior" ? (
-            <Fieldset
-              id="settings-panel-behavior"
-              labelledBy="settings-tab-behavior"
-              legend="Behavior and refresh"
+            {tab === "behavior" ? (
+              <Fieldset
+                id="settings-panel-behavior"
+                labelledBy="settings-tab-behavior"
+                legend="Behavior and refresh"
+              >
+                <Field
+                  label="Custom rule refresh (minutes)"
+                  error={errors.refreshMinutes?.message}
+                >
+                  <input
+                    type="number"
+                    {...register("refreshMinutes")}
+                    className="w-full rounded-xl border-ink/15 bg-canvas"
+                  />
+                </Field>
+                <Field
+                  label="Upstream refresh (hours)"
+                  error={errors.upstreamHours?.message}
+                >
+                  <input
+                    type="number"
+                    {...register("upstreamHours")}
+                    className="w-full rounded-xl border-ink/15 bg-canvas"
+                  />
+                </Field>
+                <div className="space-y-3 sm:col-span-2">
+                  <Check
+                    label="Launch at login"
+                    registration={register("launchAtLogin")}
+                  />
+                  <Check
+                    label="Connect at launch"
+                    registration={register("connectAtLaunch")}
+                  />
+                  <Check
+                    label="Close window to tray"
+                    registration={register("closeToTray")}
+                  />
+                  <Check
+                    label="Block traffic when its client is down (fail closed)"
+                    registration={register("failClosed")}
+                  />
+                </div>
+              </Fieldset>
+            ) : null}
+          </div>
+
+          {issues.length > 0 ? (
+            <ul
+              className="mt-3 shrink-0 rounded-xl border border-danger/20 bg-danger/5 p-4 text-sm text-danger"
+              role="alert"
             >
-              <Field
-                label="Custom rule refresh (minutes)"
-                error={errors.refreshMinutes?.message}
-              >
-                <input
-                  type="number"
-                  {...register("refreshMinutes")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <Field
-                label="Upstream refresh (hours)"
-                error={errors.upstreamHours?.message}
-              >
-                <input
-                  type="number"
-                  {...register("upstreamHours")}
-                  className="w-full rounded-xl border-ink/15 bg-canvas"
-                />
-              </Field>
-              <div className="space-y-3 sm:col-span-2">
-                <Check
-                  label="Launch at login"
-                  registration={register("launchAtLogin")}
-                />
-                <Check
-                  label="Connect at launch"
-                  registration={register("connectAtLaunch")}
-                />
-                <Check
-                  label="Close window to tray"
-                  registration={register("closeToTray")}
-                />
-                <Check
-                  label="Block traffic when its client is down (fail closed)"
-                  registration={register("failClosed")}
-                />
-              </div>
-            </Fieldset>
+              {issues.map((issue) => (
+                <li key={`${issue.field}-${issue.code}`}>
+                  {issue.field}: {issue.message}
+                </li>
+              ))}
+            </ul>
           ) : null}
-        </div>
 
-        {issues.length > 0 ? (
-          <ul
-            className="mt-3 shrink-0 rounded-xl border border-danger/20 bg-danger/5 p-4 text-sm text-danger"
-            role="alert"
+          <button
+            disabled={actionPending || !isDirty}
+            className="mt-3 inline-flex shrink-0 items-center gap-2 rounded-xl bg-brand px-5 py-3 font-semibold text-white disabled:opacity-50"
           >
-            {issues.map((issue) => (
-              <li key={`${issue.field}-${issue.code}`}>
-                {issue.field}: {issue.message}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-
-        <button
-          disabled={actionPending || !isDirty}
-          className="mt-3 inline-flex shrink-0 items-center gap-2 rounded-xl bg-brand px-5 py-3 font-semibold text-white disabled:opacity-50"
-        >
-          <Save size={18} aria-hidden /> Save settings
-        </button>
-      </form>
+            <Save size={18} aria-hidden /> Save settings
+          </button>
+        </form>
+      )}
     </section>
-  );
-}
-
-function TabButton({
-  id,
-  selected,
-  controls,
-  onSelect,
-  children,
-}: {
-  id: string;
-  selected: boolean;
-  controls: string;
-  onSelect: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      id={id}
-      aria-selected={selected}
-      aria-controls={controls}
-      tabIndex={selected ? 0 : -1}
-      onClick={onSelect}
-      className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
-        selected
-          ? "bg-surface text-brand shadow-sm"
-          : "text-muted hover:text-ink"
-      }`}
-    >
-      {children}
-    </button>
   );
 }
 
@@ -377,7 +337,7 @@ function Fieldset({
       aria-labelledby={labelledBy}
       className="grid gap-4 rounded-2xl border border-ink/10 bg-surface p-3.5 sm:grid-cols-2"
     >
-      <legend className="px-2 font-semibold">{legend}</legend>
+      <legend className="sr-only">{legend}</legend>
       {children}
     </fieldset>
   );

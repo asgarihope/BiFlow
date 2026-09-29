@@ -3,6 +3,49 @@
 Rules the UI must keep. Every UI change is checked against this file; when a
 rule has to change, update this file in the same commit.
 
+## Information architecture
+
+- Five sections, same order in the sidebar and the mobile bottom nav
+  (`lib/navigation.ts`): **Home**, **Routing**, **Clients**,
+  **Troubleshoot**, **Settings**. About is the last Settings tab, not a
+  section. The Basic/Advanced switch, theme, and language sit at the bottom
+  of the sidebar (top bar in Basic and on mobile), never above page content.
+- Pages with more than one concern split into tabs (`ui/Tabs.tsx`
+  `TabBar` + `TabPanel`), and the store remembers the last tab per page
+  (`pageTabs`, `setPage(page, tab)`):
+  - Routing: Sites / Lists / Apps / Iran rules
+  - Troubleshoot: Live / Test / Tools / Logs
+  - Settings: Network / Behavior / About
+- Every page starts with `PageHeader`: one-line title, optional info tip,
+  and primary action on the same row.
+
+## Copy
+
+- No explanatory paragraph under a heading. Explanations go in an
+  `InfoTip` (icon, hover/focus tooltip). Buttons are verb-first, 1–3 words.
+- Confirmations are a short toast (`showToast`, `ui/Toast.tsx`), not an
+  inline paragraph. The toast uses `aria-live`, not `role="status"`.
+
+## Home
+
+- Order: connection hero (status orb, title, "Iran direct · rest via
+  [default route]" select, lifecycle buttons), the add-site bar, three
+  facts (Exit IP, Rule sets, Health), then the live diagram beside "Your
+  sites" (`lg:grid-cols-5`, 3 + 2) while connected, or "Your sites" alone.
+- Component state is one Health tile: five dots and one sentence. Its rows
+  (status, message, Install / View config) open below the facts as a
+  full-width row; they open by themselves only when a component is in
+  error or unavailable.
+- The add-site bar (`AddSiteBar`) is on Home, Basic, and Routing › Sites:
+  paste anything, `extractHost` reduces it, a segmented Direct/client
+  choice (a select past three options) defaults to the default client.
+
+## Motion
+
+- Pages and tab panels ease in with `.ui-enter` (180 ms), the toast with
+  `.ui-toast`, and the live status orb breathes (`.status-orb-live`). The
+  global reduced-motion block disables all of it.
+
 ## Density and rhythm
 
 - Cards: `rounded-2xl border border-ink/10 bg-surface p-3.5` (inner tiles may
@@ -24,22 +67,22 @@ border-ink/10 pt-3`, with small buttons
 
 ## Section order and tiling
 
-- Page sections are ordered by how often they are used: in Diagnostics the
-  live-connections list comes first, then Test flow, then Reachability +
-  Test timeline as a two-column pair, then the client-egress probe, then
-  the three utility tiles, then logs. The egress probe says whether the
-  adapter Mihomo bound can deliver a packet, and why it cannot.
-- Small independent utilities tile side-by-side (`grid gap-3 xl:grid-cols-3`)
-  instead of stacking full-width.
+- Tabs are ordered by how often they are used: Troubleshoot opens on Live
+  (live connections), then Test (test flow, Reachability + Test timeline),
+  Tools (client egress, Fresh Hiddify start, debug.log, support bundle),
+  and Logs. The egress probe says whether the adapter Mihomo bound can
+  deliver a packet, and why it cannot.
+- Small independent utilities tile side-by-side (Tools is a
+  `md:grid-cols-2` grid) instead of stacking full-width.
 
-## List Management
+## Lists (Routing › Lists)
 
 - Rule lists render as **full-width horizontal rows stacked vertically**
   (`flex flex-col gap-2`), one bar per list: name (inline-editable), entry
   count, Send-through select, Check, add-entry form, delete icon; entries as
   removable chips below the bar. Never a multi-column card grid here.
 
-## Client cards (Dashboard)
+## Client cards (Clients page)
 
 - Compact by default: header (title, default badge, status pill, Enabled),
   one summary line (`N domains · M IPs · Local port P · Exit IP x.x.x.x`),
@@ -70,7 +113,7 @@ border-ink/10 pt-3`, with small buttons
 - App boot renders `PageSkeleton` — a per-page structured skeleton, not a
   centered spinner.
 - Pause/Disconnect (and Cancel) stay on one row on `sm+`
-  (`sm:flex-nowrap`).
+  (`sm:flex-nowrap`) and stack full-width below `sm`.
 - Connection lifecycle buttons (`ConnectionActionButton`, cancel) use a fixed
   `h-14` height, `whitespace-nowrap`, and an invisible reserve label sized to
   the longest EN/FA idle or stage string so labels never wrap and the control
@@ -78,9 +121,9 @@ border-ink/10 pt-3`, with small buttons
 
 ## Live Mihomo
 
-- The Mihomo status card states which outbound the live `MATCH` rule is
-  using. Its footer button opens that config read-only, with the controller
-  secret removed. The view is not an editor.
+- The hero states which outbound the live `MATCH` rule is using
+  (`data-testid="live-match"`). The Mihomo row in Health opens that config
+  read-only, with the controller secret removed. The view is not an editor.
 - A client card shows “Default for unmatched” only when Mihomo’s live `MATCH`
   is that client. If the saved choice is unused, or the client is stopped or
   in error, the card is muted and the reason is written on it. A stopped
@@ -94,3 +137,6 @@ border-ink/10 pt-3`, with small buttons
   handling.
 - Both languages must pass the responsive e2e (no horizontal overflow at
   390px; tables scroll inside their own container).
+
+- In RTL, select chevrons move to the left (`[dir="rtl"] select` in
+  `index.css`); the forms plugin otherwise draws them over the text.

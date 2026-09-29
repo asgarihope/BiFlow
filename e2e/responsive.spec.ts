@@ -105,22 +105,22 @@ test.describe("responsive viewports", () => {
       await page.screenshot({ path: file, fullPage: false });
       expect(dirname(file)).toBe(screenshotDir);
 
-      const pages = [
-        "List Management",
-        "Diagnostics",
-        "Settings",
-        "About",
-        "Dashboard",
-      ];
+      const pages = ["Routing", "Clients", "Troubleshoot", "Settings", "Home"];
       for (const name of pages) {
-        await page.getByRole("button", { name }).click();
+        await page
+          .getByRole("navigation", { name: "Primary navigation" })
+          .getByRole("button", { name, exact: true })
+          .click();
         const next = await layoutMetrics(page);
         expect(next.overflowX, name).toBe(false);
         expect(next.overlap, name).toBe(false);
         expect(next.hamburger, name).toBe(false);
       }
 
-      await page.getByRole("button", { name: "Dashboard" }).click();
+      await page
+        .getByRole("navigation", { name: "Primary navigation" })
+        .getByRole("button", { name: "Home", exact: true })
+        .click();
       const connect = page.locator("[data-connection-action='connect']");
       await connect.click();
       const processing = page.locator("[data-connection-action='connect']");
@@ -162,10 +162,11 @@ test.describe("responsive viewports", () => {
     await page.reload();
     await expect(page.getByRole("radio", { name: "Basic" })).toBeChecked();
     await expect(page.getByTestId("bottom-nav")).toBeVisible();
-    await page.getByRole("button", { name: "List Management" }).click();
-    await expect(
-      page.getByRole("heading", { name: "List Management" }),
-    ).toBeVisible();
+    await page
+      .getByTestId("bottom-nav")
+      .getByRole("button", { name: "Routing", exact: true })
+      .click();
+    await expect(page.getByRole("heading", { name: "Routing" })).toBeVisible();
     await expect(page.getByRole("radio", { name: "Advanced" })).toBeChecked();
   });
 
@@ -178,7 +179,7 @@ test.describe("responsive viewports", () => {
     await expect(page.getByTestId("connection-status-strip")).toBeVisible();
     await page.locator("[data-connection-action='connect']").click();
     await expect(
-      page.getByRole("heading", { name: "Protected split routing is active" }),
+      page.getByRole("heading", { name: "Connected", exact: true }),
     ).toBeVisible();
     const routing = page.getByTestId("live-routing");
     await routing.scrollIntoViewIfNeeded();

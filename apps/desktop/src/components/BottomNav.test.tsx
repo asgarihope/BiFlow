@@ -12,7 +12,10 @@ describe("BottomNav", () => {
     expect(
       screen.queryByRole("button", { name: /menu/i }),
     ).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "About" }));
-    expect(useAppStore.getState().page).toBe("about");
+    expect(
+      screen.getAllByRole("button").map((button) => button.textContent),
+    ).toEqual(["Home", "Routing", "Clients", "Troubleshoot", "Settings"]);
+    await userEvent.click(screen.getByRole("button", { name: "Clients" }));
+    expect(useAppStore.getState().page).toBe("clients");
   });
 });

@@ -25,7 +25,14 @@ import { outboundKey, outboundLabel } from "../lib/outbound";
 import type { SortState } from "../lib/tableSort";
 import { sortRows, toggleSort } from "../lib/tableSort";
 import { useAppStore } from "../store/app";
+import { AddSiteBar } from "./AddSiteBar";
 import { SortHeader } from "./SortHeader";
+import { InfoTip } from "./ui/InfoTip";
+import { PageHeader } from "./ui/PageHeader";
+import { TabBar, TabPanel } from "./ui/Tabs";
+import { usePageTab } from "./ui/usePageTab";
+
+const ROUTING_TABS = ["sites", "lists", "apps", "iran"] as const;
 
 type PinnedRow = { rule: PinnedRoute };
 type PinnedSortKey = "target" | "kind" | "outbound";
@@ -42,7 +49,6 @@ const PINNED_SORT_ACCESSORS: Record<
 export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
   const { t } = useTranslation();
   const {
-    addRule,
     pinRoute,
     removeRule,
     refreshRules,
@@ -53,7 +59,7 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
   } = useAppStore();
   const clients = settings?.clients ?? [];
   const enabled = clients.filter((client) => client.enabled);
-  const [input, setInput] = useState("");
+  const [tab, setTab] = usePageTab("rules", ROUTING_TABS);
   const [search, setSearch] = useState("");
   const [route, setRoute] = useState<RouteTestResult | null>(null);
   const [testing, setTesting] = useState(false);
@@ -86,216 +92,231 @@ export function DirectRules({ rules }: { rules: DirectRulesDocument }) {
 
   return (
     <section aria-labelledby="rules-title" className="flex flex-col gap-3 pb-2">
-      <header className="shrink-0">
-        <h1 id="rules-title" className="text-2xl font-semibold tracking-tight">
-          {t("listManagementTitle")}
-        </h1>
-        <p className="mt-1 text-sm text-muted">{t("listManagementHelp")}</p>
-      </header>
+      <PageHeader
+        id="rules-title"
+        title={t("ui.nav.routing")}
+        info={t("listManagementHelp")}
+      />
+      <TabBar
+        label={t("ui.nav.routing")}
+        idPrefix="routing"
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { id: "sites", label: t("ui.tabs.sites") },
+          { id: "lists", label: t("ui.tabs.lists") },
+          { id: "apps", label: t("ui.tabs.apps") },
+          { id: "iran", label: t("ui.tabs.iranRules") },
+        ]}
+      />
 
-      <RuleLists rules={rules} clients={enabled} allClients={clients} />
+      {tab === "lists" ? (
+        <TabPanel idPrefix="routing" value="lists">
+          <RuleLists rules={rules} clients={enabled} allClients={clients} />
+        </TabPanel>
+      ) : null}
 
-      <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h2 className="font-semibold">{t("cloudRules")}</h2>
-            <p className="mt-1 max-w-2xl text-sm text-muted">
-              {t("cloudRulesHelp")}
+      {tab === "apps" ? (
+        <TabPanel idPrefix="routing" value="apps">
+          <ApplicationRoutes
+            rules={rules}
+            clients={enabled}
+            allClients={clients}
+          />
+        </TabPanel>
+      ) : null}
+
+      {tab === "iran" ? (
+        <TabPanel idPrefix="routing" value="iran">
+          <div className="rounded-2xl border border-ink/10 bg-surface p-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5">
+                <h2 className="font-semibold">{t("cloudRules")}</h2>
+                <InfoTip text={t("cloudRulesHelp")} />
+              </div>
+              <button
+                type="button"
+                disabled={actionPending}
+                onClick={() => void syncCloudRules()}
+                className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-ink/15 px-3.5 py-2 text-sm font-semibold transition hover:border-brand/40 hover:text-brand disabled:opacity-50"
+              >
+                <CloudDownload size={16} aria-hidden />
+                {actionPending ? t("syncing") : t("updateFromCloud")}
+              </button>
+            </div>
+            <dl className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Stat
+                label={t("domains")}
+                value={(cloudRules?.domain_count ?? 0).toLocaleString()}
+              />
+              <Stat
+                label={t("ipRanges")}
+                value={(cloudRules?.ip_count ?? 0).toLocaleString()}
+              />
+              <Stat label={t("lastSynced")} value={synced} />
+              <Stat label={t("snapshotRevision")} value={snapshotRevision} />
+            </dl>
+            <p className="mt-3 text-xs text-muted">
+              {t("cloudRulesSource")}: devlifeX/BiFlow
             </p>
           </div>
-          <button
-            type="button"
-            disabled={actionPending}
-            onClick={() => void syncCloudRules()}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 font-semibold text-white disabled:opacity-50"
-          >
-            <CloudDownload size={18} aria-hidden />
-            {actionPending ? t("syncing") : t("updateFromCloud")}
-          </button>
-        </div>
-        <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Stat
-            label={t("domains")}
-            value={(cloudRules?.domain_count ?? 0).toLocaleString()}
-          />
-          <Stat
-            label={t("ipRanges")}
-            value={(cloudRules?.ip_count ?? 0).toLocaleString()}
-          />
-          <Stat label={t("lastSynced")} value={synced} />
-          <Stat label={t("snapshotRevision")} value={snapshotRevision} />
-        </dl>
-        <p className="mt-3 text-sm text-muted">
-          {t("cloudRulesSource")}: devlifeX/BiFlow
-        </p>
-      </div>
+        </TabPanel>
+      ) : null}
 
-      <form
-        className="flex flex-col gap-2 rounded-2xl border border-ink/10 bg-surface p-3.5 sm:flex-row"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!input.trim()) return;
-          void addRule(input)
-            .then(() => setInput(""))
-            .catch(() => undefined);
-        }}
-      >
-        <input
-          id="rule-input"
-          aria-label={t("directRuleInput")}
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          required
-          placeholder={t("directRulePlaceholder")}
-          className="min-w-0 flex-1 rounded-xl border-ink/15 bg-canvas"
-        />
-        <button
-          disabled={actionPending}
-          className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand px-4 py-2.5 font-semibold text-white disabled:opacity-50"
-        >
-          <Plus size={18} aria-hidden /> Add rule
-        </button>
-      </form>
-
-      <h2 className="mt-2 font-semibold">{t("allPins")}</h2>
-      <div className="flex flex-col gap-3 sm:flex-row">
-        <label className="relative flex-1">
-          <span className="sr-only">Search rules</span>
-          <Search
-            className="absolute left-3 top-3 text-muted"
-            size={18}
-            aria-hidden
-          />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search direct rules"
-            className="w-full rounded-xl border-ink/15 bg-surface pl-10"
-          />
-        </label>
-        <button
-          type="button"
-          disabled={actionPending}
-          onClick={() => void refreshRules()}
-          className="inline-flex items-center justify-center gap-2 rounded-xl border border-ink/15 bg-surface px-4 py-2.5 font-semibold"
-        >
-          <RefreshCw size={18} aria-hidden /> Refresh resolutions
-        </button>
-      </div>
-
-      <div className="rounded-2xl border border-ink/10 bg-surface">
-        {filtered.length === 0 ? (
-          <p className="p-8 text-center text-muted">
-            No matching direct rules.
-          </p>
-        ) : (
-          <div className="overflow-x-auto rounded-2xl">
-            <table className="w-full min-w-[36rem] text-start text-sm">
-              <thead>
-                <tr className="bg-canvas text-muted">
-                  <SortHeader
-                    label={t("liveConnectionsHost")}
-                    sortKey="target"
-                    state={sort}
-                    onToggle={(key) => setSort((prev) => toggleSort(prev, key))}
-                  />
-                  <SortHeader
-                    label={t("ruleKind")}
-                    sortKey="kind"
-                    state={sort}
-                    onToggle={(key) => setSort((prev) => toggleSort(prev, key))}
-                  />
-                  <SortHeader
-                    label={t("liveConnectionsOutbound")}
-                    sortKey="outbound"
-                    state={sort}
-                    onToggle={(key) => setSort((prev) => toggleSort(prev, key))}
-                  />
-                  <th className="px-3 py-2 text-start font-medium">
-                    {t("liveConnectionsIp")}
-                  </th>
-                  <th className="px-3 py-2 text-start font-medium">
-                    {t("tableActions")}
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-ink/10">
-                {filtered.map(({ rule }) => {
-                  const clientId =
-                    rule.outbound.kind === "client"
-                      ? rule.outbound.client_id
-                      : null;
-                  const disabledClient =
-                    clientId !== null &&
-                    !enabled.some((client) => client.id === clientId);
-                  return (
-                    <tr
-                      key={`${outboundKey(rule.outbound)}:${rule.target.kind}:${rule.target.value}`}
-                      className={`hover:bg-canvas/60 ${disabledClient ? "opacity-50" : ""}`}
-                    >
-                      <td className="px-3 py-2 font-medium break-all">
-                        {rule.target.value}
-                      </td>
-                      <td className="px-3 py-2 font-mono text-xs text-muted">
-                        {rule.target.kind.toUpperCase()}
-                      </td>
-                      <td className="px-3 py-2">
-                        {disabledClient ? (
-                          <span className="text-xs font-semibold text-muted">
-                            {outboundLabel(rule.outbound, clients)} (
-                            {t("disabled")})
-                          </span>
-                        ) : (
-                          <OutboundSelect
-                            value={outboundKey(rule.outbound)}
-                            clients={enabled}
-                            onChange={(next) =>
-                              void pinRoute(rule.target.value, next).catch(
-                                () => undefined,
-                              )
-                            }
-                            disabled={actionPending}
-                          />
-                        )}
-                      </td>
-                      <td className="px-3 py-2 font-mono text-xs text-muted break-all">
-                        {rule.resolved_ips.join(", ") || "—"}
-                      </td>
-                      <td className="px-3 py-2">
-                        <div className="flex gap-1.5">
-                          <button
-                            type="button"
-                            disabled={testing}
-                            onClick={() => void test(rule.target.value)}
-                            className="rounded-lg border border-ink/15 p-1.5 text-muted hover:text-brand"
-                            title={`Test route for ${rule.target.value}`}
-                            aria-label={`Test route for ${rule.target.value}`}
-                          >
-                            <Route size={16} aria-hidden />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={actionPending}
-                            onClick={() => void removeRule(rule.target.value)}
-                            className="rounded-lg border border-ink/15 p-1.5 text-muted hover:text-danger"
-                            title={`Remove ${rule.target.value}`}
-                            aria-label={`Remove ${rule.target.value}`}
-                          >
-                            <Trash2 size={16} aria-hidden />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+      {tab === "sites" ? (
+        <TabPanel idPrefix="routing" value="sites">
+          <AddSiteBar />
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search
+                className="pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 text-muted"
+                size={16}
+                aria-hidden
+              />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                aria-label={t("ui.routing.search")}
+                placeholder={t("ui.routing.search")}
+                className="w-full rounded-xl border-ink/10 bg-surface ps-9 text-sm"
+              />
+            </div>
+            <button
+              type="button"
+              disabled={actionPending}
+              onClick={() => void refreshRules()}
+              title={t("ui.routing.refresh")}
+              aria-label={t("ui.routing.refresh")}
+              className="inline-flex items-center justify-center rounded-xl border border-ink/10 bg-surface px-3 text-muted transition hover:text-ink disabled:opacity-50"
+            >
+              <RefreshCw size={16} aria-hidden />
+            </button>
           </div>
-        )}
-      </div>
 
-      {route ? <FlowResult route={route} /> : null}
-      <ApplicationRoutes rules={rules} clients={enabled} allClients={clients} />
+          <div className="rounded-2xl border border-ink/10 bg-surface">
+            {filtered.length === 0 ? (
+              <p className="p-8 text-center text-sm text-muted">
+                {rules.pins.length === 0
+                  ? t("ui.routing.empty")
+                  : t("ui.routing.noMatch")}
+              </p>
+            ) : (
+              <div className="overflow-x-auto rounded-2xl">
+                <table className="w-full min-w-[36rem] text-start text-sm">
+                  <thead>
+                    <tr className="bg-canvas text-muted">
+                      <SortHeader
+                        label={t("liveConnectionsHost")}
+                        sortKey="target"
+                        state={sort}
+                        onToggle={(key) =>
+                          setSort((prev) => toggleSort(prev, key))
+                        }
+                      />
+                      <SortHeader
+                        label={t("ruleKind")}
+                        sortKey="kind"
+                        state={sort}
+                        onToggle={(key) =>
+                          setSort((prev) => toggleSort(prev, key))
+                        }
+                      />
+                      <SortHeader
+                        label={t("liveConnectionsOutbound")}
+                        sortKey="outbound"
+                        state={sort}
+                        onToggle={(key) =>
+                          setSort((prev) => toggleSort(prev, key))
+                        }
+                      />
+                      <th className="px-3 py-2 text-start font-medium">
+                        {t("liveConnectionsIp")}
+                      </th>
+                      <th className="px-3 py-2 text-start font-medium">
+                        {t("tableActions")}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-ink/10">
+                    {filtered.map(({ rule }) => {
+                      const clientId =
+                        rule.outbound.kind === "client"
+                          ? rule.outbound.client_id
+                          : null;
+                      const disabledClient =
+                        clientId !== null &&
+                        !enabled.some((client) => client.id === clientId);
+                      return (
+                        <tr
+                          key={`${outboundKey(rule.outbound)}:${rule.target.kind}:${rule.target.value}`}
+                          className={`hover:bg-canvas/60 ${disabledClient ? "opacity-50" : ""}`}
+                        >
+                          <td className="px-3 py-2 font-medium break-all">
+                            {rule.target.value}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs text-muted">
+                            {rule.target.kind.toUpperCase()}
+                          </td>
+                          <td className="px-3 py-2">
+                            {disabledClient ? (
+                              <span className="text-xs font-semibold text-muted">
+                                {outboundLabel(rule.outbound, clients)} (
+                                {t("disabled")})
+                              </span>
+                            ) : (
+                              <OutboundSelect
+                                value={outboundKey(rule.outbound)}
+                                clients={enabled}
+                                onChange={(next) =>
+                                  void pinRoute(rule.target.value, next).catch(
+                                    () => undefined,
+                                  )
+                                }
+                                disabled={actionPending}
+                              />
+                            )}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs text-muted break-all">
+                            {rule.resolved_ips.join(", ") || "—"}
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex gap-1.5">
+                              <button
+                                type="button"
+                                disabled={testing}
+                                onClick={() => void test(rule.target.value)}
+                                className="rounded-lg border border-ink/15 p-1.5 text-muted hover:text-brand"
+                                title={`Test route for ${rule.target.value}`}
+                                aria-label={`Test route for ${rule.target.value}`}
+                              >
+                                <Route size={16} aria-hidden />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={actionPending}
+                                onClick={() =>
+                                  void removeRule(rule.target.value)
+                                }
+                                className="rounded-lg border border-ink/15 p-1.5 text-muted hover:text-danger"
+                                title={`Remove ${rule.target.value}`}
+                                aria-label={`Remove ${rule.target.value}`}
+                              >
+                                <Trash2 size={16} aria-hidden />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {route ? <FlowResult route={route} /> : null}
+        </TabPanel>
+      ) : null}
     </section>
   );
 }
@@ -362,14 +383,12 @@ function ApplicationRoutes({
       data-testid="application-routes"
       className="rounded-2xl border border-ink/10 bg-surface p-3.5"
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-1.5">
           <h2 id="application-routes-title" className="font-semibold">
             {t("applicationRoutes")}
           </h2>
-          <p className="mt-1 text-sm text-muted">
-            {t("applicationRoutesHelp")}
-          </p>
+          <InfoTip text={t("applicationRoutesHelp")} />
         </div>
         <button
           type="button"
@@ -792,9 +811,11 @@ function RuleListCard({
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl bg-canvas p-4">
-      <dt className="text-sm text-muted">{label}</dt>
-      <dd className="mt-1 text-xl font-semibold">{value}</dd>
+    <div className="min-w-0 rounded-xl bg-canvas px-3.5 py-3">
+      <dt className="text-xs text-muted">{label}</dt>
+      <dd className="mt-1 truncate font-semibold" title={value}>
+        {value}
+      </dd>
     </div>
   );
 }
