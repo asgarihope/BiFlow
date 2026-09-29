@@ -113,3 +113,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0107](./0107-distinct-desktop-cargo-artifacts.md)             | Give desktop binary and library distinct Cargo artifact names | Accepted   |
 | [0108](./0108-windows-loopback-and-kubectl-bypass.md)          | Exclude Windows loopback from TUN routes                      | Accepted   |
 | [0109](./0109-application-routes-in-list-management.md)        | Route running applications from List Management               | Accepted   |
+| [0110](./0110-environment-snapshot.md)                         | Log a host environment snapshot in every debug.log            | Accepted   |

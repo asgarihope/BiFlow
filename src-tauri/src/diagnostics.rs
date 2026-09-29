@@ -23,6 +23,10 @@ const DEFAULT_FILTER: &str = "info,hyper=warn,reqwest=warn,rustls=warn,tao=warn,
 
 static ACTIVE_SESSION: OnceLock<ActiveSession> = OnceLock::new();
 static SESSION_CLOSED: AtomicBool = AtomicBool::new(false);
+/// Set when `debug.log` vanished from disk (deleted by hand or by a cleaner)
+/// and the writer recreated it. The desktop re-logs the environment snapshot
+/// so a recreated file never starts without host context (ADR 0106).
+static LOG_RECREATED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
 struct ActiveSession {
@@ -64,6 +68,17 @@ impl DebugLog {
             .lock()
             .map_err(|_| io::Error::other("debug log lock is poisoned"))?;
         let incoming = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        // An append handle keeps writing into an unlinked inode on Linux and
+        // into a delete-pending file on Windows, so a log deleted outside the
+        // app would silently swallow every later event. Recreate it instead.
+        if !state.path.exists() {
+            if let Some(parent) = state.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            state.file = Some(open_append_log(&state.path)?);
+            state.bytes_written = 0;
+            LOG_RECREATED.store(true, Ordering::SeqCst);
+        }
         {
             let file = log_file(&mut state)?;
             file.write_all(bytes)?;
@@ -549,6 +564,11 @@ pub fn close_session() {
     flush();
 }
 
+/// Returns `true` once after the writer had to recreate a deleted log file.
+pub fn take_log_recreated() -> bool {
+    LOG_RECREATED.swap(false, Ordering::SeqCst)
+}
+
 pub fn flush() {
     if let Some(session) = ACTIVE_SESSION.get() {
         if let Err(error) = session.log.flush() {
@@ -701,6 +721,24 @@ mod tests {
         assert_eq!(event["initiator"], "unit_test");
         assert_eq!(event["cause"], "none");
         assert!(event["timestamp"].is_string());
+    }
+
+    #[test]
+    fn deleted_log_file_is_recreated_on_the_next_event() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("debug.log");
+        let log = DebugLog::open(&path).expect("open log");
+        log.append(b"{\"event\":\"first\"}\n")
+            .expect("first append");
+        fs::remove_file(&path).expect("delete log");
+        take_log_recreated();
+        log.append(b"{\"event\":\"second\"}\n")
+            .expect("append after delete");
+        assert!(take_log_recreated());
+        assert!(!take_log_recreated());
+        let text = fs::read_to_string(&path).expect("recreated log");
+        assert!(text.contains("second"));
+        assert!(!text.contains("first"));
     }
 
     #[test]

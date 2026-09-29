@@ -1605,6 +1605,7 @@ export const mockApi = {
         "config-redacted.json",
         "snapshot.json",
         "debug.log",
+        "environment.json",
       ],
     };
   },

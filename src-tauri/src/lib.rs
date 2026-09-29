@@ -2,6 +2,7 @@ mod connect_prep;
 mod deps;
 mod diagnostics;
 mod egress_cli;
+mod environment;
 mod github_update;
 mod helper_install;
 mod hiddify_reset;
@@ -971,6 +972,7 @@ async fn start_stack_inner<R: Runtime>(
         .reserve_lifecycle(LifecycleBusy::Connecting)
         .await
         .map_err(|error| error.to_string())?;
+    spawn_environment_snapshot(app, "connect");
     if let Err(error) = prepare_stack_start(app).await {
         engine.release_lifecycle(LifecycleBusy::Connecting).await;
         return Err(error);
@@ -2128,59 +2130,159 @@ async fn apply_live_settings(app: AppHandle) -> Result<(), String> {
     .await
 }
 
+/// Collects and logs the host environment in the background (ADR 0106).
+/// Never blocks the caller; a failed config or rule load still logs the
+/// host half of the report.
+fn spawn_environment_snapshot<R: Runtime>(app: &AppHandle<R>, trigger: &'static str) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(services) = services(&app) else {
+            warn!(
+                event = "environment.services_unavailable",
+                section = "environment",
+                initiator = "environment_snapshot",
+                cause = "services_not_initialized",
+                trace_route = "desktop->environment_snapshot",
+                trigger,
+                "environment snapshot ran without BiFlow configuration"
+            );
+            return;
+        };
+        let config = services
+            .config_store
+            .load()
+            .inspect_err(|cause| {
+                warn!(
+                    event = "environment.config_unavailable",
+                    section = "environment",
+                    initiator = "environment_snapshot",
+                    cause = %cause,
+                    trace_route = "desktop->environment_snapshot->config_store",
+                    trigger,
+                    "environment snapshot could not read the configuration"
+                );
+            })
+            .ok();
+        let rules = route_rule_set(services)
+            .await
+            .inspect_err(|cause| {
+                warn!(
+                    event = "environment.rules_unavailable",
+                    section = "environment",
+                    initiator = "environment_snapshot",
+                    cause = %cause,
+                    trace_route = "desktop->environment_snapshot->rules",
+                    trigger,
+                    "environment snapshot could not build the route rule set"
+                );
+            })
+            .ok();
+        let context = environment::CollectContext {
+            app_version: version::app_version().to_owned(),
+            config,
+            rules,
+            stack_phase: format!("{:?}", services.engine.snapshot().phase).to_ascii_lowercase(),
+        };
+        environment::snapshot(trigger, context).await;
+    });
+}
+
+/// The host looks different once TUN is up or after a failure; capture it
+/// on those transitions (ADR 0106). The first observed phase is not a
+/// transition — startup already logged a snapshot.
+fn environment_trigger(previous: Option<StackPhase>, current: StackPhase) -> Option<&'static str> {
+    if previous? == current {
+        return None;
+    }
+    match current {
+        StackPhase::Running => Some("stack_running"),
+        StackPhase::Degraded => Some("stack_degraded"),
+        StackPhase::Error => Some("stack_error"),
+        _ => None,
+    }
+}
+
+/// Re-logs host context whenever `debug.log` had to be recreated after it
+/// was deleted outside the app.
+fn spawn_log_recreation_watch<R: Runtime>(handle: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if diagnostics::take_log_recreated() {
+                warn!(
+                    event = "log.recreated",
+                    section = "diagnostics",
+                    initiator = "debug_log_writer",
+                    cause = "log_file_missing",
+                    trace_route = "debug_log_writer->diagnostics->environment_snapshot",
+                    "debug.log was deleted outside BiFlow and has been recreated"
+                );
+                environment::replay_last("log_recreated");
+                spawn_environment_snapshot(&handle, "log_recreated");
+            }
+        }
+    });
+}
+
+/// The same rule set `test_route` answers with, rebuilt from the bundled
+/// snapshot, the pins document, and the current client list.
+async fn route_rule_set(services: &AppServices) -> Result<RuleSet, String> {
+    let document = services.rules.list().await;
+    let domains = read_snapshot_lines(&services.cloud_rules.resolve("iran-domains.txt"))?
+        .into_iter()
+        .map(|line| line.trim_start_matches("+.").to_owned())
+        .collect::<Vec<_>>();
+    let business = read_snapshot_lines(&services.cloud_rules.resolve("iran-business-domains.txt"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|line| line.trim_start_matches("+.").to_owned())
+        .collect::<Vec<_>>();
+    let cidrs = read_snapshot_lines(&services.cloud_rules.resolve("private.txt"))?
+        .into_iter()
+        .chain(read_snapshot_lines(
+            &services.cloud_rules.resolve("iran-networks.txt"),
+        )?)
+        .chain(
+            read_snapshot_lines(&services.cloud_rules.resolve("iran-cdn-networks.txt"))
+                .unwrap_or_default(),
+        )
+        .map(|line| {
+            line.parse()
+                .map_err(|error| format!("invalid bundled CIDR: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let config = services
+        .config_store
+        .load()
+        .or_else(|_| services.config_store.load_or_create())
+        .map_err(|error| error.to_string())?;
+    let enabled = config
+        .enabled_clients()
+        .into_iter()
+        .map(|client| client.id)
+        .collect();
+    let default_outbound = match config.default_route {
+        DefaultRoute::Direct => iran_split_rules::Outbound::Direct,
+        DefaultRoute::Client { client_id } => iran_split_rules::Outbound::client(client_id),
+    };
+    Ok(RuleSet::from_sources(
+        &document,
+        domains,
+        cidrs,
+        business,
+        default_outbound,
+        &enabled,
+    ))
+}
+
 #[tauri::command]
 async fn test_route(target: String, app: AppHandle) -> Result<RouteTestResult, String> {
     diagnostics::trace_action("routing", "tauri_command", "test_route", async move {
         let services = services(&app)?;
-        let document = services.rules.list().await;
-        let domains = read_snapshot_lines(&services.cloud_rules.resolve("iran-domains.txt"))?
-            .into_iter()
-            .map(|line| line.trim_start_matches("+.").to_owned())
-            .collect::<Vec<_>>();
-        let business =
-            read_snapshot_lines(&services.cloud_rules.resolve("iran-business-domains.txt"))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|line| line.trim_start_matches("+.").to_owned())
-                .collect::<Vec<_>>();
-        let cidrs = read_snapshot_lines(&services.cloud_rules.resolve("private.txt"))?
-            .into_iter()
-            .chain(read_snapshot_lines(
-                &services.cloud_rules.resolve("iran-networks.txt"),
-            )?)
-            .chain(
-                read_snapshot_lines(&services.cloud_rules.resolve("iran-cdn-networks.txt"))
-                    .unwrap_or_default(),
-            )
-            .map(|line| {
-                line.parse()
-                    .map_err(|error| format!("invalid bundled CIDR: {error}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let config = services
-            .config_store
-            .load()
-            .or_else(|_| services.config_store.load_or_create())
+        let decision = route_rule_set(services)
+            .await?
+            .decide(&target)
             .map_err(|error| error.to_string())?;
-        let enabled = config
-            .enabled_clients()
-            .into_iter()
-            .map(|client| client.id)
-            .collect();
-        let default_outbound = match config.default_route {
-            DefaultRoute::Direct => iran_split_rules::Outbound::Direct,
-            DefaultRoute::Client { client_id } => iran_split_rules::Outbound::client(client_id),
-        };
-        let decision = RuleSet::from_sources(
-            &document,
-            domains,
-            cidrs,
-            business,
-            default_outbound,
-            &enabled,
-        )
-        .decide(&target)
-        .map_err(|error| error.to_string())?;
         info!(
             outbound = ?decision.outbound,
             reason = ?decision.reason,
@@ -2354,9 +2456,18 @@ fn reveal_debug_log(_app: AppHandle) -> Result<diagnostics::DebugLogStatus, Stri
     )
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects AppHandle command arguments by value"
+)]
 #[tauri::command]
-fn delete_debug_log(_app: AppHandle) -> Result<diagnostics::DebugLogStatus, String> {
-    diagnostics::clear()
+fn delete_debug_log(app: AppHandle) -> Result<diagnostics::DebugLogStatus, String> {
+    let status = diagnostics::clear()?;
+    // A cleared log must still describe the host: replay the last report
+    // immediately, then refresh it in the background.
+    environment::replay_last("log_cleared");
+    spawn_environment_snapshot(&app, "log_cleared");
+    Ok(status)
 }
 
 #[expect(
@@ -2386,7 +2497,9 @@ fn export_support_bundle(app: AppHandle) -> Result<ExportResult, String> {
                 "config-redacted.json",
                 "snapshot.json",
                 "debug.log",
+                "environment.json",
             ];
+            environment::replay_last("support_export");
             write_json(
                 &bundle.join(files[0]),
                 &serde_json::json!({
@@ -2398,6 +2511,11 @@ fn export_support_bundle(app: AppHandle) -> Result<ExportResult, String> {
             write_json(&bundle.join(files[1]), &settings)?;
             write_json(&bundle.join(files[2]), &services.engine.snapshot())?;
             diagnostics::copy_log(&bundle.join(files[3]))?;
+            write_json(
+                &bundle.join(files[4]),
+                &serde_json::json!({ "report": environment::last_report() }),
+            )?;
+            spawn_environment_snapshot(&app, "support_export");
             Ok(ExportResult {
                 path: bundle.to_string_lossy().into_owned(),
                 files: files.into_iter().map(str::to_owned).collect(),
@@ -3620,6 +3738,28 @@ fn initialize_diagnostics() {
         .unwrap_or_else(|error| panic!("BiFlow debug.log initialization failed: {error}"));
 }
 
+/// Refreshes health and rejoins late local proxies every 10 seconds.
+fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            if matches!(
+                health_engine.snapshot().phase,
+                StackPhase::Stopped
+                    | StackPhase::Running
+                    | StackPhase::Paused
+                    | StackPhase::Degraded
+                    | StackPhase::Error
+            ) {
+                health_engine.refresh_health().await;
+                // ADR 0076: a local proxy (e.g. Happ) the operator connected
+                // after Connect rejoins live routing without a full reconnect.
+                health_engine.recover_clients().await;
+            }
+        }
+    });
+}
+
 fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let services = create_services(app.handle()).map_err(|cause| {
         error!(
@@ -3638,9 +3778,16 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     let data_dir = services.paths.data.clone();
     let handle = app.handle().clone();
     app.manage(services);
+    spawn_environment_snapshot(app.handle(), "startup");
+    spawn_log_recreation_watch(app.handle().clone());
     tauri::async_runtime::spawn(async move {
+        let mut previous_phase = None;
         while snapshots.changed().await.is_ok() {
             let snapshot = snapshots.borrow().clone();
+            if let Some(trigger) = environment_trigger(previous_phase, snapshot.phase) {
+                spawn_environment_snapshot(&handle, trigger);
+            }
+            previous_phase = Some(snapshot.phase);
             if let Err(cause) = handle.emit("stack-snapshot", snapshot.clone()) {
                 warn!(
                     event = "snapshot.emit_failed",
@@ -3681,24 +3828,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
             );
         }
     });
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            if matches!(
-                health_engine.snapshot().phase,
-                StackPhase::Stopped
-                    | StackPhase::Running
-                    | StackPhase::Paused
-                    | StackPhase::Degraded
-                    | StackPhase::Error
-            ) {
-                health_engine.refresh_health().await;
-                // ADR 0076: a local proxy (e.g. Happ) the operator connected
-                // after Connect rejoins live routing without a full reconnect.
-                health_engine.recover_clients().await;
-            }
-        }
-    });
+    spawn_health_loop(health_engine);
     if let Some(window) = app.get_webview_window("main") {
         restore_main_window_size(&window, &data_dir);
     }
@@ -3957,6 +4087,28 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn environment_snapshot_fires_only_on_real_phase_transitions() {
+        use super::{environment_trigger, StackPhase};
+        assert_eq!(environment_trigger(None, StackPhase::Running), None);
+        assert_eq!(
+            environment_trigger(Some(StackPhase::CheckingReadiness), StackPhase::Running),
+            Some("stack_running")
+        );
+        assert_eq!(
+            environment_trigger(Some(StackPhase::Running), StackPhase::Running),
+            None
+        );
+        assert_eq!(
+            environment_trigger(Some(StackPhase::Running), StackPhase::Error),
+            Some("stack_error")
+        );
+        assert_eq!(
+            environment_trigger(Some(StackPhase::Running), StackPhase::Stopped),
+            None
+        );
+    }
+
     use super::{
         merge_update_channels, packaged_rule_snapshot_dir, parse_tasklist, single_instance_dbus_id,
         update_check_backoff, update_download_percent, UpdateProgress, UpdateStatus,
