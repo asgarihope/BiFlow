@@ -105,6 +105,16 @@ struct TunConfig {
     auto_redirect: bool,
     auto_detect_interface: bool,
     strict_route: bool,
+    /// Explicit IPv6 address for the TUN. Mihomo v1.19 does not always
+    /// apply the `fdfe:dcba:9876::1/126` default when only top-level `ipv6`
+    /// is true, so the TUN ends up with no inet6 address. With `strict-route`
+    /// on Windows that absence installs an unconditional WFP "block ipv6"
+    /// connect filter that exempts only Mihomo, breaking `localhost` -> `::1`
+    /// while connected (ADR 0112). Emitting the address explicitly keeps it.
+    /// Mihomo parses `inet6-address` as `[]netip.Prefix`, so it must be a
+    /// sequence, mirroring `inet4-address`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    inet6_address: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     route_exclude_address: Vec<String>,
     dns_hijack: Vec<String>,
@@ -323,7 +333,19 @@ pub fn generate_config_with_handles(
             auto_route: true,
             auto_redirect: false,
             auto_detect_interface: true,
-            strict_route: platform == Platform::Windows,
+            // Mihomo v1.19.29 does not apply `inet6-address` to the Wintun
+            // adapter on Windows (GET /configs reports inet4-address but no
+            // inet6-address, and the adapter only gets a link-local fe80::
+            // address). With `strict-route: true` and no inet6 address,
+            // sing-tun installs an unconditional WFP "block ipv6" connect
+            // filter that only exempts Mihomo itself, so `localhost` ->
+            // `::1` is refused while connected. Until a Mihomo build that
+            // actually sets the inet6 address is available, Windows must run
+            // with `strict-route: false` so loopback IPv6 works. `dns.ipv6:
+            // false` already keeps AAAA out of fake-ip, so the IPv6 leak
+            // surface is minimal (ADR 0112).
+            strict_route: false,
+            inet6_address: vec!["fdfe:dcba:9876::1/126".into()],
             route_exclude_address: if platform == Platform::Windows {
                 vec!["127.0.0.0/8".into(), "::1/128".into()]
             } else {
@@ -356,7 +378,18 @@ pub fn generate_config_with_handles(
             enable: true,
             force_dns_mapping: true,
             parse_pure_ip: true,
-            override_destination: true,
+            // `override-destination: true` makes the sniffer replace the
+            // destination IP with the resolved IP of the TLS SNI hostname.
+            // With fake-ip DNS that resolved IP is a 198.18.x.x fake-ip, so
+            // a process that connects to a real IP (e.g. kubectl to a cluster
+            // API at 78.109.203.123:443 with a `tls-server-name` SNI) has its
+            // destination overridden to the fake-ip. Even a PROCESS-NAME,DIRECT
+            // rule then connects to the fake-ip, which is not a real server,
+            // and the TLS handshake fails with EOF. Disable
+            // `override-destination` so the connection keeps its original
+            // destination IP; domain-based rules still use the sniffed SNI
+            // (ADR 0112).
+            override_destination: false,
             sniff: BTreeMap::from([
                 (
                     "HTTP".into(),
@@ -1609,7 +1642,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_enables_strict_route_and_hiddify_bypass() {
+    fn windows_disables_strict_route_to_keep_loopback_ipv6() {
         let generated = generate_config(
             &AppConfig::default(),
             Platform::Windows,
@@ -1617,18 +1650,34 @@ mod tests {
             &RoutePinsDocument::default(),
         )
         .expect("config");
-        assert!(generated.yaml.contains("strict-route: true"));
+        // Mihomo v1.19.29 does not apply inet6-address to the Wintun adapter,
+        // so strict-route would install a WFP "block ipv6" filter that drops
+        // ::1 loopback. Windows must use strict-route: false until a build
+        // that sets the inet6 address is available (ADR 0112).
+        assert!(generated.yaml.contains("strict-route: false"));
         assert!(generated.yaml.contains("route-exclude-address:"));
         assert!(generated.yaml.contains("- 127.0.0.0/8"));
         assert!(generated.yaml.contains("- ::1/128"));
+        assert!(generated.yaml.contains("inet6-address:"));
+        assert!(generated.yaml.contains("- fdfe:dcba:9876::1/126"));
         assert!(generated.yaml.contains("find-process-mode: always"));
         assert!(generated.yaml.contains("auto-redirect: false"));
+        // override-destination must be false so the sniffer does not redirect
+        // IP-based connections (e.g. kubectl to a cluster API) to a fake-ip
+        // based on the TLS SNI (ADR 0112).
+        assert!(generated.yaml.contains("override-destination: false"));
         let document: serde_yaml::Value =
             serde_yaml::from_str(&generated.yaml).expect("generated YAML parses");
         // Top-level IPv6 keeps the TUN inet6 address, so strict-route does
         // not block `::1`; the fake-ip DNS still answers IPv4 only.
         assert_eq!(document["ipv6"], serde_yaml::Value::Bool(true));
         assert_eq!(document["dns"]["ipv6"], serde_yaml::Value::Bool(false));
+        assert_eq!(
+            document["tun"]["inet6-address"],
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(
+                "fdfe:dcba:9876::1/126".into()
+            )])
+        );
         assert!(generated.yaml.contains("dns-query#client-"));
         assert!(generated.yaml.contains("PROCESS-NAME,Hiddify.exe,DIRECT"));
         assert!(generated

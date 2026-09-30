@@ -27,11 +27,23 @@ application ID, so every other process loses all IPv6, loopback included.
 
 ## Decision
 
-- Generate top-level `ipv6: true` on Windows, as Linux already does. The
-  TUN keeps `fdfe:dcba:9876::1/126`, so the block filter is not installed.
+- Generate top-level `ipv6: true` on Windows, as Linux already does.
+- Emit `tun.inet6-address: fdfe:dcba:9876::1/126` explicitly so a future
+  Mihomo build that applies it will keep the inet6 address on the TUN.
 - Keep `dns.ipv6: false` on Windows. Fake-ip answers stay IPv4-only, so
   domain routing is unchanged.
-- Keep `strict-route` and the loopback route exclusions.
+- **Set `strict-route: false` on Windows.** Mihomo v1.19.29 does not apply
+  `inet6-address` to the Wintun adapter — `GET /configs` reports
+  `inet4-address` with no `inet6-address`, and the adapter only gets a
+  link-local `fe80::` address. With `strict-route: true` and no inet6
+  address, sing-tun installs the unconditional WFP "block ipv6" connect
+  filter that only exempts Mihomo, so `localhost` -> `::1` is refused while
+  connected. Until a Mihomo build that actually sets the inet6 address is
+  available, Windows must run with `strict-route: false` so loopback IPv6
+  works. `dns.ipv6: false` already keeps AAAA out of fake-ip, so the IPv6
+  leak surface is minimal.
+- Keep the loopback route exclusions (`127.0.0.0/8`, `::1/128`) for when
+  `strict-route` can be re-enabled.
 - IPv6 literal traffic (for example a browser's own DoH AAAA answers) now
   enters TUN and follows the rules instead of being dropped.
 
@@ -48,3 +60,39 @@ regression shows up as `loopback_ipv6_blocked` in the snapshot. Findings
 no longer flag BiFlow's own split-default routes, one IPv4 plus one IPv6
 default route, or a SYSTEM helper task that a standard user cannot list
 while the helper is reachable.
+
+### Orphaned Mihomo reclamation (6.2.54)
+
+A second root cause kept the fix from taking effect on an upgraded
+machine. `spawn_mihomo` uses `kill_on_drop(false)` so connectivity
+survives a helper crash, but when the helper itself restarts (machine
+reboot, helper reinstall, or a new desktop session), `self.child` is
+empty and the previous Mihomo is an orphan still holding the controller
+port and the TUN adapter. The new Mihomo then fails to bind
+`127.0.0.1:19090`, the desktop silently talks to the stale process, and
+the new `inet6-address` config is never applied — `GET /configs` keeps
+reporting the old `inet4`-only TUN.
+
+The helper now calls `kill_orphaned_mihomo` before every spawn. It runs
+`taskkill /F /IM mihomo.exe` (Windows) or `pkill -x mihomo` (Linux) and
+swallows the non-zero exit when no orphan exists. This reclaims the
+port and the adapter so the fresh Mihomo binds cleanly.
+
+### Sniffer override-destination and kubectl EOF (6.2.56)
+
+A third root cause kept `kubectl` from reaching a cluster API while
+connected. The cluster server `78.109.203.123:443` is in
+`iran-networks` (78.109.192.0/20) and `kubectl.exe` is in the process
+bypass list (`PROCESS-NAME,kubectl.exe,DIRECT`), so the connection
+should have gone DIRECT. But the sniffer had `override-destination:
+true`: when kubectl connected to the IP and sent a TLS SNI
+(`tls-server-name` from kubeconfig), the sniffer resolved the SNI
+hostname through fake-ip DNS and overrode the destination to the
+resulting 198.18.x.x fake-ip. The DIRECT outbound then connected to
+the fake-ip, which is not a real server, and the TLS handshake failed
+with EOF in 3 ms. The connection never appeared in the live
+connections list because the override happened before rule evaluation.
+
+Setting `override-destination: false` keeps the original destination
+IP while still allowing domain-based rules to use the sniffed SNI. The
+PROCESS-NAME,DIRECT rule then connects to the real cluster IP.
