@@ -40,7 +40,16 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
-    setupFiles: "./src/test/setup.ts",
+    environmentOptions: {
+      jsdom: {
+        // jsdom only exposes `localStorage` for a real origin; the default
+        // `about:blank` is opaque, so `window.localStorage` is undefined and
+        // every test that reads the language or the mock-deps flag fails
+        // (Node 26 also warns `localStorage is not available`).
+        url: "http://localhost/",
+      },
+    },
+    setupFiles: ["./src/test/localStorage-shim.ts", "./src/test/setup.ts"],
     isolate: true,
     css: true,
     exclude: ["**/node_modules/**", "**/e2e/**", "**/dist/**"],

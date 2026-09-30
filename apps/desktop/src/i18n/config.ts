@@ -813,12 +813,15 @@ const resources = {
   },
 } as const;
 
+const savedLanguage =
+  typeof localStorage !== "undefined"
+    ? (localStorage.getItem("biflow-language") ??
+      localStorage.getItem("iran-split-language"))
+    : undefined;
+
 void i18n.use(initReactI18next).init({
   resources,
-  lng:
-    localStorage.getItem("biflow-language") ??
-    localStorage.getItem("iran-split-language") ??
-    "en",
+  lng: savedLanguage ?? "en",
   fallbackLng: "en",
   interpolation: { escapeValue: false },
 });
