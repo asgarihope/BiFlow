@@ -802,6 +802,7 @@ fn no_proxy_setting(source: &str, value: &str) -> ProxySetting {
     }
 }
 
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 fn adapter_kind(name: &str, description: &str) -> &'static str {
     let text = format!("{name} {description}").to_ascii_lowercase();
     let rules: &[(&str, &'static str)] = &[

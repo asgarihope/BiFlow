@@ -18,6 +18,7 @@ pub enum InstallKind {
     Deb,
     AppImage,
     Nsis,
+    Dmg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,9 +103,11 @@ pub fn user_agent(current_version: &str) -> String {
 }
 
 #[must_use]
-pub fn install_kind_from(appimage: Option<&OsStr>, windows: bool) -> InstallKind {
+pub fn install_kind_from(appimage: Option<&OsStr>, windows: bool, macos: bool) -> InstallKind {
     if windows {
         InstallKind::Nsis
+    } else if macos {
+        InstallKind::Dmg
     } else if appimage.is_some() {
         InstallKind::AppImage
     } else {
@@ -117,6 +120,7 @@ pub fn detect_install_kind() -> InstallKind {
     install_kind_from(
         std::env::var_os("APPIMAGE").as_deref(),
         cfg!(target_os = "windows"),
+        cfg!(target_os = "macos"),
     )
 }
 
@@ -127,7 +131,16 @@ pub fn detect_install_kind() -> InstallKind {
 /// Returns an error when the release has no matching `.deb`, `AppImage`, or NSIS
 /// installer.
 pub fn pick_asset(release: &Release, kind: InstallKind) -> Result<Asset, String> {
-    if !cfg!(target_arch = "x86_64") {
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        return Err("automatic updates are not available for this architecture".into());
+    };
+    // macOS ships both Apple Silicon and Intel builds; Linux/Windows update
+    // only the x86_64 release artifacts today.
+    if !matches!(kind, InstallKind::Dmg) && arch != "x64" {
         return Err("automatic updates are not available for this architecture".into());
     }
     let version = &release.version;
@@ -135,6 +148,7 @@ pub fn pick_asset(release: &Release, kind: InstallKind) -> Result<Asset, String>
         InstallKind::Deb => format!("BiFlow_{version}_amd64.deb"),
         InstallKind::AppImage => format!("BiFlow_{version}_amd64.AppImage"),
         InstallKind::Nsis => format!("BiFlow_{version}_x64-setup.exe"),
+        InstallKind::Dmg => format!("BiFlow_{version}_{arch}.dmg"),
     };
     release
         .assets
@@ -152,6 +166,13 @@ pub const fn signed_target(kind: InstallKind) -> &'static str {
         InstallKind::Deb => "linux-deb-x86_64",
         InstallKind::AppImage => "linux-x86_64",
         InstallKind::Nsis => "windows-x86_64",
+        InstallKind::Dmg => {
+            if cfg!(target_arch = "aarch64") {
+                "macos-aarch64"
+            } else {
+                "macos-x86_64"
+            }
+        }
     }
 }
 
@@ -323,6 +344,10 @@ pub async fn apply_package(
             install_nsis(package, current_exe, expected_version).await?;
             Ok(ApplyOutcome::HelperRestart)
         }
+        InstallKind::Dmg => {
+            install_dmg(package).await?;
+            Ok(ApplyOutcome::ManualRestart)
+        }
     }
 }
 
@@ -395,6 +420,83 @@ async fn install_appimage(package: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Installs a downloaded `.dmg` on macOS. Mounts the image, copies the bundled
+/// `.app` into `/Applications` with administrator privileges, then unmounts.
+/// The operator must restart `BiFlow` from `/Applications` afterwards.
+#[cfg(target_os = "macos")]
+async fn install_dmg(package: &Path) -> Result<(), String> {
+    let mountpoint = std::env::temp_dir().join("biflow-update").join("dmg-mount");
+    tokio::fs::create_dir_all(&mountpoint)
+        .await
+        .map_err(|error| error.to_string())?;
+    let attach = tokio::process::Command::new("hdiutil")
+        .args(["attach", "-nobrowse", "-mountpoint"])
+        .arg(&mountpoint)
+        .arg(package)
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !attach.status.success() {
+        return Err("could not mount the update image".into());
+    }
+    let app_name = std::fs::read_dir(&mountpoint)
+        .map_err(|error| error.to_string())?
+        .flatten()
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "app"))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .ok_or_else(|| "the update image has no BiFlow.app bundle".to_owned())?;
+    let script = format!(
+        "set -e\nrm -rf '/Applications/{app}'\ncp -R '{mount}/{app}' '/Applications/{app}'\n",
+        app = app_name,
+        mount = mountpoint.display(),
+    );
+    let script_path = std::env::temp_dir()
+        .join("biflow-update")
+        .join("apply-dmg.sh");
+    tokio::fs::write(&script_path, &script)
+        .await
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = tokio::fs::metadata(&script_path)
+            .await
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o700);
+        tokio::fs::set_permissions(&script_path, permissions)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    let apple_script = format!(
+        "do shell script \"sh {script_path}\" with administrator privileges",
+        script_path = script_path.display(),
+    );
+    let install = tokio::process::Command::new("osascript")
+        .args(["-e", &apple_script])
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    let _ = tokio::process::Command::new("hdiutil")
+        .args(["detach", "-force"])
+        .arg(&mountpoint)
+        .status()
+        .await;
+    let _ = tokio::fs::remove_dir_all(&mountpoint).await;
+    if install.status.success() {
+        Ok(())
+    } else if install.status.code() == Some(-128) {
+        Err("package install was cancelled".into())
+    } else {
+        Err("package install failed".into())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn install_dmg(_package: &Path) -> Result<(), String> {
+    Err("macOS packages cannot be installed on this platform".into())
 }
 
 async fn install_nsis(
@@ -535,8 +637,13 @@ mod tests {
         .expect("release");
         assert_eq!(release.version, "3.6.0");
         assert!(release.html_url.contains("releases/tag"));
-        let asset = pick_asset(&release, InstallKind::Deb).expect("deb");
-        assert_eq!(asset.name, "BiFlow_3.6.0_amd64.deb");
+        // The `.deb` artifact is only selected on x86_64 hosts; Apple Silicon
+        // Macs pick the `.dmg` instead.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let asset = pick_asset(&release, InstallKind::Deb).expect("deb");
+            assert_eq!(asset.name, "BiFlow_3.6.0_amd64.deb");
+        }
     }
 
     #[test]
@@ -562,6 +669,7 @@ mod tests {
         };
         assert!(pick_asset(&release, InstallKind::Deb).is_err());
         assert!(pick_asset(&release, InstallKind::Nsis).is_err());
+        assert!(pick_asset(&release, InstallKind::Dmg).is_err());
         let mut release = release;
         release.assets.push(Asset {
             name: "BiFlow_9.9.9_arm64.deb".into(),
@@ -574,11 +682,31 @@ mod tests {
             url: "https://example.invalid/exact-setup.exe".into(),
             size: 1,
         });
+        // NSIS is only selectable on x86_64; Apple Silicon falls back to dmg.
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(
+                pick_asset(&release, InstallKind::Nsis)
+                    .expect("exact NSIS")
+                    .url,
+                "https://example.invalid/exact-setup.exe"
+            );
+        }
+        let arch_dmg = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x64"
+        };
+        release.assets.push(Asset {
+            name: format!("BiFlow_9.9.9_{arch_dmg}.dmg"),
+            url: "https://example.invalid/exact.dmg".into(),
+            size: 1,
+        });
         assert_eq!(
-            pick_asset(&release, InstallKind::Nsis)
-                .expect("exact NSIS")
+            pick_asset(&release, InstallKind::Dmg)
+                .expect("exact DMG")
                 .url,
-            "https://example.invalid/exact-setup.exe"
+            "https://example.invalid/exact.dmg"
         );
     }
 
@@ -622,11 +750,17 @@ mod tests {
     #[test]
     fn install_kind_prefers_appimage_env_on_linux() {
         assert_eq!(
-            install_kind_from(Some(OsStr::new("/tmp/BiFlow.AppImage")), false),
+            install_kind_from(Some(OsStr::new("/tmp/BiFlow.AppImage")), false, false),
             InstallKind::AppImage
         );
-        assert_eq!(install_kind_from(None, false), InstallKind::Deb);
-        assert_eq!(install_kind_from(None, true), InstallKind::Nsis);
+        assert_eq!(install_kind_from(None, false, false), InstallKind::Deb);
+        assert_eq!(install_kind_from(None, true, false), InstallKind::Nsis);
+        assert_eq!(install_kind_from(None, false, true), InstallKind::Dmg);
+        // macOS never reports AppImage even if the env var is set.
+        assert_eq!(
+            install_kind_from(Some(OsStr::new("/tmp/BiFlow.AppImage")), false, true),
+            InstallKind::Dmg
+        );
     }
 
     #[test]

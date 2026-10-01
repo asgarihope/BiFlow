@@ -677,6 +677,14 @@ fn reveal_command(path: &Path) -> (&'static str, Vec<String>) {
     {
         ("explorer.exe", vec![windows_reveal_select(path)])
     }
+    #[cfg(target_os = "macos")]
+    {
+        // `open -R` reveals the file in Finder instead of opening it.
+        (
+            "open",
+            vec!["-R".into(), path.to_string_lossy().into_owned()],
+        )
+    }
 }
 
 /// Explorer treats `/select,C:\dir/file` as a single unknown switch and opens
@@ -798,6 +806,11 @@ mod tests {
         {
             assert_eq!(program, "explorer.exe");
             assert_eq!(arguments, vec![windows_reveal_select(path)]);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(program, "open");
+            assert_eq!(arguments, vec!["-R", "/tmp/biflow/debug.log"]);
         }
     }
 

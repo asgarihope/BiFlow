@@ -56,6 +56,8 @@ use std::process::Command;
 
 #[cfg(target_os = "linux")]
 use iran_split_platform_linux::{LinuxBackend as NativeBackend, LinuxPaths};
+#[cfg(target_os = "macos")]
+use iran_split_platform_macos::{MacosBackend as NativeBackend, MacosPaths};
 #[cfg(target_os = "windows")]
 use iran_split_platform_win::{WindowsBackend as NativeBackend, WindowsPaths, HELPER_PIPE};
 
@@ -281,6 +283,77 @@ fn linux_mihomo_binary(default: PathBuf) -> PathBuf {
 
 #[cfg(all(target_os = "linux", debug_assertions))]
 fn linux_mihomo_binary_with_override(
+    default: PathBuf,
+    override_path: Option<std::ffi::OsString>,
+) -> PathBuf {
+    override_path.map_or(default, PathBuf::from)
+}
+
+/// Helper socket and system runtime root on macOS. The privileged helper runs
+/// as a launchd daemon under `/Library/Application Support/BiFlow`; the socket
+/// lives next to it so only root and the authorized group can reach it.
+#[cfg(target_os = "macos")]
+const MACOS_HELPER_SOCKET: &str = "/Library/Application Support/BiFlow/helper.sock";
+#[cfg(target_os = "macos")]
+const MACOS_SYSTEM_RUNTIME: &str = "/Library/Application Support/BiFlow/runtime";
+
+#[cfg(target_os = "macos")]
+fn macos_helper_paths() -> (PathBuf, PathBuf) {
+    #[cfg(debug_assertions)]
+    {
+        macos_helper_paths_with_overrides(
+            std::env::var_os("BIFLOW_DEV_PROFILE"),
+            std::env::var_os("BIFLOW_DEV_HELPER_SOCKET"),
+            std::env::var_os("BIFLOW_DEV_SYSTEM_RUNTIME"),
+        )
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        (
+            PathBuf::from(MACOS_HELPER_SOCKET),
+            PathBuf::from(MACOS_SYSTEM_RUNTIME),
+        )
+    }
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn macos_helper_paths_with_overrides(
+    profile: Option<std::ffi::OsString>,
+    socket: Option<std::ffi::OsString>,
+    runtime: Option<std::ffi::OsString>,
+) -> (PathBuf, PathBuf) {
+    if profile.is_some_and(|value| !value.is_empty()) {
+        return (
+            socket.map_or_else(
+                || PathBuf::from("/tmp/biflow-dev-missing-helper.sock"),
+                PathBuf::from,
+            ),
+            runtime.map_or_else(
+                || PathBuf::from("/tmp/biflow-dev-missing-runtime"),
+                PathBuf::from,
+            ),
+        );
+    }
+    (
+        socket.map_or_else(|| PathBuf::from(MACOS_HELPER_SOCKET), PathBuf::from),
+        runtime.map_or_else(|| PathBuf::from(MACOS_SYSTEM_RUNTIME), PathBuf::from),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mihomo_binary(default: PathBuf) -> PathBuf {
+    #[cfg(debug_assertions)]
+    {
+        macos_mihomo_binary_with_override(default, std::env::var_os("BIFLOW_DEV_MIHOMO_BINARY"))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        default
+    }
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn macos_mihomo_binary_with_override(
     default: PathBuf,
     override_path: Option<std::ffi::OsString>,
 ) -> PathBuf {
@@ -1063,6 +1136,16 @@ async fn disconnect_client(app: AppHandle, client_id: String) -> Result<(), Stri
 async fn prepare_stack_start<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let services = services(app)?;
     let helper_ready = connect_prep::helper_is_ready(services.engine.snapshot().helper.phase);
+    // A helper left over from a previous app version lacks the current
+    // platform fixes (macOS DNS takeover, utun naming). Reinstall it before
+    // Connect so the staged binary and helper.toml match this build.
+    let helper_version_matches = services
+        .engine
+        .snapshot()
+        .helper_version
+        .as_deref()
+        .is_some_and(|version| version == version::app_version());
+    let helper_needs_reinstall = helper_ready && !helper_version_matches;
     let statuses = deps::dependency_status(&services.paths.data);
     let hiddify_required = services
         .config_store
@@ -1105,6 +1188,21 @@ async fn prepare_stack_start<R: Runtime>(app: &AppHandle<R>) -> Result<(), Strin
             connect_prep::ConnectRequirement::Mihomo => {
                 install_required_dependency(services, deps::DependencyId::Mihomo).await?;
             }
+        }
+    }
+    if helper_needs_reinstall {
+        info!(
+            event = "connect.helper_reinstall_required",
+            section = "stack",
+            initiator = "prepare_stack_start",
+            cause = "helper_version_mismatch",
+            trace_route = "start_stack->prepare_stack_start->install_helper",
+            "reinstalling the privileged helper to match the app version"
+        );
+        helper_install::install_helper(app).await?;
+        services.engine.refresh_health().await;
+        if !connect_prep::helper_is_ready(services.engine.snapshot().helper.phase) {
+            return Err("privileged helper is still unavailable after reinstallation".into());
         }
     }
     services.engine.refresh_health().await;
@@ -2214,6 +2312,7 @@ fn spawn_environment_snapshot<R: Runtime>(app: &AppHandle<R>, trigger: &'static 
                 github_update::InstallKind::Deb => "deb",
                 github_update::InstallKind::AppImage => "appimage",
                 github_update::InstallKind::Nsis => "nsis",
+                github_update::InstallKind::Dmg => "dmg",
             },
             mihomo_path: deps::first_existing(&deps::mihomo_candidates(&data)),
             hiddify_executable: deps::first_existing(&deps::hiddify_candidates(&data)),
@@ -2460,7 +2559,7 @@ async fn query_logs(
     maximum: u16,
 ) -> Result<Vec<iran_split_ipc::ServiceLogEntry>, String> {
     diagnostics::trace_action("diagnostics", "tauri_command", "query_logs", async move {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             services(&app)?
                 .backend
@@ -3431,6 +3530,37 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
                 user_data_dir: paths.data.clone(),
                 system_runtime_dir,
                 generation_staging_dir,
+                resources_dir: bundled_rules.clone(),
+                rules_cache_dir: rules_cache.clone(),
+                mihomo_binary,
+            },
+        ))
+    };
+    #[cfg(target_os = "macos")]
+    let backend = {
+        let (socket_path, system_runtime_dir) = macos_helper_paths();
+        let mihomo_binary = macos_mihomo_binary(
+            deps::first_existing(&deps::mihomo_candidates(&paths.data))
+                .unwrap_or_else(|| paths.data.join("bin/mihomo")),
+        );
+        info!(
+            event = "helper.paths_selected",
+            section = "startup",
+            initiator = "create_services",
+            cause = "platform_configuration",
+            trace_route = "application_process->create_services->macos_backend",
+            socket_path = %socket_path.display(),
+            runtime_path = %system_runtime_dir.display(),
+            controller_port = config.mihomo.controller_port,
+            mixed_port = config.mihomo.mixed_port,
+            "macOS helper paths selected"
+        );
+        Arc::new(NativeBackend::new(
+            config,
+            MacosPaths {
+                socket_path,
+                user_data_dir: paths.data.clone(),
+                system_runtime_dir,
                 resources_dir: bundled_rules.clone(),
                 rules_cache_dir: rules_cache.clone(),
                 mihomo_binary,
@@ -4548,12 +4678,13 @@ mod tests {
     #[test]
     fn linux_deb_packages_install_via_apt_not_self_replace() {
         assert_eq!(
-            super::github_update::install_kind_from(None, false),
+            super::github_update::install_kind_from(None, false, false),
             super::github_update::InstallKind::Deb
         );
         assert_eq!(
             super::github_update::install_kind_from(
                 Some(std::ffi::OsStr::new("/tmp/BiFlow.AppImage")),
+                false,
                 false
             ),
             super::github_update::InstallKind::AppImage

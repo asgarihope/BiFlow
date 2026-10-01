@@ -25,6 +25,10 @@ const MIHOMO_WINDOWS_ZIP_SHA256: &str =
     "1a8520cfe425441eba3eba8623b27b985020031243fe1ecaa1af2b92358a03f9";
 const MIHOMO_WINDOWS_SHA256: &str =
     "4316ff91fecec2fca9acb5612d7400ba228c069ffd325b1f17f46f1d4ef7e0cd";
+const MIHOMO_MACOS_SHA256: &str =
+    "ec66e3e883bdc3fca06753784e324e08921e13239f8e945587cb1bfbf4c6b936";
+const MIHOMO_MACOS_ARCHIVE_SHA256: &str =
+    "4dc25df9e899f14161911302a8ee5fc9e202ed9c976fc405bf82c50ff27466ca";
 const WINTUN_WINDOWS_SHA256: &str =
     "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce";
 
@@ -167,6 +171,13 @@ pub fn mihomo_candidates(data: &Path) -> Vec<PathBuf> {
         candidates.push(home.join(".local").join("bin").join("mihomo"));
         candidates.push(home.join(".local").join("bin").join("clash-meta"));
     }
+    #[cfg(target_os = "macos")]
+    {
+        // Homebrew installs Mihomo under these prefixes on Apple Silicon and
+        // Intel Macs respectively.
+        candidates.push(PathBuf::from("/opt/homebrew/bin/mihomo"));
+        candidates.push(PathBuf::from("/usr/local/bin/mihomo"));
+    }
     candidates.extend(lookup_on_path(&["mihomo", "clash-meta"]));
     candidates
 }
@@ -285,6 +296,17 @@ pub fn install_guide(id: DependencyId) -> InstallGuide {
             steps: vec![
                 "Download mihomo-windows-amd64 zip from the MetaCubeX GitHub release.".into(),
                 "Extract mihomo.exe into %LOCALAPPDATA%\\biflow\\bin\\mihomo.exe".into(),
+                "Restart BiFlow and press Connect.".into(),
+            ],
+        },
+        (DependencyId::Mihomo, "macos") => InstallGuide {
+            id: id.as_str(),
+            title: "Install Mihomo on macOS".into(),
+            download_url: mihomo_macos_url(),
+            steps: vec![
+                "Download mihomo-darwin-arm64 gzip from the MetaCubeX GitHub release.".into(),
+                "Decompress it: gzip -dc mihomo-darwin-arm64-*.gz > ~/.local/share/biflow/bin/mihomo".into(),
+                "Make it executable: chmod +x ~/.local/share/biflow/bin/mihomo".into(),
                 "Restart BiFlow and press Connect.".into(),
             ],
         },
@@ -455,6 +477,17 @@ async fn install_mihomo(data: &Path, bundled_dependencies: &Path) -> Result<Path
                 "Mihomo was installed but its staging directory could not be removed"
             );
         }
+    } else if cfg!(target_os = "macos") {
+        let bundled = bundled_dependencies.join("mihomo");
+        if bundled.is_file() {
+            let bytes = fs::read(bundled)?;
+            install_macos_mihomo_bytes(&dest, &bytes, MIHOMO_MACOS_SHA256)?;
+            return Ok(dest);
+        }
+        let bytes = download_first(&[mihomo_macos_url()]).await?;
+        verify_sha256(&bytes, MIHOMO_MACOS_ARCHIVE_SHA256)?;
+        let decoded = gunzip(&bytes)?;
+        install_macos_mihomo_bytes(&dest, &decoded, MIHOMO_MACOS_SHA256)?;
     } else {
         let bundled = bundled_dependencies.join("mihomo");
         if bundled.is_file() {
@@ -478,6 +511,20 @@ fn install_linux_mihomo_bytes(
     verify_sha256(bytes, expected_sha256)?;
     if !is_elf(bytes) {
         return Err(DepsError::Integrity("Mihomo is not an ELF binary".into()));
+    }
+    write_executable(destination, bytes)
+}
+
+fn install_macos_mihomo_bytes(
+    destination: &Path,
+    bytes: &[u8],
+    expected_sha256: &str,
+) -> Result<(), DepsError> {
+    verify_sha256(bytes, expected_sha256)?;
+    if !is_macho(bytes) {
+        return Err(DepsError::Integrity(
+            "Mihomo is not a macOS Mach-O binary".into(),
+        ));
     }
     write_executable(destination, bytes)
 }
@@ -563,6 +610,12 @@ fn mihomo_linux_url() -> String {
 fn mihomo_windows_url() -> String {
     format!(
         "https://github.com/MetaCubeX/mihomo/releases/download/{MIHOMO_VERSION}/mihomo-windows-amd64-{MIHOMO_VERSION}.zip"
+    )
+}
+
+fn mihomo_macos_url() -> String {
+    format!(
+        "https://github.com/MetaCubeX/mihomo/releases/download/{MIHOMO_VERSION}/mihomo-darwin-arm64-{MIHOMO_VERSION}.gz"
     )
 }
 
@@ -738,6 +791,11 @@ fn is_pe(bytes: &[u8]) -> bool {
     bytes.len() >= 2 && bytes[0] == b'M' && bytes[1] == b'Z'
 }
 
+fn is_macho(bytes: &[u8]) -> bool {
+    // Mach-O 64-bit little-endian magic (MH_MAGIC_64): 0xfeedfacf
+    bytes.len() >= 4 && bytes[0] == 0xcf && bytes[1] == 0xfa && bytes[2] == 0xed && bytes[3] == 0xfe
+}
+
 fn is_zip(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && bytes[0] == b'P' && bytes[1] == b'K'
 }
@@ -772,7 +830,7 @@ fn open_url_allowed(url: &str) -> bool {
     // allowlist can never drift from the buttons that use it.
     iran_split_config::PresetId::all().iter().any(|preset| {
         let downloads = preset.spec().downloads;
-        url == downloads.linux || url == downloads.windows
+        url == downloads.linux || url == downloads.windows || url == downloads.macos
     })
 }
 

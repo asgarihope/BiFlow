@@ -324,7 +324,67 @@ async fn stop_hiddify(executable: &Path) -> bool {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
+async fn stop_hiddify(executable: &Path) -> bool {
+    // macOS has no `/proc`; `pgrep -f` matches the executable path against the
+    // full command line of every process, the same intent as the Linux
+    // `/proc/<pid>/exe` symlink check.
+    let pids = macos_pids_for(executable).await;
+    if pids.is_empty() {
+        return false;
+    }
+    let mut command = Command::new("kill");
+    command.arg("-TERM");
+    for pid in &pids {
+        command.arg(pid.to_string());
+    }
+    match command.status().await {
+        Ok(status) if status.success() => {
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            true
+        }
+        Ok(status) => {
+            tracing::warn!(
+                event = "hiddify.stop_failed",
+                section = "hiddify_reset",
+                initiator = "tauri_command",
+                cause = "kill_exit_status",
+                trace_route = "ui->tauri_command->fresh_start->stop",
+                exit_code = status.code().unwrap_or(-1),
+                "could not terminate the running Hiddify"
+            );
+            false
+        }
+        Err(error) => {
+            error!(
+                event = "hiddify.stop_failed",
+                section = "hiddify_reset",
+                initiator = "tauri_command",
+                cause = %error,
+                trace_route = "ui->tauri_command->fresh_start->stop",
+                "could not run kill"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_pids_for(executable: &Path) -> Vec<u32> {
+    let needle = executable.to_string_lossy().into_owned();
+    let Ok(output) = Command::new("pgrep").args(["-f", &needle]).output().await else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 async fn stop_hiddify(_executable: &Path) -> bool {
     false
 }

@@ -1,6 +1,8 @@
 use super::services;
 use iran_split_core::PlatformBackend;
 use serde::Serialize;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -12,7 +14,7 @@ use tokio::process::Command;
 use tracing::warn;
 use tracing::{error, info};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
@@ -26,7 +28,7 @@ const PKEXEC: &str = "/usr/bin/pkexec";
 #[cfg(target_os = "linux")]
 const ROOT_APP_REJECTION: &str = "BiFlow is running as root, so the helper cannot be installed. The helper authorizes one non-root user. Quit BiFlow, start it as your normal user without sudo, then install the helper again.";
 /// Keeps a runaway script error out of the dialog while preserving the reason.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 const MAX_DETAIL_CHARS: usize = 200;
 /// `ERROR_CANCELLED`: the operator refused the UAC prompt.
 #[cfg(any(target_os = "windows", test))]
@@ -98,7 +100,21 @@ pub async fn install_helper<R: Runtime>(app: &AppHandle<R>) -> Result<InstallHel
         let staging_dir = PathBuf::from(WINDOWS_HELPER_STAGING);
         install_windows(&resource_root, &exe_dir, &staging_dir, &tun_name).await?;
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        let staging_dir = services.paths.data.join("runtime").join("generations");
+        fs::create_dir_all(&staging_dir).map_err(|error| error.to_string())?;
+        let payload_dir = services.paths.data.join("runtime").join("helper-install");
+        install_macos(
+            &resource_root,
+            &exe_dir,
+            &payload_dir,
+            &staging_dir,
+            &tun_name,
+        )
+        .await?;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = (resource_root, exe_dir, tun_name);
         return Err("helper installation is not supported on this platform".into());
@@ -370,7 +386,7 @@ pub(crate) fn root_install_rejection(uid: u32) -> Option<&'static str> {
 
 /// `install-helper.sh` and `PowerShell` both report why they stopped on their
 /// last stderr line.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 #[must_use]
 pub(crate) fn last_error_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
@@ -558,6 +574,231 @@ fn unit_candidates(resource_root: &Path, exe_dir: &Path) -> Vec<PathBuf> {
     ]
 }
 
+/// Root-owned helper + Mihomo location on macOS. A launchd daemon runs as root
+/// and reads its configuration from here.
+#[cfg(target_os = "macos")]
+const MACOS_HELPER_ROOT: &str = "/Library/Application Support/BiFlow";
+/// The launchd daemon plist lives in the system domain.
+#[cfg(target_os = "macos")]
+const MACOS_PLIST_PATH: &str = "/Library/LaunchDaemons/app.biflow.helper.plist";
+/// The daemon label launchd uses to track the helper.
+#[cfg(target_os = "macos")]
+const MACOS_HELPER_LABEL: &str = "app.biflow.helper";
+
+#[cfg(target_os = "macos")]
+fn macos_helper_candidates(resource_root: &Path, exe_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        resource_root.join("helper/iran-split-helper"),
+        exe_dir.join("helper/iran-split-helper"),
+        exe_dir.join("iran-split-helper"),
+        resource_root.join("_up_/resources/helper/iran-split-helper"),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mihomo_candidates(resource_root: &Path, exe_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        resource_root.join("dependencies/mihomo"),
+        exe_dir.join("dependencies/mihomo"),
+        resource_root.join("_up_/resources/dependencies/mihomo"),
+    ]
+}
+
+/// Installs the privileged helper on macOS via a launchd daemon.
+///
+/// The desktop cannot write under `/Library` without elevation, so it stages
+/// the helper binary, Mihomo, a launchd plist, and an install shell script
+/// into the user's profile, then runs the script through `osascript` with
+/// administrator privileges. The script copies the payload into
+/// `/Library/Application Support/BiFlow`, writes `helper.toml` (root-owned),
+/// installs the plist, and bootstraps the daemon with `launchctl`.
+#[cfg(target_os = "macos")]
+async fn install_macos(
+    resource_root: &Path,
+    exe_dir: &Path,
+    payload_dir: &Path,
+    staging_dir: &Path,
+    tun_name: &str,
+) -> Result<(), String> {
+    let (uid, gid) = current_macos_ids()?;
+    let helper_src = first_existing_file(&macos_helper_candidates(resource_root, exe_dir))
+        .ok_or_else(|| "packaged helper binary is missing".to_owned())?;
+    let mihomo_src = first_existing_file(&macos_mihomo_candidates(resource_root, exe_dir))
+        .ok_or_else(|| "packaged Mihomo binary is missing".to_owned())?;
+
+    if payload_dir.exists() {
+        fs::remove_dir_all(payload_dir).map_err(|error| error.to_string())?;
+    }
+    fs::create_dir_all(payload_dir).map_err(|error| error.to_string())?;
+    // 0700 keeps another unprivileged user from swapping the payload before
+    // the elevated install reads it.
+    fs::set_permissions(payload_dir, fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())?;
+    let helper_stage = copy_payload_file_macos(&helper_src, payload_dir, 0o755)?;
+    let mihomo_stage = copy_payload_file_macos(&mihomo_src, payload_dir, 0o755)?;
+
+    // The helper validates `mihomo_sha256` against the installed Mihomo
+    // binary on startup and refuses to serve with an empty hash
+    // (`UnsafeConfig("mihomo_sha256 must be lowercase SHA-256")`). Compute
+    // the real digest of the staged Mihomo copy so the daemon can boot.
+    let mihomo_sha256 = sha256_file(&mihomo_stage)?;
+    let helper_toml = format!(
+        "authorized_uid = {uid}\nauthorized_gid = {gid}\nsocket_path = \
+         \"{socket_path}\"\nstaging_dir = \
+         \"{staging_dir}\"\nruntime_dir = \
+         \"{runtime_dir}\"\nmihomo_binary = \
+         \"{mihomo_binary}\"\nmihomo_sha256 = \
+         \"{mihomo_sha256}\"\ntun_name = \"{tun_name}\"\n",
+        socket_path = MACOS_HELPER_ROOT.to_owned() + "/helper.sock",
+        staging_dir = staging_dir.display(),
+        runtime_dir = MACOS_HELPER_ROOT.to_owned() + "/runtime",
+        mihomo_binary = MACOS_HELPER_ROOT.to_owned() + "/mihomo",
+    );
+    let helper_toml_stage = payload_dir.join("helper.toml");
+    fs::write(&helper_toml_stage, helper_toml).map_err(|error| error.to_string())?;
+
+    let plist = launchd_plist();
+    let plist_stage = payload_dir.join("app.biflow.helper.plist");
+    fs::write(&plist_stage, plist).map_err(|error| error.to_string())?;
+
+    let install_script = payload_dir.join("install-helper.sh");
+    let script = format!(
+        "set -e\n\
+         mkdir -p '{MACOS_HELPER_ROOT}' '{MACOS_HELPER_ROOT}/runtime'\n\
+         cp -f '{helper}' '{MACOS_HELPER_ROOT}/iran-split-helper'\n\
+         cp -f '{mihomo}' '{MACOS_HELPER_ROOT}/mihomo'\n\
+         cp -f '{toml}' '{MACOS_HELPER_ROOT}/helper.toml'\n\
+         chmod 755 '{MACOS_HELPER_ROOT}/iran-split-helper' \
+         '{MACOS_HELPER_ROOT}/mihomo'\n\
+         chown root:wheel '{MACOS_HELPER_ROOT}/iran-split-helper' \
+         '{MACOS_HELPER_ROOT}/mihomo' '{MACOS_HELPER_ROOT}/helper.toml'\n\
+         cp -f '{plist}' '{MACOS_PLIST_PATH}'\n\
+         chown root:wheel '{MACOS_PLIST_PATH}'\n\
+         chmod 644 '{MACOS_PLIST_PATH}'\n\
+         launchctl bootout system/{MACOS_HELPER_LABEL} 2>/dev/null || true\n\
+         launchctl bootstrap system '{MACOS_PLIST_PATH}'\n\
+         launchctl enable system/{MACOS_HELPER_LABEL}\n",
+        helper = helper_stage.display(),
+        mihomo = mihomo_stage.display(),
+        toml = helper_toml_stage.display(),
+        plist = plist_stage.display(),
+    );
+    fs::write(&install_script, script).map_err(|error| error.to_string())?;
+    fs::set_permissions(&install_script, fs::Permissions::from_mode(0o755))
+        .map_err(|error| error.to_string())?;
+
+    // The payload path lives under `~/Library/Application Support/biflow/...`,
+    // which contains a space. `do shell script` runs through sh, so the
+    // path must be single-quoted or sh splits it at the space and tries to
+    // execute `/Users/.../Library/Application` (which does not exist).
+    let apple_script = macos_admin_applescript(&install_script);
+    let output = Command::new("osascript")
+        .args(["-e", &apple_script])
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    // Discard the staged payload regardless of outcome.
+    let _ = fs::remove_dir_all(payload_dir);
+    if output.status.success() {
+        return Ok(());
+    }
+    // osascript exits -128 when the operator dismissed the admin prompt.
+    if output.status.code() == Some(-128) {
+        return Err("helper installation was cancelled".into());
+    }
+    let detail = last_error_line(&output.stderr);
+    error!(
+        event = "helper.install_failed",
+        section = "helper_install",
+        initiator = "tauri_command",
+        cause = "install_script_failed",
+        trace_route = "ui->tauri_command->install_helper->install_macos",
+        exit_code = output.status.code().unwrap_or(-1),
+        detail = %detail,
+        "privileged helper installation failed"
+    );
+    if detail.is_empty() {
+        Err("privileged helper installation failed".into())
+    } else {
+        Err(detail)
+    }
+}
+
+/// Builds the `do shell script ... with administrator privileges` `AppleScript`
+/// that elevates the staged install script. The payload path lives under
+/// `~/Library/Application Support/biflow/...`, which contains a space, so the
+/// path must be single-quoted or sh splits it at the space and tries to
+/// execute `/Users/.../Library/Application` (which does not exist).
+#[cfg(target_os = "macos")]
+fn macos_admin_applescript(script_path: &Path) -> String {
+    format!(
+        "do shell script \"sh '{script_path}'\" with administrator privileges",
+        script_path = script_path.display(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn copy_payload_file_macos(source: &Path, directory: &Path, mode: u32) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let name = source
+        .file_name()
+        .ok_or_else(|| format!("{} has no file name", source.display()))?;
+    let destination = directory.join(name);
+    fs::copy(source, &destination)
+        .map_err(|error| format!("cannot stage {}: {error}", source.display()))?;
+    fs::set_permissions(&destination, fs::Permissions::from_mode(mode))
+        .map_err(|error| error.to_string())?;
+    Ok(destination)
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_plist() -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n\
+         <dict>\n\
+         \t<key>Label</key><string>{MACOS_HELPER_LABEL}</string>\n\
+         \t<key>ProgramArguments</key>\n\
+         \t<array>\n\
+         \t\t<string>{MACOS_HELPER_ROOT}/iran-split-helper</string>\n\
+         \t\t<string>--config</string>\n\
+         \t\t<string>{MACOS_HELPER_ROOT}/helper.toml</string>\n\
+         \t</array>\n\
+         \t<key>RunAtLoad</key><true/>\n\
+         \t<key>KeepAlive</key><true/>\n\
+         \t<key>StandardOutPath</key><string>{MACOS_HELPER_ROOT}/helper.log</string>\n\
+         \t<key>StandardErrorPath</key><string>{MACOS_HELPER_ROOT}/helper.log</string>\n\
+         </dict>\n\
+         </plist>\n",
+    )
+}
+
+/// Returns the current user's UID and primary GID on macOS. The desktop runs
+/// as the normal user, so these are the credentials the helper authorizes.
+#[cfg(target_os = "macos")]
+fn current_macos_ids() -> Result<(u32, u32), String> {
+    let uid = id_output("-u")?;
+    let gid = id_output("-g")?;
+    Ok((uid, gid))
+}
+
+#[cfg(target_os = "macos")]
+fn id_output(flag: &str) -> Result<u32, String> {
+    let output = std::process::Command::new("id")
+        .arg(flag)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("could not read the current user id".into());
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "current user id is not a number".to_owned())
+}
+
 #[cfg(target_os = "windows")]
 fn windows_helper_candidates(resource_root: &Path, exe_dir: &Path) -> Vec<PathBuf> {
     vec![
@@ -580,7 +821,7 @@ pub(crate) fn first_existing_file(candidates: &[PathBuf]) -> Option<PathBuf> {
     candidates.iter().find(|path| path.is_file()).cloned()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| error.to_string())?;
     Ok(hex::encode(Sha256::digest(bytes)))
@@ -869,6 +1110,53 @@ mod tests {
         assert_eq!(
             first_existing_file(&[missing, present.clone()]),
             Some(present)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_admin_applescript_quotes_spaced_paths() {
+        // The payload path lives under `~/Library/Application Support/biflow/...`
+        // which contains a space. The AppleScript must single-quote it or sh
+        // splits the path at the space and the helper install fails with
+        // `sh: /Users/.../Library/Application: No such file or directory`.
+        let script = super::macos_admin_applescript(std::path::Path::new(
+            "/Users/omid/Library/Application Support/biflow/runtime/helper-install/install-helper.sh",
+        ));
+        assert!(
+            script.contains("sh '/Users/omid/Library/Application Support/biflow/runtime/helper-install/install-helper.sh'"),
+            "spaced payload path must be single-quoted inside `do shell script`: {script}"
+        );
+        assert!(script.contains("with administrator privileges"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_install_script_uses_modern_launchctl_service_targets() {
+        // Modern `launchctl` (macOS 10.10+) takes a service-target of the
+        // form `<domain-target>/<service-id>` (e.g. `system/app.biflow.helper`),
+        // not `<domain> <service-id>`. The space form fails with
+        // `Usage: launchctl enable <service-target>`.
+        let source = include_str!("helper_install.rs");
+        let script_start = source
+            .find("let script = format!(\n        \"set -e\\n\\")
+            .expect("install script template");
+        let script_end = source[script_start..]
+            .find("fs::write(&install_script")
+            .expect("end of script template")
+            + script_start;
+        let script = &source[script_start..script_end];
+        assert!(
+            script.contains("launchctl bootout system/{MACOS_HELPER_LABEL}"),
+            "bootout must use the system/<service-id> service-target form"
+        );
+        assert!(
+            script.contains("launchctl enable system/{MACOS_HELPER_LABEL}"),
+            "enable must use the system/<service-id> service-target form"
+        );
+        assert!(
+            !script.contains("launchctl enable system '{MACOS_HELPER_LABEL}'"),
+            "enable must not use the legacy `system <service-id>` space form"
         );
     }
 }

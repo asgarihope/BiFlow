@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": null,
+      "hardenedRuntime": true
+    },
+    "resources": {
+      "../vendor/mihomo/darwin/mihomo": "dependencies/mihomo",
+      "../packaging/staged/iran-split-helper": "helper/iran-split-helper"
+    }
+  }
+}
