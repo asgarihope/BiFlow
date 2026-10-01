@@ -48,7 +48,7 @@ if [[ "${1:-}" == "windows" ]]; then
     src="${TARGET_DIR}/release/iran-split-helper.exe"
   fi
   [[ -f "${src}" ]] || { echo "missing Windows helper: ${src}" >&2; exit 1; }
-  cp -- "${src}" "${STAGED}/iran-split-helper.exe"
+  cp -f "${src}" "${STAGED}/iran-split-helper.exe"
   echo "Staged ${STAGED}/iran-split-helper.exe"
   exit 0
 fi
@@ -56,6 +56,6 @@ fi
 helper_cargo_build
 src="${TARGET_DIR}/release/iran-split-helper"
 [[ -x "${src}" ]] || { echo "missing Linux helper: ${src}" >&2; exit 1; }
-cp -- "${src}" "${STAGED}/iran-split-helper"
-chmod 0755 -- "${STAGED}/iran-split-helper"
+cp -f "${src}" "${STAGED}/iran-split-helper"
+chmod 0755 "${STAGED}/iran-split-helper"
 echo "Staged ${STAGED}/iran-split-helper"

@@ -19,6 +19,12 @@ const assets = [
     magic: Buffer.from("MZ"),
   },
   {
+    name: "macOS Mihomo",
+    path: "vendor/mihomo/darwin/mihomo",
+    sha256: "ec66e3e883bdc3fca06753784e324e08921e13239f8e945587cb1bfbf4c6b936",
+    magic: Buffer.from([0xcf, 0xfa, 0xed, 0xfe]),
+  },
+  {
     name: "Windows Wintun",
     path: "vendor/wintun/windows-x86_64/wintun.dll",
     sha256: "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce",

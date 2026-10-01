@@ -20,6 +20,11 @@ export function artifactLayout(fromRoot = root) {
       exe: "BiFlow.exe",
       installer: `BiFlow_${version}_x64-setup.exe`,
     },
+    macos: {
+      dir: "artifacts/macos",
+      app: "BiFlow.app",
+      dmg: `BiFlow_${version}_aarch64.dmg`,
+    },
   };
 }
 

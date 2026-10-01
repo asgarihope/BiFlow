@@ -2066,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-cli"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-clients"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-config"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "hex",
  "rand 0.9.5",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-core"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-desktop"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -2142,6 +2142,7 @@ dependencies = [
  "iran-split-ipc",
  "iran-split-mihomo",
  "iran-split-platform-linux",
+ "iran-split-platform-macos",
  "iran-split-platform-win",
  "iran-split-rules",
  "regex",
@@ -2169,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-helper"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "clap",
  "hex",
@@ -2178,6 +2179,7 @@ dependencies = [
  "iran-split-config",
  "iran-split-helper-winacl",
  "iran-split-ipc",
+ "libc",
  "nix",
  "regex",
  "serde",
@@ -2193,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-helper-winacl"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "tokio",
  "windows",
@@ -2201,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-ipc"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "bytes",
  "chrono",
@@ -2214,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-mihomo"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "chrono",
  "futures-util",
@@ -2237,7 +2239,31 @@ dependencies = [
 
 [[package]]
 name = "iran-split-platform-linux"
-version = "6.2.52"
+version = "6.2.54"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
+ "iran-split-clients",
+ "iran-split-config",
+ "iran-split-core",
+ "iran-split-ipc",
+ "iran-split-mihomo",
+ "iran-split-rules",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "iran-split-platform-macos"
+version = "6.2.54"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2261,7 +2287,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-platform-win"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2284,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "iran-split-rules"
-version = "6.2.52"
+version = "6.2.54"
 dependencies = [
  "async-trait",
  "chrono",

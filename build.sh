@@ -56,6 +56,14 @@ windows_installer_name() {
   command printf 'BiFlow_%s_x64-setup.exe\n' "${BUILD_VERSION}"
 }
 
+macos_dmg_name() {
+  command printf 'BiFlow_%s_aarch64.dmg\n' "${BUILD_VERSION}"
+}
+
+macos_app_name() {
+  command printf 'BiFlow.app\n'
+}
+
 usage() {
   command cat <<'EOF'
 BiFlow release builder
@@ -69,16 +77,19 @@ Focused local verification (default developer gate):
 GitHub-hosted packaging entry points:
   ci-linux       Native Linux .deb and AppImage
   ci-windows     Native Windows .exe and NSIS installer
+  ci-macos       Native macOS .app and .dmg
 
 Full packaging (machines with spare disk; not the local default):
   linux          Native Linux .deb and AppImage
   linux deb      Only the Linux .deb
   linux appimage Only the Linux AppImage
   windows        Windows app .exe and NSIS installer
-  all            Linux and Windows (default when no mode is given)
+  macos          Native macOS .app and .dmg
+  all            Linux, Windows, and macOS (default when no mode is given)
 
 Resume (linux stages: compile, deb, appimage, collect;
-        windows stages: compile, nsis, collect):
+        windows stages: compile, nsis, collect;
+        macos stages: compile, dmg, collect):
   --from STAGE   Start at STAGE. Earlier finished work is left in place.
   --force        Rebuild every packaging stage for this version.
 
@@ -382,6 +393,14 @@ linux_appimage_path() {
   command printf '%s/release/bundle/appimage/%s\n' "${TARGET_DIR}" "$(linux_appimage_name)"
 }
 
+macos_dmg_path() {
+  command printf '%s/release/bundle/dmg/%s\n' "${TARGET_DIR}" "$(macos_dmg_name)"
+}
+
+macos_app_path() {
+  command printf '%s/release/bundle/macos/%s\n' "${TARGET_DIR}" "$(macos_app_name)"
+}
+
 windows_prefix() {
   local triple="${1:-}"
   if [[ -n "${triple}" ]]; then
@@ -525,6 +544,44 @@ should_run_windows_stage() {
   return 0
 }
 
+macos_stage_done() {
+  local stage="$1"
+  case "${stage}" in
+    compile)
+      [[ -x "${TARGET_DIR}/release/${CRATE_BIN}" ]] || return 1
+      stamp_is_current macos-compile && return 0
+      macos_stage_done dmg
+      ;;
+    dmg)
+      [[ -f "$(macos_dmg_path)" ]]
+      ;;
+    collect)
+      [[ -f "${PROJECT_DIR}/$(plan macos.dir)/$(macos_dmg_name)" ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+should_run_macos_stage() {
+  local stage="$1"
+  local stages=(compile dmg collect)
+  local from_i stage_i
+  if [[ "${FORCE}" -eq 1 ]]; then
+    return 0
+  fi
+  if [[ -n "${FROM_STAGE}" ]]; then
+    if from_i="$(stage_index "${FROM_STAGE}" "${stages[@]}")"; then
+      stage_i="$(stage_index "${stage}" "${stages[@]}")"
+      [[ "${stage_i}" -ge "${from_i}" ]]
+      return
+    fi
+  fi
+  if macos_stage_done "${stage}"; then
+    return 1
+  fi
+  return 0
+}
+
 run_tauri_build() {
   local frontend_mode="$1"
   shift
@@ -582,10 +639,16 @@ validate_from_stage() {
         *) die "windows --from must be compile, nsis, or collect" ;;
       esac
       ;;
+    macos)
+      case "${FROM_STAGE}" in
+        compile|dmg|collect) ;;
+        *) die "macos --from must be compile, dmg, or collect" ;;
+      esac
+      ;;
     all)
       case "${FROM_STAGE}" in
-        compile|deb|appimage|nsis|collect) ;;
-        *) die "--from must be compile, deb, appimage, nsis, or collect" ;;
+        compile|deb|appimage|nsis|dmg|collect) ;;
+        *) die "--from must be compile, deb, appimage, nsis, dmg, or collect" ;;
       esac
       ;;
   esac
@@ -646,6 +709,15 @@ collect_windows() {
     mkdir -p "${dest_dir}/helper"
     cp -a "${PROJECT_DIR}/packaging/staged/iran-split-helper.exe" "${dest_dir}/helper/iran-split-helper.exe"
   fi
+}
+
+collect_macos() {
+  assert_build_version
+  local dmg dest
+  dmg="$(macos_dmg_path)"
+  [[ -f "${dmg}" ]] || die "expected macOS package is missing: ${dmg}"
+  dest="${PROJECT_DIR}/$(plan macos.dir)/$(macos_dmg_name)"
+  copy_one "${dmg}" "${dest}"
 }
 
 build_linux() {
@@ -766,6 +838,57 @@ build_windows() {
   fi
 }
 
+build_macos() {
+  [[ "$(host_os)" == "macos" ]] || die "macOS .app/.dmg packages must be built on macOS"
+  assert_build_version
+  tauri_signing_config_args
+  local frontend_mode="run-frontend"
+  if frontend_dist_ready && ! should_run_macos_stage compile; then
+    frontend_mode="skip-frontend"
+  fi
+  if should_run_macos_stage compile; then
+    log "Stage compile: release binary for BiFlow ${BUILD_VERSION}"
+    "${PROJECT_DIR}/scripts/stage-helper.sh"
+    run_tauri_build run-frontend --no-bundle --config src-tauri/tauri.macos.conf.json
+    [[ -x "${TARGET_DIR}/release/${CRATE_BIN}" ]] || die "compile did not produce ${TARGET_DIR}/release/${CRATE_BIN}"
+    write_stamp macos-compile
+    frontend_mode="skip-frontend"
+  else
+    log "Skipping compile; already have ${TARGET_DIR}/release/${CRATE_BIN}"
+  fi
+  if should_run_macos_stage dmg; then
+    log "Stage dmg: $(macos_dmg_name)"
+    [[ -x "${PROJECT_DIR}/packaging/staged/iran-split-helper" ]] || \
+      "${PROJECT_DIR}/scripts/stage-helper.sh"
+    # Tauri's dmg bundler runs a Finder AppleScript to prettify the window.
+    # In headless/CI environments Finder AppleEvents time out, so retry the
+    # generated bundle_dmg.sh with --skip-jenkins when the first attempt fails.
+    if ! run_tauri_build "${frontend_mode}" --bundles dmg --config src-tauri/tauri.macos.conf.json; then
+      log "Tauri dmg bundle failed; retrying bundle_dmg.sh with --skip-jenkins (non-GUI fallback)"
+      local dmg_dir dmg_script app_dir
+      dmg_dir="${TARGET_DIR}/release/bundle/dmg"
+      dmg_script="${dmg_dir}/bundle_dmg.sh"
+      app_dir="${TARGET_DIR}/release/bundle/macos"
+      [[ -f "${dmg_script}" ]] || die "dmg bundle script is missing: ${dmg_script}"
+      rm -f "${app_dir}"/rw.*.dmg "${dmg_dir}"/rw.*.dmg "${dmg_dir}"/*.dmg 2>/dev/null || true
+      ( cd -- "${PROJECT_DIR}" && bash "${dmg_script}" --skip-jenkins \
+          "$(macos_dmg_name)" "${app_dir}" ) \
+        || die "bundle_dmg.sh --skip-jenkins failed"
+    fi
+    [[ -f "$(macos_dmg_path)" ]] || die "dmg stage did not produce $(macos_dmg_path)"
+    write_stamp macos-dmg
+  else
+    log "Skipping dmg; already have $(macos_dmg_path)"
+  fi
+  if should_run_macos_stage collect; then
+    log "Stage collect: copying macOS artifacts"
+    collect_macos
+    write_stamp macos-collect
+  else
+    log "Skipping collect; macOS artifacts already in $(plan macos.dir)"
+  fi
+}
+
 print_summary() {
   assert_build_version
   log ""
@@ -781,6 +904,9 @@ print_summary() {
   fi
   if [[ -f "${PROJECT_DIR}/$(plan windows.dir)/$(windows_installer_name)" ]]; then
     log "  Windows installer:  $(plan windows.dir)/$(windows_installer_name)"
+  fi
+  if [[ -f "${PROJECT_DIR}/$(plan macos.dir)/$(macos_dmg_name)" ]]; then
+    log "  macOS dmg:          $(plan macos.dir)/$(macos_dmg_name)"
   fi
 }
 
@@ -803,6 +929,7 @@ ensure_requirements() {
         ensure_windows_cross_from_linux
       fi
       ;;
+    macos|ci-macos) ;;
     all)
       ensure_linux_desktop_dependencies
       if [[ "$(host_os)" == "linux" ]]; then
@@ -893,7 +1020,11 @@ main() {
       [[ "$(host_os)" == "windows" ]] || die "ci-windows requires a native Windows runner"
       target="windows"
       ;;
-    linux|windows|all) ;;
+    ci-macos)
+      [[ "$(host_os)" == "macos" ]] || die "ci-macos requires a native macOS runner"
+      target="macos"
+      ;;
+    linux|windows|macos|all) ;;
     *) usage >&2; die "unknown target: ${target}" ;;
   esac
 
@@ -916,9 +1047,11 @@ main() {
   case "${target}" in
     linux) build_linux ;;
     windows) build_windows ;;
+    macos) build_macos ;;
     all)
       build_linux
       build_windows
+      build_macos
       ;;
   esac
   print_summary
