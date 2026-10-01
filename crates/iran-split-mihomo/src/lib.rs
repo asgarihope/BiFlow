@@ -51,6 +51,7 @@ pub enum MihomoError {
 pub enum Platform {
     Linux,
     Windows,
+    Macos,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,9 +389,9 @@ pub fn generate_config_with_handles(
                 port: outbound.port,
                 udp: outbound.udp,
                 interface_name: outbound.interface_name.clone(),
-                // `routing-mark` is a Linux fwmark. On Windows it does not
-                // steer the socket and can drop the dial.
-                routing_mark: (platform != Platform::Windows)
+                // `routing-mark` is a Linux fwmark. On Windows and macOS it
+                // does not steer the socket and can drop the dial.
+                routing_mark: (platform == Platform::Linux)
                     .then_some(outbound.routing_mark)
                     .flatten(),
             })
@@ -576,6 +577,7 @@ fn process_bypass_rules(app: &AppConfig, platform: Platform) -> Vec<String> {
     let driver_platform = match platform {
         Platform::Linux => DriverPlatform::Linux,
         Platform::Windows => DriverPlatform::Windows,
+        Platform::Macos => DriverPlatform::Macos,
     };
     let mut rules: Vec<String> = process_bypass_union(&app.clients, driver_platform)
         .into_iter()
@@ -601,6 +603,13 @@ fn process_bypass_rules(app: &AppConfig, platform: Platform) -> Vec<String> {
                 "PROCESS-NAME,tailscaled.exe,DIRECT".into(),
                 "PROCESS-NAME,iran-split-desktop.exe,DIRECT".into(),
                 "PROCESS-NAME,BiFlow.exe,DIRECT".into(),
+            ]);
+        }
+        Platform::Macos => {
+            rules.extend([
+                "PROCESS-NAME,tailscaled,DIRECT".into(),
+                "PROCESS-NAME,iran-split-desktop,DIRECT".into(),
+                "PROCESS-NAME,BiFlow,DIRECT".into(),
             ]);
         }
     }
@@ -2585,6 +2594,11 @@ mod tests {
             (
                 workspace.join("vendor/mihomo/windows-x86_64/mihomo.exe"),
                 Platform::Windows,
+            )
+        } else if cfg!(target_os = "macos") {
+            (
+                workspace.join("vendor/mihomo/darwin/mihomo"),
+                Platform::Macos,
             )
         } else {
             (

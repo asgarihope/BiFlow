@@ -35,6 +35,7 @@ impl ClientDriver for LocalProxyDriver {
         let names = match platform {
             DriverPlatform::Linux => self.preset.spec().linux_bypass,
             DriverPlatform::Windows => self.preset.spec().windows_bypass,
+            DriverPlatform::Macos => self.preset.spec().macos_bypass,
         };
         names
             .iter()

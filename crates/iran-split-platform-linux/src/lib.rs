@@ -1316,8 +1316,13 @@ impl PlatformBackend for LinuxBackend {
         }
 
         let live_route = self.observe_live_route(&config, &handles).await;
+        let helper_version = match &helper_result {
+            Ok(status) => status.version.clone(),
+            Err(_) => None,
+        };
         RuntimeHealth {
             helper,
+            helper_version,
             clients,
             mihomo,
             tun,

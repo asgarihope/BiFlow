@@ -1,11 +1,4 @@
-#![cfg(windows)]
-//! Windows platform backend.
-//!
-//! Mirrors `iran-split-platform-linux` step for step. The privileged half runs
-//! as the SYSTEM scheduled task from ADR 0029 and is reached over the versioned
-//! local named pipe instead of a Unix socket; everything above that — runtime
-//! generation staging, Mihomo validation, readiness probes — is the same
-//! sequence so both platforms fail in the same places for the same reasons.
+#![cfg(target_os = "macos")]
 
 use async_trait::async_trait;
 use iran_split_clients::{
@@ -29,9 +22,10 @@ use iran_split_mihomo::{
     MihomoError, Platform, RuntimePaths,
 };
 use iran_split_rules::{DirectTarget, Outbound, RoutePinsDocument};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{self, Write},
+    io::Write,
     net::IpAddr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -41,34 +35,24 @@ use std::{
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::{
-    net::{
-        windows::named_pipe::{ClientOptions, NamedPipeClient},
-        TcpStream,
-    },
+    net::{TcpStream, UnixStream},
     process::{Child, Command},
     sync::{Mutex, RwLock},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
-use windows::Win32::Foundation::ERROR_PIPE_BUSY;
 
 mod system_proxy;
 
-pub const HELPER_PIPE: &str = r"\\.\pipe\iran-split-helper-v1";
-
 const IPC_TIMEOUT: Duration = Duration::from_secs(HELPER_IPC_FRAME_TIMEOUT_SECS);
-const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const PIPE_RETRY_DELAY: Duration = Duration::from_millis(50);
-const EGRESS_PROBE_BUDGET: Duration = Duration::from_secs(45);
-const READINESS_BUDGET: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Error)]
-pub enum WindowsBackendError {
+pub enum MacosBackendError {
     #[error("helper IPC failed: {0}")]
     Protocol(#[from] iran_split_ipc::ProtocolError),
     #[error("helper connection failed: {0}")]
-    Io(#[from] io::Error),
+    Io(#[from] std::io::Error),
     #[error("helper request timed out")]
     Timeout,
     #[error("helper response did not match the request")]
@@ -79,14 +63,14 @@ pub enum WindowsBackendError {
 
 #[derive(Debug, Clone)]
 pub struct HelperClient {
-    pipe_name: String,
+    socket_path: PathBuf,
 }
 
 impl HelperClient {
     #[must_use]
-    pub fn new(pipe_name: impl Into<String>) -> Self {
+    pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
-            pipe_name: pipe_name.into(),
+            socket_path: socket_path.into(),
         }
     }
 
@@ -96,19 +80,16 @@ impl HelperClient {
     ///
     /// Returns an error when validation, connection, protocol negotiation, or
     /// the helper operation fails.
-    pub async fn request(
-        &self,
-        command: HelperCommand,
-    ) -> Result<HelperReply, WindowsBackendError> {
+    pub async fn request(&self, command: HelperCommand) -> Result<HelperReply, MacosBackendError> {
         let command_name = command.audit_name();
         let request_id = Uuid::new_v4();
         info!(
             event = "helper.request_started",
             section = "helper_ipc",
-            initiator = "windows_platform_backend",
+            initiator = "macos_platform_backend",
             cause = "backend_operation",
             trace_id = %request_id,
-            trace_route = "desktop_engine->windows_platform_backend->helper_ipc",
+            trace_route = "desktop_engine->macos_platform_backend->helper_ipc",
             command = command_name,
             "helper request started"
         );
@@ -116,10 +97,10 @@ impl HelperClient {
             error!(
                 event = "helper.request_failed",
                 section = "helper_ipc",
-                initiator = "windows_platform_backend",
+                initiator = "macos_platform_backend",
                 cause = %cause,
                 trace_id = %request_id,
-                trace_route = "desktop_engine->windows_platform_backend->helper_ipc->validation",
+                trace_route = "desktop_engine->macos_platform_backend->helper_ipc->validation",
                 command = command_name,
                 "helper request validation failed"
             );
@@ -130,20 +111,20 @@ impl HelperClient {
             Ok(_) => info!(
                 event = "helper.request_completed",
                 section = "helper_ipc",
-                initiator = "windows_platform_backend",
+                initiator = "macos_platform_backend",
                 cause = "none",
                 trace_id = %request_id,
-                trace_route = "desktop_engine->windows_platform_backend->helper_ipc->reply",
+                trace_route = "desktop_engine->macos_platform_backend->helper_ipc->reply",
                 command = command_name,
                 "helper request completed"
             ),
             Err(cause) => error!(
                 event = "helper.request_failed",
                 section = "helper_ipc",
-                initiator = "windows_platform_backend",
+                initiator = "macos_platform_backend",
                 cause = %cause,
                 trace_id = %request_id,
-                trace_route = "desktop_engine->windows_platform_backend->helper_ipc->error",
+                trace_route = "desktop_engine->macos_platform_backend->helper_ipc->error",
                 command = command_name,
                 "helper request failed"
             ),
@@ -154,98 +135,61 @@ impl HelperClient {
     async fn request_validated(
         &self,
         command: HelperCommand,
-    ) -> Result<HelperReply, WindowsBackendError> {
-        let mut pipe = self.connect().await?;
+    ) -> Result<HelperReply, MacosBackendError> {
+        let mut stream = tokio::time::timeout(IPC_TIMEOUT, UnixStream::connect(&self.socket_path))
+            .await
+            .map_err(|_| MacosBackendError::Timeout)??;
         let hello = Envelope::new(HelperCommand::Hello {
             client_version: env!("CARGO_PKG_VERSION").into(),
             supported_protocols: vec![PROTOCOL_VERSION],
         });
-        let hello_reply = exchange(&mut pipe, &hello, IPC_TIMEOUT).await?;
+        let hello_reply = exchange(&mut stream, &hello, IPC_TIMEOUT).await?;
         match hello_reply.payload {
             HelperReply::Hello(reply) if reply.selected_protocol == PROTOCOL_VERSION => {}
             HelperReply::Error(error) => {
-                return Err(WindowsBackendError::Helper {
+                return Err(MacosBackendError::Helper {
                     code: error.code,
                     message: error.message,
                 });
             }
-            _ => return Err(WindowsBackendError::ResponseMismatch),
+            _ => return Err(MacosBackendError::ResponseMismatch),
         }
         let request = Envelope::new(command);
         let budget = helper_ipc_reply_timeout(&request.payload);
-        let response = exchange(&mut pipe, &request, budget).await?;
+        let response = exchange(&mut stream, &request, budget).await?;
         match response.payload {
-            HelperReply::Error(error) => Err(WindowsBackendError::Helper {
+            HelperReply::Error(error) => Err(MacosBackendError::Helper {
                 code: error.code,
                 message: error.message,
             }),
             reply => Ok(reply),
         }
     }
-
-    /// `ClientOptions::open` returns a synchronous result, not a future, so the
-    /// retry loop lives inside a timeout. Only `ERROR_PIPE_BUSY` is retried;
-    /// any other error means the helper is not serving the pipe.
-    async fn connect(&self) -> Result<NamedPipeClient, WindowsBackendError> {
-        tokio::time::timeout(PIPE_CONNECT_TIMEOUT, async {
-            loop {
-                match ClientOptions::new().open(self.pipe_name.as_str()) {
-                    Ok(pipe) => return Ok(pipe),
-                    Err(error) if is_pipe_busy(&error) => {
-                        tokio::time::sleep(PIPE_RETRY_DELAY).await;
-                    }
-                    Err(error) => return Err(WindowsBackendError::Io(error)),
-                }
-            }
-        })
-        .await
-        .map_err(|_| WindowsBackendError::Timeout)?
-    }
-}
-
-fn is_pipe_busy(error: &io::Error) -> bool {
-    error
-        .raw_os_error()
-        .and_then(|code| u32::try_from(code).ok())
-        == Some(ERROR_PIPE_BUSY.0)
-}
-
-/// The helper never serves the pipe when it is not installed, and a missing
-/// pipe must read as "not installed" rather than an error banner.
-fn is_helper_absent(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-    )
 }
 
 async fn exchange(
-    pipe: &mut NamedPipeClient,
+    stream: &mut UnixStream,
     request: &Envelope<HelperCommand>,
     budget: Duration,
-) -> Result<Envelope<HelperReply>, WindowsBackendError> {
-    tokio::time::timeout(IPC_TIMEOUT, write_frame(pipe, request))
+) -> Result<Envelope<HelperReply>, MacosBackendError> {
+    tokio::time::timeout(IPC_TIMEOUT, write_frame(stream, request))
         .await
-        .map_err(|_| WindowsBackendError::Timeout)??;
-    let reply: Envelope<HelperReply> = tokio::time::timeout(budget, read_frame(pipe))
+        .map_err(|_| MacosBackendError::Timeout)??;
+    let reply: Envelope<HelperReply> = tokio::time::timeout(budget, read_frame(stream))
         .await
-        .map_err(|_| WindowsBackendError::Timeout)??;
+        .map_err(|_| MacosBackendError::Timeout)??;
     validate_envelope(&reply)?;
     if reply.request_id != request.request_id {
-        return Err(WindowsBackendError::ResponseMismatch);
+        return Err(MacosBackendError::ResponseMismatch);
     }
     Ok(reply)
 }
 
 #[derive(Debug, Clone)]
-pub struct WindowsPaths {
-    pub pipe_name: String,
+pub struct MacosPaths {
+    pub socket_path: PathBuf,
     pub user_data_dir: PathBuf,
     pub system_runtime_dir: PathBuf,
-    /// Directory the SYSTEM helper reads in `register_runtime_generation`.
-    /// Packaged installs use `C:\ProgramData\iran-split\staging` so NSIS and
-    /// the unelevated desktop share one machine-wide root (ADR 0064).
-    pub generation_staging_dir: PathBuf,
     pub resources_dir: PathBuf,
     pub rules_cache_dir: PathBuf,
     pub mihomo_binary: PathBuf,
@@ -258,10 +202,10 @@ struct PreparedGeneration {
 }
 
 #[derive(Debug)]
-pub struct WindowsBackend {
+pub struct MacosBackend {
     config: Arc<RwLock<AppConfig>>,
     helper: HelperClient,
-    paths: WindowsPaths,
+    paths: MacosPaths,
     prepared: Mutex<Option<PreparedGeneration>>,
     launched_hiddify: Mutex<Option<Child>>,
     egress_exit_ip: Mutex<Option<String>>,
@@ -269,26 +213,22 @@ pub struct WindowsBackend {
     side_tunnel_auth_files: Mutex<Vec<NamedTempFile>>,
     launched_clients: Mutex<Vec<Child>>,
     client_exit_ips: Mutex<std::collections::HashMap<iran_split_config::ClientId, String>>,
-    /// Why each client failed at its last start attempt; mirrors Linux so a
-    /// stopped card explains itself instead of showing no detail.
+    /// Why each client failed at its last start attempt. Connect only warns
+    /// for optional clients, so without this the card said "Starting" or
+    /// "Stopped" with no detail and the operator had to read debug.log.
     client_failures: Mutex<std::collections::HashMap<iran_split_config::ClientId, String>>,
     /// Connect-time override for `StartSideTunnel` (progressive 15/30/60s UX).
     side_tunnel_connect_timeout: Mutex<Option<u64>>,
-    /// Last helper status, so connect progress does not open the pipe again.
-    helper_cache: Mutex<ComponentStatus>,
-    /// Last helper version reported by the helper, surfaced to the snapshot
-    /// so the desktop can detect a version mismatch and reinstall.
-    helper_version_cache: Mutex<Option<String>>,
     /// Config hash that already passed `mihomo -t` in this process.
     validated_config_sha256: Mutex<Option<String>>,
 }
 
-impl WindowsBackend {
+impl MacosBackend {
     #[must_use]
-    pub fn new(config: AppConfig, paths: WindowsPaths) -> Self {
+    pub fn new(config: AppConfig, paths: MacosPaths) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
-            helper: HelperClient::new(paths.pipe_name.clone()),
+            helper: HelperClient::new(&paths.socket_path),
             paths,
             prepared: Mutex::new(None),
             launched_hiddify: Mutex::new(None),
@@ -299,8 +239,6 @@ impl WindowsBackend {
             client_exit_ips: Mutex::new(std::collections::HashMap::new()),
             client_failures: Mutex::new(std::collections::HashMap::new()),
             side_tunnel_connect_timeout: Mutex::new(None),
-            helper_cache: Mutex::new(ComponentStatus::default()),
-            helper_version_cache: Mutex::new(None),
             validated_config_sha256: Mutex::new(None),
         }
     }
@@ -325,7 +263,7 @@ impl WindowsBackend {
     pub async fn service_logs(
         &self,
         maximum: u16,
-    ) -> Result<Vec<iran_split_ipc::ServiceLogEntry>, WindowsBackendError> {
+    ) -> Result<Vec<iran_split_ipc::ServiceLogEntry>, MacosBackendError> {
         match self
             .helper
             .request(HelperCommand::CollectServiceLogs {
@@ -334,7 +272,7 @@ impl WindowsBackend {
             .await?
         {
             HelperReply::Logs(logs) => Ok(logs),
-            _ => Err(WindowsBackendError::ResponseMismatch),
+            _ => Err(MacosBackendError::ResponseMismatch),
         }
     }
 
@@ -392,9 +330,9 @@ impl WindowsBackend {
         info!(
             event = "mihomo.hot_reload_started",
             section = "rules",
-            initiator = "windows_platform_backend",
+            initiator = "macos_platform_backend",
             cause = "live_pin_apply",
-            trace_route = "engine->windows_platform_backend->mihomo_controller",
+            trace_route = "engine->macos_platform_backend->mihomo_controller",
             "reloading Mihomo config without restarting the process"
         );
         controller
@@ -414,10 +352,10 @@ impl WindowsBackend {
                 warn!(
                     event = "mihomo.live_match_failed",
                     section = "rules",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = %cause,
                     generation_id = %generation_id,
-                    trace_route = "engine->windows_platform_backend->mihomo_controller",
+                    trace_route = "engine->macos_platform_backend->mihomo_controller",
                     "could not read the live MATCH rule after reload"
                 );
                 "unavailable".into()
@@ -427,16 +365,16 @@ impl WindowsBackend {
             &std::fs::read_to_string(config_path).unwrap_or_default(),
             &match_proxy,
             &generation_id,
-            "windows_platform_backend",
+            "macos_platform_backend",
         )?;
         info!(
             event = "mihomo.hot_reload_succeeded",
             section = "rules",
-            initiator = "windows_platform_backend",
+            initiator = "macos_platform_backend",
             cause = "controller_204",
             generation_id = %generation_id,
             match_proxy = %match_proxy,
-            trace_route = "engine->windows_platform_backend->mihomo_controller",
+            trace_route = "engine->macos_platform_backend->mihomo_controller",
             "live Mihomo config reloaded"
         );
         let Some(host) = rebind_host else {
@@ -444,17 +382,17 @@ impl WindowsBackend {
                 Ok(()) => info!(
                     event = "mihomo.connections_reset",
                     section = "rules",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = "settings_apply",
-                    trace_route = "engine->windows_platform_backend->mihomo_controller",
+                    trace_route = "engine->macos_platform_backend->mihomo_controller",
                     "closed live connections so they reconnect on the reloaded default route"
                 ),
                 Err(cause) => warn!(
                     event = "mihomo.connections_reset_failed",
                     section = "rules",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = %cause,
-                    trace_route = "engine->windows_platform_backend->mihomo_controller",
+                    trace_route = "engine->macos_platform_backend->mihomo_controller",
                     "could not close live connections after the settings reload"
                 ),
             }
@@ -464,18 +402,18 @@ impl WindowsBackend {
             Ok(closed) => info!(
                 event = "mihomo.connections_rebound",
                 section = "rules",
-                initiator = "windows_platform_backend",
+                initiator = "macos_platform_backend",
                 cause = "pin_apply",
-                trace_route = "engine->windows_platform_backend->mihomo_controller",
+                trace_route = "engine->macos_platform_backend->mihomo_controller",
                 closed,
                 "closed live connections for the moved pin so they reconnect on the new outbound"
             ),
             Err(cause) => warn!(
                 event = "mihomo.connections_rebind_failed",
                 section = "rules",
-                initiator = "windows_platform_backend",
+                initiator = "macos_platform_backend",
                 cause = %cause,
-                trace_route = "engine->windows_platform_backend->mihomo_controller",
+                trace_route = "engine->macos_platform_backend->mihomo_controller",
                 "could not close matching connections after the live reload"
             ),
         }
@@ -588,7 +526,11 @@ impl WindowsBackend {
             ExecutableSetting::Auto => None,
             ExecutableSetting::Path(path) => Some(path.clone()),
         };
-        let auth_file = write_side_tunnel_auth(username.as_deref(), password.as_deref())?;
+        let auth_file = write_side_tunnel_auth(
+            &self.paths.user_data_dir,
+            username.as_deref(),
+            password.as_deref(),
+        )?;
         let proxy = self.ready_proxy_endpoint(ready).await;
         let pinned_remote = self
             .pin_side_tunnel_remote(&profile, proxy.as_ref())
@@ -671,7 +613,7 @@ impl WindowsBackend {
                         section = "clients",
                         initiator = "ensure_clients",
                         cause = %error,
-                        trace_route = "engine_operation->windows_platform_backend->ensure_clients",
+                        trace_route = "engine_operation->macos_platform_backend->ensure_clients",
                         "optional client failed; connect continues"
                     );
                 }
@@ -689,9 +631,10 @@ impl WindowsBackend {
     }
 
     /// Live recovery for local proxies that were dead at connect time
-    /// (ADR 0076). Mirrors the Linux backend: one egress re-check per health
-    /// tick once the client's port answers; on success its handle joins
-    /// routing and the engine hot-applies the runtime config.
+    /// (ADR 0076). Connect probes each optional client exactly once; when the
+    /// operator starts and connects Happ minutes later, its pinned domains
+    /// keep the client group (ADR 0082) but still need this re-check to attach
+    /// the live SOCKS bind. The engine then hot-applies the routing.
     async fn recover_local_proxy_clients(&self) -> Result<bool, CoreError> {
         let config = self.config.read().await.clone();
         let handles = self.egress_handles.lock().await.clone();
@@ -705,6 +648,7 @@ impl WindowsBackend {
             }
             match probe_hiddify_egress(&host, port, Duration::from_secs(3)).await {
                 Ok(exit_ip) => {
+                    self.client_failures.lock().await.remove(&client.id);
                     let Some(handle) = synthesized_local_handle(client) else {
                         continue;
                     };
@@ -713,7 +657,7 @@ impl WindowsBackend {
                         section = "clients",
                         initiator = "recover_clients",
                         cause = "egress_probe_succeeded",
-                        trace_route = "engine->windows_platform_backend->recover_clients",
+                        trace_route = "engine->macos_platform_backend->recover_clients",
                         client = client.spec().id,
                         "a local proxy egress became reachable after connect"
                     );
@@ -729,18 +673,209 @@ impl WindowsBackend {
                     self.egress_handles.lock().await.push(handle);
                     recovered = true;
                 }
-                Err(error) => info!(
-                    event = "client.recover_probe_failed",
-                    section = "clients",
-                    initiator = "recover_clients",
-                    cause = %error,
-                    trace_route = "engine->windows_platform_backend->recover_clients",
-                    client = client.spec().id,
-                    "local proxy port answers but its egress is not usable yet"
-                ),
+                Err(error) => {
+                    self.client_failures.lock().await.insert(
+                        client.id,
+                        format!(
+                            "{host}:{port} accepts connections but no traffic flows; connect the client itself"
+                        ),
+                    );
+                    info!(
+                        event = "client.recover_probe_failed",
+                        section = "clients",
+                        initiator = "recover_clients",
+                        cause = %error,
+                        trace_route = "engine->macos_platform_backend->recover_clients",
+                        client = client.spec().id,
+                        "local proxy port answers but its egress is not usable yet"
+                    );
+                }
             }
         }
         Ok(recovered)
+    }
+
+    async fn start_local_proxy_client(
+        &self,
+        client: &ClientInstance,
+        required: bool,
+        cancel: &CancellationToken,
+    ) -> Result<EgressHandle, CoreError> {
+        let Some((host, port)) = local_proxy_endpoint(client) else {
+            return Err(CoreError::ConfigInvalid(
+                "local proxy handle is missing".into(),
+            ));
+        };
+        if let Some(exit_ip) = self.reuse_cached_egress(client.id, &host, port).await {
+            if required {
+                *self.egress_exit_ip.lock().await = Some(exit_ip);
+            }
+            return synthesized_local_handle(client)
+                .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()));
+        }
+        if !Self::tcp_listening(&host, port).await {
+            if required {
+                self.launch_local_proxy_if_needed(client, &host, port, cancel)
+                    .await?;
+            } else {
+                // An optional client must not block Connect while its port
+                // opens (production debug.log shows ~18s stalls waiting for
+                // Happ). Launch it and let ADR 0076 recovery attach the
+                // egress once it actually serves.
+                self.spawn_local_proxy(client).await?;
+                return Err(CoreError::Platform(format!(
+                    "{} was launched in the background; its egress joins routing once it serves",
+                    client.spec().id
+                )));
+            }
+        }
+        // ADR 0018: every local-proxy egress is verified before the TUN starts,
+        // so pinned or MATCH traffic cannot blackhole into a dead proxy.
+        let probe_for = if required {
+            client_start_timeout(client)
+        } else {
+            Duration::from_secs(3)
+        };
+        let exit_ip = probe_hiddify_egress(&host, port, probe_for)
+            .await
+            .map_err(|error| {
+                CoreError::Platform(format!(
+                    "{} egress probe failed on {host}:{port}: {error}",
+                    client.spec().id
+                ))
+            })?;
+        self.client_exit_ips
+            .lock()
+            .await
+            .insert(client.id, exit_ip.clone());
+        if required {
+            *self.egress_exit_ip.lock().await = Some(exit_ip);
+        }
+        synthesized_local_handle(client)
+            .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()))
+    }
+
+    /// Resolves and spawns a local-proxy binary without waiting for its port:
+    /// configured path first, then the preset's process names on PATH.
+    async fn spawn_local_proxy(&self, client: &ClientInstance) -> Result<(), CoreError> {
+        let ClientConfig::LocalProxy { executable, .. } = &client.config else {
+            return Err(CoreError::ConfigInvalid(
+                "client is not a local proxy".into(),
+            ));
+        };
+        let resolved = match executable {
+            ExecutableSetting::Path(path) => path.is_file().then(|| path.clone()),
+            ExecutableSetting::Auto if client.preset == PresetId::Hiddify => {
+                Self::discover_hiddify(&self.config.read().await.clone(), &self.paths.user_data_dir)
+            }
+            ExecutableSetting::Auto => discover_local_proxy_binary(&client.spec()),
+        };
+        let Some(binary) = resolved else {
+            warn!(
+                event = "local_proxy.binary_not_found",
+                section = "local_proxy",
+                initiator = "macos_platform_backend",
+                cause = "discovery_empty",
+                trace_route = "engine->macos_platform_backend->local_proxy_discovery",
+                preset = ?client.preset,
+                "local proxy executable was not found; the operator must start it manually"
+            );
+            return Err(CoreError::Platform(format!(
+                "{} is not running and its executable was not found; start it once or set its path on the client card",
+                client.spec().id
+            )));
+        };
+        // A macOS `.app` bundle must be launched through Launch Services
+        // (`open <bundle>.app`). Running the inner Mach-O binary directly
+        // starts the process but the Flutter/Electron app often never
+        // initializes its proxy port because it expects the bundle
+        // environment. Detect the enclosing bundle and use `open`.
+        let (child, via_open) = if let Some(bundle) = enclosing_app_bundle(&binary) {
+            info!(
+                event = "local_proxy.launching",
+                section = "local_proxy",
+                initiator = "macos_platform_backend",
+                cause = "port_not_listening",
+                trace_route = "engine->macos_platform_backend->launch_services",
+                preset = ?client.preset,
+                binary = %binary.display(),
+                bundle = %bundle.display(),
+                "launching the local proxy .app bundle via open"
+            );
+            (
+                Command::new("open")
+                    .arg(&bundle)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(false)
+                    .spawn()
+                    .map_err(|error| CoreError::Platform(error.to_string()))?,
+                true,
+            )
+        } else {
+            info!(
+                event = "local_proxy.launching",
+                section = "local_proxy",
+                initiator = "macos_platform_backend",
+                cause = "port_not_listening",
+                trace_route = "engine->macos_platform_backend->process_spawn",
+                preset = ?client.preset,
+                binary = %binary.display(),
+                "launching the local proxy binary directly"
+            );
+            (
+                Command::new(binary)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(false)
+                    .spawn()
+                    .map_err(|error| CoreError::Platform(error.to_string()))?,
+                false,
+            )
+        };
+        let _ = via_open;
+        if client.preset == PresetId::Hiddify {
+            *self.launched_hiddify.lock().await = Some(child);
+        } else {
+            self.launched_clients.lock().await.push(child);
+        }
+        Ok(())
+    }
+
+    /// Launches a required local-proxy client that is not listening yet and
+    /// waits until the port answers (the default-route egress must be
+    /// verified before the TUN starts).
+    async fn launch_local_proxy_if_needed(
+        &self,
+        client: &ClientInstance,
+        host: &str,
+        port: u16,
+        cancel: &CancellationToken,
+    ) -> Result<(), CoreError> {
+        let ClientConfig::LocalProxy { .. } = &client.config else {
+            return Err(CoreError::ConfigInvalid(
+                "client is not a local proxy".into(),
+            ));
+        };
+        self.spawn_local_proxy(client).await?;
+        let deadline = tokio::time::Instant::now() + client_start_timeout(client);
+        loop {
+            if Self::tcp_listening(host, port).await {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(CoreError::Platform(format!(
+                    "{} was launched but its local port did not open in time",
+                    client.spec().id
+                )));
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return Err(CoreError::Cancelled),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
     }
 
     async fn hiddify_listening(config: &AppConfig) -> bool {
@@ -754,48 +889,87 @@ impl WindowsBackend {
             .is_ok_and(|result| result.is_ok())
     }
 
-    #[must_use]
-    pub fn discover_hiddify(config: &AppConfig, data: &Path) -> Option<PathBuf> {
-        if let ExecutableSetting::Path(path) = &config.hiddify_executable() {
-            return path.is_file().then(|| path.clone());
+    async fn client_component(
+        client: &ClientInstance,
+        handles: &[EgressHandle],
+        last_failure: Option<&String>,
+    ) -> ComponentStatus {
+        if !client.enabled {
+            return ComponentStatus::new(ComponentPhase::Unavailable, None);
         }
-        Self::hiddify_candidates(data)
-            .into_iter()
-            .find(|path| path.is_file())
+        match client.spec().kind {
+            EgressKind::LocalProxy => match local_proxy_endpoint(client) {
+                Some((host, port)) if Self::tcp_listening(&host, port).await => {
+                    ComponentStatus::new(
+                        ComponentPhase::Running,
+                        Some(format!("Listening on {host}:{port}")),
+                    )
+                }
+                Some((host, port)) => ComponentStatus::new(
+                    ComponentPhase::Stopped,
+                    Some(last_failure.cloned().unwrap_or_else(|| {
+                        format!(
+                            "nothing is listening on {host}:{port}; check the port on the client card"
+                        )
+                    })),
+                ),
+                None => ComponentStatus::new(
+                    ComponentPhase::Stopped,
+                    Some("local proxy is not listening".into()),
+                ),
+            },
+            EgressKind::OwnedSideTunnel => {
+                if handles
+                    .iter()
+                    .any(|handle| handle.client_id == client.id && handle.ready)
+                {
+                    ComponentStatus::new(ComponentPhase::Running, None)
+                } else {
+                    ComponentStatus::new(
+                        ComponentPhase::Stopped,
+                        last_failure
+                            .cloned()
+                            .or_else(|| iran_split_clients::side_tunnel_stopped_reason(client)),
+                    )
+                }
+            }
+            EgressKind::Unsupported => ComponentStatus::new(ComponentPhase::Unavailable, None),
+        }
     }
 
-    /// Kept in step with `deps::hiddify_candidates` in the desktop crate so the
-    /// dependency card and the backend agree on where Hiddify is installed.
-    #[must_use]
-    pub fn hiddify_candidates(data: &Path) -> Vec<PathBuf> {
-        let mut candidates = vec![
-            data.join("apps/Hiddify/Hiddify.exe"),
-            data.join("apps/Hiddify/hiddify.exe"),
-            data.join("bin/hiddify.exe"),
-        ];
-        // The installed app keeps its managed Hiddify under the production
-        // data dir; a dev run's isolated profile must still find it.
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            let local = PathBuf::from(local);
-            candidates.push(local.join("biflow/apps/Hiddify/Hiddify.exe"));
-            candidates.push(local.join("biflow/bin/hiddify.exe"));
+    fn discover_hiddify(config: &AppConfig, data: &Path) -> Option<PathBuf> {
+        if let ExecutableSetting::Path(path) = &config.hiddify_executable() {
+            return resolve_macos_binary(path);
         }
-        for variable in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
-            if let Some(root) = std::env::var_os(variable) {
-                let root = PathBuf::from(root);
-                candidates.push(root.join("Hiddify/Hiddify.exe"));
-                candidates.push(root.join("Hiddify/hiddify.exe"));
-                candidates.push(root.join("Programs/Hiddify/Hiddify.exe"));
-                candidates.push(root.join("HiddifyNext/Hiddify.exe"));
-            }
+        // On macOS, `.app` bundles must be launched through `open` (Launch
+        // Services). A plain `hiddify` binary in the data directory may be a
+        // leftover Linux AppImage symlink (ELF, not Mach-O) that cannot run on
+        // macOS, so prefer `.app` bundles first and verify any plain binary is
+        // a Mach-O executable before accepting it.
+        let mut candidates = vec![
+            data.join("apps/Hiddify.app"),
+            PathBuf::from("/Applications/Hiddify.app"),
+            data.join("bin/hiddify"),
+            PathBuf::from("/usr/local/bin/hiddify"),
+            PathBuf::from("/opt/homebrew/bin/hiddify"),
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            // The installed app keeps its managed Hiddify here. A dev run
+            // uses an isolated profile, so without these entries it could
+            // not find the Hiddify the user already installed.
+            candidates.push(home.join("Applications/Hiddify.app"));
+            candidates.push(home.join(".local/share/biflow/apps/Hiddify.app"));
+            candidates.push(home.join(".local/share/biflow/bin/hiddify"));
         }
         if let Some(path) = std::env::var_os("PATH") {
-            for directory in std::env::split_paths(&path) {
-                candidates.push(directory.join("Hiddify.exe"));
-                candidates.push(directory.join("hiddify.exe"));
+            for dir in std::env::split_paths(&path) {
+                candidates.push(dir.join("hiddify"));
             }
         }
         candidates
+            .into_iter()
+            .find_map(|candidate| resolve_macos_binary(&candidate))
     }
 
     fn helper_component(result: Result<HelperStatus, CoreError>) -> ComponentStatus {
@@ -867,7 +1041,11 @@ impl WindowsBackend {
             );
             return (component, ProviderSummary::default());
         }
-        let Some(controller) = Self::controller(config) else {
+        let Ok(controller) = ControllerClient::new(
+            &config.mihomo.controller_host,
+            config.mihomo.controller_port,
+            config.mihomo.controller_secret.clone(),
+        ) else {
             return (
                 ComponentStatus::new(
                     ComponentPhase::Error,
@@ -916,22 +1094,22 @@ impl WindowsBackend {
         .ok()
     }
 
-    /// Windows has no `/sys/class/net`, and enumerating adapters needs Win32
-    /// calls this crate cannot make under `unsafe_code = "forbid"`. Mihomo owns
-    /// the Wintun adapter, so its own running config is the authority on
-    /// whether the tunnel is up.
+    /// macOS `utun` device names are kernel-assigned (`utunN`) and need not
+    /// equal the configured `tun_name`, so `interface_exists` alone is
+    /// unreliable. Mihomo's `/configs` `tun.enable` is the authority that it
+    /// owns a tunnel (mirrors the Windows backend, ADR 0104).
     async fn tun_active(config: &AppConfig) -> bool {
         let Some(controller) = Self::controller(config) else {
             return false;
         };
         match controller.configs().await {
             Ok(configs) => {
-                let active = tun_enabled(&configs, &config.mihomo.tun_name);
+                let active = tun_enabled(&configs);
                 if !active {
                     warn!(
                         event = "mihomo.tun_inactive",
                         section = "runtime_health",
-                        initiator = "windows_platform_backend",
+                        initiator = "macos_platform_backend",
                         cause = "controller_configs",
                         tun_enable = ?configs.get("tun").and_then(|tun| tun.get("enable")),
                         tun_device = configs
@@ -940,7 +1118,7 @@ impl WindowsBackend {
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or(""),
                         expected_device = %config.mihomo.tun_name,
-                        trace_route = "desktop_engine->windows_platform_backend->mihomo_controller",
+                        trace_route = "desktop_engine->macos_platform_backend->mihomo_controller",
                         "Mihomo /configs did not report an enabled TUN"
                     );
                 }
@@ -950,9 +1128,9 @@ impl WindowsBackend {
                 warn!(
                     event = "mihomo.tun_configs_failed",
                     section = "runtime_health",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = %error,
-                    trace_route = "desktop_engine->windows_platform_backend->mihomo_controller",
+                    trace_route = "desktop_engine->macos_platform_backend->mihomo_controller",
                     "could not read Mihomo /configs for TUN state"
                 );
                 false
@@ -1013,9 +1191,9 @@ impl WindowsBackend {
         info!(
             event = "client.egress_reused",
             section = "clients",
-            initiator = "windows_platform_backend",
+            initiator = "macos_platform_backend",
             cause = "cached_probe_port_open",
-            trace_route = "engine->windows_platform_backend->reuse_cached_egress",
+            trace_route = "engine->macos_platform_backend->reuse_cached_egress",
             "reused a successful egress probe because the client port is still open"
         );
         Some(cached)
@@ -1055,194 +1233,12 @@ impl WindowsBackend {
         }
     }
 
-    async fn client_component(
-        client: &ClientInstance,
-        handles: &[EgressHandle],
-        last_failure: Option<&String>,
-    ) -> ComponentStatus {
-        if !client.enabled {
-            return ComponentStatus::new(ComponentPhase::Unavailable, None);
-        }
-        match client.spec().kind {
-            EgressKind::LocalProxy => match local_proxy_endpoint(client) {
-                Some((host, port)) if Self::tcp_listening(&host, port).await => {
-                    ComponentStatus::new(
-                        ComponentPhase::Running,
-                        Some(format!("Listening on {host}:{port}")),
-                    )
-                }
-                Some((host, port)) => ComponentStatus::new(
-                    ComponentPhase::Stopped,
-                    Some(last_failure.cloned().unwrap_or_else(|| {
-                        format!(
-                            "nothing is listening on {host}:{port}; check the port on the client card"
-                        )
-                    })),
-                ),
-                None => ComponentStatus::new(
-                    ComponentPhase::Stopped,
-                    Some("local proxy is not listening".into()),
-                ),
-            },
-            EgressKind::OwnedSideTunnel => {
-                if handles
-                    .iter()
-                    .any(|handle| handle.client_id == client.id && handle.ready)
-                {
-                    ComponentStatus::new(ComponentPhase::Running, None)
-                } else {
-                    ComponentStatus::new(
-                        ComponentPhase::Stopped,
-                        last_failure
-                            .cloned()
-                            .or_else(|| iran_split_clients::side_tunnel_stopped_reason(client)),
-                    )
-                }
-            }
-            EgressKind::Unsupported => ComponentStatus::new(ComponentPhase::Unavailable, None),
-        }
-    }
-
-    async fn start_local_proxy_client(
-        &self,
-        client: &ClientInstance,
-        required: bool,
-        cancel: &CancellationToken,
-    ) -> Result<EgressHandle, CoreError> {
-        let Some((host, port)) = local_proxy_endpoint(client) else {
-            return Err(CoreError::ConfigInvalid(
-                "local proxy handle is missing".into(),
-            ));
-        };
-        if let Some(exit_ip) = self.reuse_cached_egress(client.id, &host, port).await {
-            if required {
-                *self.egress_exit_ip.lock().await = Some(exit_ip);
-            }
-            return synthesized_local_handle(client)
-                .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()));
-        }
-        if !Self::tcp_listening(&host, port).await {
-            if required {
-                self.launch_local_proxy_if_needed(client, &host, port, cancel)
-                    .await?;
-            } else {
-                // An optional client must not block Connect while its port
-                // opens. Launch it and let ADR 0076 recovery attach the
-                // egress once it actually serves.
-                self.spawn_local_proxy(client).await?;
-                return Err(CoreError::Platform(format!(
-                    "{} was launched in the background; its egress joins routing once it serves",
-                    client.spec().id
-                )));
-            }
-        }
-        // ADR 0018: every local-proxy egress is verified before the TUN starts,
-        // so pinned or MATCH traffic cannot blackhole into a dead proxy.
-        let probe_for = if required {
-            client_start_timeout(client)
-        } else {
-            Duration::from_secs(3)
-        };
-        let exit_ip = probe_hiddify_egress(&host, port, probe_for)
-            .await
-            .map_err(|error| {
-                CoreError::Platform(format!(
-                    "{} egress probe failed on {host}:{port}: {error}",
-                    client.spec().id
-                ))
-            })?;
-        self.client_exit_ips
-            .lock()
-            .await
-            .insert(client.id, exit_ip.clone());
-        if required {
-            *self.egress_exit_ip.lock().await = Some(exit_ip);
-        }
-        synthesized_local_handle(client)
-            .ok_or_else(|| CoreError::ConfigInvalid("local proxy handle is missing".into()))
-    }
-
-    /// Resolves and spawns a local-proxy binary without waiting for its port:
-    /// configured path first, then the preset's process names on PATH.
-    async fn spawn_local_proxy(&self, client: &ClientInstance) -> Result<(), CoreError> {
-        let ClientConfig::LocalProxy { executable, .. } = &client.config else {
-            return Err(CoreError::ConfigInvalid(
-                "client is not a local proxy".into(),
-            ));
-        };
-        let resolved = match executable {
-            ExecutableSetting::Path(path) => path.is_file().then(|| path.clone()),
-            ExecutableSetting::Auto if client.preset == PresetId::Hiddify => {
-                Self::discover_hiddify(&self.config.read().await.clone(), &self.paths.user_data_dir)
-            }
-            ExecutableSetting::Auto => discover_local_proxy_binary(&client.spec()),
-        };
-        let Some(binary) = resolved else {
-            return Err(CoreError::Platform(format!(
-                "{} is not running and its executable was not found; start it once or set its path on the client card",
-                client.spec().id
-            )));
-        };
-        let child = Command::new(binary)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(false)
-            .spawn()
-            .map_err(|error| CoreError::Platform(error.to_string()))?;
-        if client.preset == PresetId::Hiddify {
-            *self.launched_hiddify.lock().await = Some(child);
-        } else {
-            self.launched_clients.lock().await.push(child);
-        }
-        Ok(())
-    }
-
-    /// Launches a required local-proxy client that is not listening yet and
-    /// waits until the port answers (the default-route egress must be
-    /// verified before the TUN starts).
-    async fn launch_local_proxy_if_needed(
-        &self,
-        client: &ClientInstance,
-        host: &str,
-        port: u16,
-        cancel: &CancellationToken,
-    ) -> Result<(), CoreError> {
-        let ClientConfig::LocalProxy {
-            start_timeout_seconds,
-            ..
-        } = &client.config
-        else {
-            return Err(CoreError::ConfigInvalid(
-                "client is not a local proxy".into(),
-            ));
-        };
-        self.spawn_local_proxy(client).await?;
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs((*start_timeout_seconds).max(1));
-        loop {
-            if Self::tcp_listening(host, port).await {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(CoreError::Platform(format!(
-                    "{} was launched but its local port did not open in time",
-                    client.spec().id
-                )));
-            }
-            tokio::select! {
-                () = cancel.cancelled() => return Err(CoreError::Cancelled),
-                () = tokio::time::sleep(Duration::from_millis(250)) => {}
-            }
-        }
-    }
-
     async fn probe_hiddify_until_ready(
         &self,
         config: &AppConfig,
         cancel: CancellationToken,
     ) -> Result<String, CoreError> {
-        let deadline = tokio::time::Instant::now() + EGRESS_PROBE_BUDGET;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
         let mut last_cause;
         loop {
             if cancel.is_cancelled() {
@@ -1254,9 +1250,9 @@ impl WindowsBackend {
                     info!(
                         event = "hiddify.egress_ready",
                         section = "hiddify_process",
-                        initiator = "windows_platform_backend",
+                        initiator = "macos_platform_backend",
                         cause = "socks_probe",
-                        trace_route = "desktop_engine->windows_platform_backend->hiddify_egress",
+                        trace_route = "desktop_engine->macos_platform_backend->hiddify_egress",
                         "Hiddify SOCKS egress is reachable"
                     );
                     return Ok(exit_ip);
@@ -1266,9 +1262,9 @@ impl WindowsBackend {
                     warn!(
                         event = "hiddify.egress_probe_failed",
                         section = "hiddify_process",
-                        initiator = "windows_platform_backend",
+                        initiator = "macos_platform_backend",
                         cause = %error,
-                        trace_route = "desktop_engine->windows_platform_backend->hiddify_egress",
+                        trace_route = "desktop_engine->macos_platform_backend->hiddify_egress",
                         "Hiddify SOCKS egress probe failed; retrying before TUN starts"
                     );
                 }
@@ -1277,9 +1273,9 @@ impl WindowsBackend {
                 error!(
                     event = "hiddify.egress_probe_exhausted",
                     section = "hiddify_process",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = last_cause.as_str(),
-                    trace_route = "desktop_engine->windows_platform_backend->hiddify_egress",
+                    trace_route = "desktop_engine->macos_platform_backend->hiddify_egress",
                     "Hiddify was listening but SOCKS egress did not become ready"
                 );
                 return Err(CoreError::HiddifyEgressUnavailable);
@@ -1312,9 +1308,9 @@ impl WindowsBackend {
                 info!(
                     event = "mihomo.exit_ip_probed",
                     section = "runtime_health",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = "default_side_tunnel",
-                    trace_route = "desktop_engine->windows_platform_backend->mihomo_mixed",
+                    trace_route = "desktop_engine->macos_platform_backend->mihomo_mixed",
                     "measured the default side-tunnel exit address through Mihomo"
                 );
                 self.client_exit_ips
@@ -1326,9 +1322,9 @@ impl WindowsBackend {
             Err(cause) => warn!(
                 event = "mihomo.exit_ip_probe_failed",
                 section = "runtime_health",
-                initiator = "windows_platform_backend",
+                initiator = "macos_platform_backend",
                 cause = %cause,
-                trace_route = "desktop_engine->windows_platform_backend->mihomo_mixed",
+                trace_route = "desktop_engine->macos_platform_backend->mihomo_mixed",
                 "could not measure the default side-tunnel exit address"
             ),
         }
@@ -1345,53 +1341,6 @@ impl WindowsBackend {
         };
         let observed = controller.live_match_proxy().await.ok().flatten();
         LiveRoute::observe(&expected, observed)
-    }
-
-    async fn ensure_default_interface_route(&self) -> Result<(), CoreError> {
-        let config = self.config.read().await.clone();
-        let Some(client_id) = config.default_route.client_id() else {
-            return Ok(());
-        };
-        let Some(client) = config.client(client_id) else {
-            return Ok(());
-        };
-        if client.spec().kind != EgressKind::OwnedSideTunnel {
-            return Ok(());
-        }
-        let device = self
-            .egress_handles
-            .lock()
-            .await
-            .iter()
-            .find(|handle| handle.client_id == client_id && handle.ready)
-            .and_then(|handle| handle.outbound.as_ref())
-            .and_then(|outbound| outbound.interface_name.clone());
-        let Some(device) = device else {
-            return Err(CoreError::MihomoStartFailed(
-                "the default side tunnel has no adapter, so Mihomo cannot send unmatched traffic through it"
-                    .into(),
-            ));
-        };
-        match self
-            .helper_request(HelperCommand::EnsureInterfaceRoute { device })
-            .await
-        {
-            Ok(HelperReply::Ack) => {
-                info!(
-                    event = "side_tunnel.interface_route_ready",
-                    section = "clients",
-                    initiator = "windows_platform_backend",
-                    cause = "default_side_tunnel",
-                    trace_route = "engine->windows_platform_backend->helper",
-                    "side-tunnel adapter route is installed for Mihomo"
-                );
-                Ok(())
-            }
-            Ok(_) => Err(CoreError::Platform(
-                "helper did not confirm the side-tunnel adapter route".into(),
-            )),
-            Err(cause) => Err(cause),
-        }
     }
 
     async fn read_running_config(&self) -> Result<String, CoreError> {
@@ -1422,7 +1371,7 @@ impl WindowsBackend {
 }
 
 #[async_trait]
-impl PlatformBackend for WindowsBackend {
+impl PlatformBackend for MacosBackend {
     async fn runtime_health(&self) -> RuntimeHealth {
         let config = self.config.read().await.clone();
         let hiddify_path = Self::discover_hiddify(&config, &self.paths.user_data_dir);
@@ -1441,15 +1390,15 @@ impl PlatformBackend for WindowsBackend {
             Self::tcp_listening(&config.mihomo.controller_host, config.mihomo.dns_port),
         );
 
+        let helper_version = match &helper_result {
+            Ok(status) => status.version.clone(),
+            Err(_) => None,
+        };
         let helper = Self::helper_component(helper_result);
-        *self.helper_cache.lock().await = helper.clone();
         let hiddify = Self::hiddify_component(&config, hiddify_listening, hiddify_path.as_deref());
         let (mihomo, providers) =
             Self::mihomo_component(&config, controller_listening, mihomo_path.as_deref()).await;
-        let tun = Self::tun_component(
-            &config.mihomo.tun_name,
-            controller_listening && Self::tun_active(&config).await,
-        );
+        let tun = Self::tun_component(&config.mihomo.tun_name, Self::tun_active(&config).await);
         let dns = Self::dns_component(config.mihomo.dns_port, dns_listening);
 
         let handles = self.egress_handles.lock().await.clone();
@@ -1472,10 +1421,6 @@ impl PlatformBackend for WindowsBackend {
         }
 
         let live_route = self.observe_live_route(&config, &handles).await;
-        let helper_version = match &helper_result {
-            Ok(status) => status.version.clone(),
-            Err(_) => None,
-        };
         RuntimeHealth {
             helper,
             helper_version,
@@ -1489,22 +1434,23 @@ impl PlatformBackend for WindowsBackend {
     }
 
     async fn helper_status(&self) -> Result<HelperStatus, CoreError> {
-        let status = match self.helper.request(HelperCommand::GetServiceStatus).await {
+        match self.helper.request(HelperCommand::GetServiceStatus).await {
             Ok(HelperReply::ServiceStatus(status)) => Ok(HelperStatus {
                 available: true,
                 authorized: status.authorized,
                 version: Some(status.helper_version),
             }),
             Ok(_) => Err(CoreError::Platform("unexpected helper status reply".into())),
-            Err(WindowsBackendError::Io(error)) if is_helper_absent(&error) => {
+            Err(MacosBackendError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
                 Ok(HelperStatus::default())
             }
-            Err(WindowsBackendError::Timeout) => Ok(HelperStatus::default()),
             Err(error) => Err(CoreError::Platform(error.to_string())),
-        };
-        *self.helper_cache.lock().await = Self::helper_component(status.clone());
-        *self.helper_version_cache.lock().await = status.version.clone();
-        status
+        }
     }
 
     async fn ensure_hiddify(&self, cancel: CancellationToken) -> Result<(), CoreError> {
@@ -1548,8 +1494,7 @@ impl PlatformBackend for WindowsBackend {
                         section = "clients",
                         initiator = "retry_side_tunnels",
                         cause = "openvpn_started",
-                        trace_route =
-                            "desktop->engine->windows_platform_backend->retry_side_tunnels",
+                        trace_route = "desktop->engine->macos_platform_backend->retry_side_tunnels",
                         client = client.spec().id,
                         "side tunnel started after a longer timeout"
                     );
@@ -1564,7 +1509,7 @@ impl PlatformBackend for WindowsBackend {
                         section = "clients",
                         initiator = "retry_side_tunnels",
                         cause = %error,
-                        trace_route = "desktop->engine->windows_platform_backend->retry_side_tunnels",
+                        trace_route = "desktop->engine->macos_platform_backend->retry_side_tunnels",
                         client = client.spec().id,
                         "side tunnel retry did not start"
                     );
@@ -1670,11 +1615,9 @@ impl PlatformBackend for WindowsBackend {
     async fn prepare_runtime(&self) -> Result<RuntimeGeneration, CoreError> {
         let config = self.config.read().await.clone();
         let generation_id = Uuid::new_v4();
-        prune_staging(&self.paths.generation_staging_dir);
-        let staging_root = self
-            .paths
-            .generation_staging_dir
-            .join(generation_id.to_string());
+        let staging_parent = self.paths.user_data_dir.join("runtime").join("generations");
+        prune_staging(&staging_parent);
+        let staging_root = staging_parent.join(generation_id.to_string());
         fs::create_dir_all(&staging_root).map_err(|error| platform_error(&error))?;
         let runtime_paths = RuntimePaths {
             private_networks: PathBuf::from("private.txt"),
@@ -1695,26 +1638,42 @@ impl PlatformBackend for WindowsBackend {
         let handles = self.egress_handles.lock().await.clone();
         let generated = generate_config_with_handles(
             &config,
-            Platform::Windows,
+            Platform::Macos,
             &runtime_paths,
             &custom,
             &handles,
         )
         .map_err(|error| CoreError::ConfigInvalid(error.to_string()))?;
-        for name in [
+        copy_rule_file(
+            &self.paths.resources_dir,
+            &self.paths.rules_cache_dir,
+            &staging_root,
             "private.txt",
+        )?;
+        copy_rule_file(
+            &self.paths.resources_dir,
+            &self.paths.rules_cache_dir,
+            &staging_root,
             "iran-domains.txt",
+        )?;
+        copy_rule_file(
+            &self.paths.resources_dir,
+            &self.paths.rules_cache_dir,
+            &staging_root,
             "iran-networks.txt",
+        )?;
+        copy_rule_file(
+            &self.paths.resources_dir,
+            &self.paths.rules_cache_dir,
+            &staging_root,
             "iran-business-domains.txt",
+        )?;
+        copy_rule_file(
+            &self.paths.resources_dir,
+            &self.paths.rules_cache_dir,
+            &staging_root,
             "iran-cdn-networks.txt",
-        ] {
-            copy_rule_file(
-                &self.paths.resources_dir,
-                &self.paths.rules_cache_dir,
-                &staging_root,
-                name,
-            )?;
-        }
+        )?;
         write_custom_provider_files(&staging_root, &custom, &config)?;
         write_atomic(&staging_root.join("config.yaml"), generated.yaml.as_bytes())?;
         let generation = RuntimeGeneration {
@@ -1725,15 +1684,6 @@ impl PlatformBackend for WindowsBackend {
             generation: generation.clone(),
             config_path: staging_root.join("config.yaml"),
         });
-        info!(
-            event = "runtime.generation_prepared",
-            section = "runtime_generation",
-            initiator = "windows_platform_backend",
-            cause = "stack_start",
-            trace_id = %generation_id,
-            trace_route = "desktop_engine->windows_platform_backend->prepare_runtime",
-            "runtime generation staged for the helper"
-        );
         Ok(generation)
     }
 
@@ -1753,9 +1703,9 @@ impl PlatformBackend for WindowsBackend {
             info!(
                 event = "runtime.validation_skipped",
                 section = "runtime_generation",
-                initiator = "windows_platform_backend",
+                initiator = "macos_platform_backend",
                 cause = "unchanged_config",
-                trace_route = "desktop_engine->windows_platform_backend->validate_runtime",
+                trace_route = "desktop_engine->macos_platform_backend->validate_runtime",
                 "skipped mihomo -t because this config hash already validated"
             );
             return Ok(());
@@ -1781,7 +1731,6 @@ impl PlatformBackend for WindowsBackend {
         generation: &RuntimeGeneration,
         rebind_host: Option<String>,
     ) -> Result<(), CoreError> {
-        self.ensure_default_interface_route().await?;
         self.register_runtime(generation).await?;
         match self
             .helper_request(HelperCommand::OverlayRuntimeGeneration {
@@ -1791,16 +1740,22 @@ impl PlatformBackend for WindowsBackend {
             .await?
         {
             HelperReply::ProcessStatus(status) if status.running => {
-                let Some(generation_id) = status.generation_id else {
+                if status.generation_id.is_none() {
                     return Err(CoreError::Platform(
                         "running Mihomo has no generation to reload".into(),
                     ));
-                };
+                }
+                // The overlay copied this generation byte for byte (the
+                // helper checks its SHA-256) into the root-only
+                // `/var/lib/iran-split` workdir, which the desktop cannot
+                // read: every Live apply failed with EACCES. Send the
+                // desktop's own staged copy of the same bytes.
                 let config_path = self
                     .paths
-                    .system_runtime_dir
+                    .user_data_dir
+                    .join("runtime")
                     .join("generations")
-                    .join(generation_id.to_string())
+                    .join(generation.generation_id.to_string())
                     .join("config.yaml");
                 self.hot_reload_running(rebind_host.as_deref(), &config_path)
                     .await
@@ -1818,9 +1773,10 @@ impl PlatformBackend for WindowsBackend {
 
     async fn stop_core(&self) -> Result<(), CoreError> {
         match self.helper_request(HelperCommand::StopMihomo).await? {
-            HelperReply::ProcessStatus(status) if !status.running => Ok(()),
-            _ => Err(CoreError::Platform("helper did not stop Mihomo".into())),
+            HelperReply::ProcessStatus(status) if !status.running => {}
+            _ => return Err(CoreError::Platform("helper did not stop Mihomo".into())),
         }
+        Ok(())
     }
 
     async fn stop_user_proxy(&self) -> Result<(), CoreError> {
@@ -1834,10 +1790,10 @@ impl PlatformBackend for WindowsBackend {
                 warn!(
                     event = "hiddify.stop_signal_failed",
                     section = "hiddify_process",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = %cause,
                     trace_id = %trace_id,
-                    trace_route = "desktop_engine->windows_platform_backend->hiddify_process",
+                    trace_route = "desktop_engine->macos_platform_backend->hiddify_process",
                     "could not send the stop signal to the Hiddify child process"
                 );
             }
@@ -1845,29 +1801,29 @@ impl PlatformBackend for WindowsBackend {
                 Ok(Ok(status)) => info!(
                     event = "hiddify.process_stopped",
                     section = "hiddify_process",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = "stop_with_stack",
                     trace_id = %trace_id,
-                    trace_route = "desktop_engine->windows_platform_backend->hiddify_process",
+                    trace_route = "desktop_engine->macos_platform_backend->hiddify_process",
                     exit_status = %status,
                     "Hiddify child process stopped"
                 ),
                 Ok(Err(cause)) => warn!(
                     event = "hiddify.wait_failed",
                     section = "hiddify_process",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = %cause,
                     trace_id = %trace_id,
-                    trace_route = "desktop_engine->windows_platform_backend->hiddify_process",
+                    trace_route = "desktop_engine->macos_platform_backend->hiddify_process",
                     "could not collect the stopped Hiddify child process"
                 ),
                 Err(cause) => warn!(
                     event = "hiddify.stop_timed_out",
                     section = "hiddify_process",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = %cause,
                     trace_id = %trace_id,
-                    trace_route = "desktop_engine->windows_platform_backend->hiddify_process",
+                    trace_route = "desktop_engine->macos_platform_backend->hiddify_process",
                     timeout_seconds = 5_u64,
                     "Hiddify child process did not stop before the timeout"
                 ),
@@ -1906,7 +1862,8 @@ impl PlatformBackend for WindowsBackend {
     }
 
     async fn tun_status(&self) -> Result<TunStatus, CoreError> {
-        let config = self.config.read().await.clone();
+        let config = self.config.read().await;
+        let name = config.mihomo.tun_name.clone();
         let listening = Self::tcp_listening(
             &config.mihomo.controller_host,
             config.mihomo.controller_port,
@@ -1914,7 +1871,7 @@ impl PlatformBackend for WindowsBackend {
         .await;
         Ok(TunStatus {
             active: listening && Self::tun_active(&config).await,
-            name: Some(config.mihomo.tun_name),
+            name: Some(name),
         })
     }
 
@@ -1932,22 +1889,22 @@ impl PlatformBackend for WindowsBackend {
         info!(
             event = "mihomo.readiness_wait_started",
             section = "runtime_health",
-            initiator = "windows_platform_backend",
+            initiator = "macos_platform_backend",
             cause = "core_started",
-            trace_route = "desktop_engine->windows_platform_backend->mihomo_controller",
+            trace_route = "desktop_engine->macos_platform_backend->mihomo_controller",
             "waiting for the Mihomo controller and rule providers"
         );
         let providers = match controller
-            .wait_until_ready(READINESS_BUDGET, cancel.clone())
+            .wait_until_ready(Duration::from_secs(20), cancel.clone())
             .await
         {
             Ok(providers) => {
                 info!(
                     event = "mihomo.readiness_wait_completed",
                     section = "runtime_health",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = "none",
-                    trace_route = "desktop_engine->windows_platform_backend->mihomo_controller",
+                    trace_route = "desktop_engine->macos_platform_backend->mihomo_controller",
                     ready = providers.ready,
                     total = providers.total,
                     rules_loaded = providers.rules_loaded,
@@ -1959,9 +1916,9 @@ impl PlatformBackend for WindowsBackend {
                 error!(
                     event = "mihomo.readiness_wait_failed",
                     section = "runtime_health",
-                    initiator = "windows_platform_backend",
+                    initiator = "macos_platform_backend",
                     cause = %error,
-                    trace_route = "desktop_engine->windows_platform_backend->mihomo_controller",
+                    trace_route = "desktop_engine->macos_platform_backend->mihomo_controller",
                     "Mihomo readiness wait failed"
                 );
                 return Err(readiness_error(error));
@@ -1984,9 +1941,9 @@ impl PlatformBackend for WindowsBackend {
             error!(
                 event = "hiddify.egress_missing_after_tun",
                 section = "runtime_health",
-                initiator = "windows_platform_backend",
+                initiator = "macos_platform_backend",
                 cause = "pre_tun_probe_missing",
-                trace_route = "desktop_engine->windows_platform_backend->hiddify_egress",
+                trace_route = "desktop_engine->macos_platform_backend->hiddify_egress",
                 "default local-proxy egress was not confirmed before TUN start"
             );
             return Err(CoreError::HiddifyEgressUnavailable);
@@ -2004,62 +1961,6 @@ impl PlatformBackend for WindowsBackend {
         })
     }
 
-    async fn connect_progress_health(&self) -> RuntimeHealth {
-        let config = self.config.read().await.clone();
-        let (controller_listening, dns_listening) = tokio::join!(
-            Self::tcp_listening(
-                &config.mihomo.controller_host,
-                config.mihomo.controller_port
-            ),
-            Self::tcp_listening(&config.mihomo.controller_host, config.mihomo.dns_port),
-        );
-        let helper = self.helper_cache.lock().await.clone();
-        let hiddify_path = Self::discover_hiddify(&config, &self.paths.user_data_dir);
-        let hiddify_listening = Self::hiddify_listening(&config).await;
-        let hiddify = Self::hiddify_component(&config, hiddify_listening, hiddify_path.as_deref());
-        let handles = self.egress_handles.lock().await.clone();
-        let exit_ips = self.client_exit_ips.lock().await.clone();
-        let failures = self.client_failures.lock().await.clone();
-        let mut clients = Vec::new();
-        for client in &config.clients {
-            let status = if client.preset == PresetId::Hiddify {
-                hiddify.clone()
-            } else {
-                Self::client_component(client, &handles, failures.get(&client.id)).await
-            };
-            clients.push(ClientComponentStatus {
-                id: client.id,
-                preset: client.preset,
-                enabled: client.enabled,
-                status,
-                exit_ip: exit_ips.get(&client.id).cloned(),
-            });
-        }
-        let mihomo = if controller_listening {
-            ComponentStatus::new(
-                ComponentPhase::Running,
-                Some("Mihomo controller port is open".into()),
-            )
-        } else if self.paths.mihomo_binary.is_file() {
-            ComponentStatus::new(ComponentPhase::Starting, Some("Starting Mihomo".into()))
-        } else {
-            ComponentStatus::new(
-                ComponentPhase::Unavailable,
-                Some("Mihomo is not installed".into()),
-            )
-        };
-        RuntimeHealth {
-            helper,
-            helper_version: self.helper_version_cache.lock().await.clone(),
-            clients,
-            mihomo,
-            tun: ComponentStatus::new(ComponentPhase::Starting, Some("Waiting for TUN".into())),
-            dns: Self::dns_component(config.mihomo.dns_port, dns_listening),
-            providers: ProviderSummary::default(),
-            live_route: LiveRoute::unknown(),
-        }
-    }
-
     async fn forget_client_egress(&self) {
         self.egress_handles.lock().await.clear();
         *self.egress_exit_ip.lock().await = None;
@@ -2069,9 +1970,9 @@ impl PlatformBackend for WindowsBackend {
         info!(
             event = "client.egress_cache_cleared",
             section = "clients",
-            initiator = "windows_platform_backend",
+            initiator = "macos_platform_backend",
             cause = "stack_stopped",
-            trace_route = "engine->windows_platform_backend->forget_client_egress",
+            trace_route = "engine->macos_platform_backend->forget_client_egress",
             "cleared cached egress probes after disconnect"
         );
     }
@@ -2098,46 +1999,108 @@ impl PlatformBackend for WindowsBackend {
     }
 }
 
-/// Mihomo reports its live configuration, including the Wintun device it owns.
-///
-/// Windows builds often echo `device: Meta`, an empty name, or a Wintun path
-/// instead of the configured `clash-iran`. `enable: true` is the authority
-/// that Mihomo owns a tunnel; the name is only logged.
-#[must_use]
-pub fn tun_enabled(configs: &serde_json::Value, _tun_name: &str) -> bool {
-    let Some(tun) = tun_section(configs) else {
-        return false;
-    };
-    json_flag_enabled(tun.get("enable"))
-}
-
-fn tun_section(configs: &serde_json::Value) -> Option<&serde_json::Value> {
-    configs
-        .get("tun")
-        .or_else(|| configs.get("config").and_then(|config| config.get("tun")))
-}
-
-fn json_flag_enabled(value: Option<&serde_json::Value>) -> bool {
-    match value {
-        Some(serde_json::Value::Bool(enabled)) => *enabled,
-        Some(serde_json::Value::Number(number)) => {
-            number.as_u64().is_some_and(|value| value != 0)
-                || number.as_i64().is_some_and(|value| value != 0)
-        }
-        Some(serde_json::Value::String(text)) => {
-            let text = text.trim();
-            text.eq_ignore_ascii_case("true") || text == "1"
-        }
-        _ => false,
-    }
-}
-
-fn platform_error(error: &io::Error) -> CoreError {
+fn platform_error(error: &std::io::Error) -> CoreError {
     CoreError::Platform(error.to_string())
 }
 
 /// Finds a launchable binary for a `LocalProxy` preset by its process names
 /// (wildcards excluded), preferring the first — the GUI app — over cores.
+///
+/// Debian's Happ package installs `/usr/bin/happ` → `/opt/happ/bin/Happ`.
+/// PATH lookup must ignore case and must also try those well-known paths,
+/// because a packaged Tauri PATH often omits `/usr/bin` or only has the
+/// lowercase symlink.
+fn ensure_live_match(
+    yaml: &str,
+    live: &str,
+    generation_id: &str,
+    initiator: &'static str,
+) -> Result<(), CoreError> {
+    let Some(detail) = match_reload_disagrees(yaml, live) else {
+        return Ok(());
+    };
+    error!(
+        event = "mihomo.live_match_disagreed",
+        section = "rules",
+        initiator,
+        cause = %detail,
+        generation_id,
+        match_proxy = live,
+        trace_route = "engine->platform_backend->mihomo_controller",
+        "reloaded Mihomo but the live MATCH rule did not change"
+    );
+    Err(CoreError::MihomoStartFailed(detail))
+}
+
+fn client_start_timeout(client: &ClientInstance) -> Duration {
+    let ClientConfig::LocalProxy {
+        start_timeout_seconds,
+        ..
+    } = &client.config
+    else {
+        return Duration::from_secs(15);
+    };
+    // macOS `.app` bundles (Hiddify is a Flutter app) can take well over a
+    // minute to initialize Launch Services, build the Flutter UI, and open
+    // the proxy port. The configured default is 45s which is too short on a
+    // cold start; double the budget on macOS so the egress probe does not
+    // time out before Hiddify is ready.
+    let base = (*start_timeout_seconds).max(3);
+    Duration::from_secs(base * 2)
+}
+
+fn discover_local_proxy_binary(spec: &iran_split_config::PresetSpec) -> Option<PathBuf> {
+    let directories = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    discover_local_proxy_binary_in(spec, &directories, &well_known_local_proxy_binaries(spec))
+}
+
+fn well_known_local_proxy_binaries(spec: &iran_split_config::PresetSpec) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if spec.preset == PresetId::Happ {
+        candidates.extend([
+            PathBuf::from("/Applications/Happ.app"),
+            PathBuf::from("/usr/local/bin/happ"),
+            PathBuf::from("/opt/homebrew/bin/happ"),
+        ]);
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            candidates.push(home.join("Applications/Happ.app"));
+            candidates.push(home.join(".local/bin/happ"));
+        }
+    }
+    candidates
+}
+
+fn discover_local_proxy_binary_in(
+    spec: &iran_split_config::PresetSpec,
+    directories: &[PathBuf],
+    extra: &[PathBuf],
+) -> Option<PathBuf> {
+    if let Some(path) = extra.iter().find_map(|path| resolve_macos_binary(path)) {
+        return Some(path);
+    }
+    let names = spec
+        .macos_bypass
+        .iter()
+        .copied()
+        .filter(|name| !name.contains('*'));
+    for name in names {
+        for directory in directories {
+            if let Some(path) = file_named_ignore_case(directory, name) {
+                return Some(path);
+            }
+            // macOS GUI clients ship as `.app` bundles; resolve the inner
+            // executable so `Command::new` can spawn it directly.
+            if let Some(path) = resolve_macos_binary(&directory.join(format!("{name}.app"))) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 /// Enabled local-proxy clients whose connect-time egress handle is missing —
 /// the only candidates for live recovery (ADR 0076). Side tunnels are owned
 /// processes with their own lifecycle and are never re-attached here.
@@ -2169,109 +2132,141 @@ fn clients_missing_egress<'config>(
         .collect()
 }
 
-fn ensure_live_match(
-    yaml: &str,
-    live: &str,
-    generation_id: &str,
-    initiator: &'static str,
-) -> Result<(), CoreError> {
-    let Some(detail) = match_reload_disagrees(yaml, live) else {
-        return Ok(());
-    };
-    error!(
-        event = "mihomo.live_match_disagreed",
-        section = "rules",
-        initiator,
-        cause = %detail,
-        generation_id,
-        match_proxy = live,
-        trace_route = "engine->platform_backend->mihomo_controller",
-        "reloaded Mihomo but the live MATCH rule did not change"
-    );
-    Err(CoreError::MihomoStartFailed(detail))
+fn file_named_ignore_case(directory: &Path, name: &str) -> Option<PathBuf> {
+    let exact = directory.join(name);
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let entries = fs::read_dir(directory).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|file| file.to_str())
+                    .is_some_and(|file| file.eq_ignore_ascii_case(name))
+        })
 }
 
-fn client_start_timeout(client: &ClientInstance) -> Duration {
-    let ClientConfig::LocalProxy {
-        start_timeout_seconds,
-        ..
-    } = &client.config
-    else {
-        return Duration::from_secs(15);
-    };
-    Duration::from_secs((*start_timeout_seconds).max(3))
-}
-
-fn discover_local_proxy_binary(spec: &iran_split_config::PresetSpec) -> Option<PathBuf> {
-    discover_local_proxy_binary_in(
-        spec,
-        &local_proxy_search_dirs(),
-        &well_known_local_proxy_binaries(spec),
-    )
-}
-
-fn local_proxy_search_dirs() -> Vec<PathBuf> {
-    let mut directories = Vec::new();
-    for variable in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(root) = std::env::var_os(variable) {
-            let root = PathBuf::from(root);
-            directories.push(root.join("Programs"));
-            directories.push(root);
+/// Resolves a launchable binary on macOS. A plain file is returned as-is
+/// only when it is a Mach-O executable (a leftover Linux `AppImage` or ELF
+/// binary cannot run on macOS and must be rejected). A `.app` bundle
+/// directory is resolved to its inner executable under
+/// `Contents/MacOS/<bundle name>`, so `Command::new` can spawn it directly.
+fn resolve_macos_binary(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        // Reject Linux ELF binaries (e.g. a stale AppImage symlink left by a
+        // cross-platform install); only Mach-O executables run on macOS.
+        if !is_macho_binary(path) {
+            return None;
         }
+        return Some(path.to_path_buf());
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        directories.extend(std::env::split_paths(&path));
-    }
-    directories
-}
-
-fn well_known_local_proxy_binaries(spec: &iran_split_config::PresetSpec) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if spec.preset != PresetId::Happ {
-        return candidates;
-    }
-    for variable in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(root) = std::env::var_os(variable) {
-            let root = PathBuf::from(root);
-            candidates.push(root.join("Happ").join("Happ.exe"));
-            candidates.push(root.join("Programs").join("Happ").join("Happ.exe"));
+    if path.is_dir() {
+        let app_name = path.file_name()?.to_str()?;
+        if !std::path::Path::new(app_name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+        {
+            return None;
         }
-    }
-    candidates
-}
-
-fn discover_local_proxy_binary_in(
-    spec: &iran_split_config::PresetSpec,
-    directories: &[PathBuf],
-    extra: &[PathBuf],
-) -> Option<PathBuf> {
-    if let Some(path) = extra.iter().find(|path| path.is_file()) {
-        return Some(path.clone());
-    }
-    let names = spec
-        .windows_bypass
-        .iter()
-        .copied()
-        .filter(|name| !name.contains('*'));
-    for name in names {
-        let stem = Path::new(name)
-            .file_stem()
-            .and_then(|file| file.to_str())
-            .unwrap_or(name);
-        for directory in directories {
-            for candidate in [directory.join(name), directory.join(stem).join(name)] {
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
+        let stem = app_name.strip_suffix(".app")?;
+        let inner = path.join("Contents/MacOS").join(stem);
+        if inner.is_file() {
+            return Some(inner);
         }
     }
     None
 }
 
-/// Writes `username\npassword` to a private temp file for `--auth-user-pass`.
+/// Returns `true` when `path` starts with a Mach-O magic number
+/// (`0xfeed_face` 32-bit or `0xfeed_facf` 64-bit). A Linux ELF binary starts
+/// with `0x7f` `E` `L` `F` and is rejected.
+fn is_macho_binary(path: &Path) -> bool {
+    use std::io::Read;
+    // Mach-O 64-bit: `0xfeed_facf`, Mach-O 32-bit: `0xfeed_face` (big-endian on disk).
+    const MACHO_64: [u8; 4] = 0xfeed_facfu32.to_ne_bytes();
+    const MACHO_32: [u8; 4] = 0xfeed_faceu32.to_ne_bytes();
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    magic == MACHO_64 || magic == MACHO_32
+}
+
+/// Extracts the `tun` object from a Mihomo `/configs` response.
+fn tun_section(configs: &serde_json::Value) -> Option<&serde_json::Value> {
+    configs
+        .get("tun")
+        .or_else(|| configs.get("config").and_then(|config| config.get("tun")))
+}
+
+/// Returns the enclosing `.app` bundle directory when `binary` is the inner
+/// Mach-O executable of a macOS app bundle (for example
+/// `/Applications/Hiddify.app/Contents/MacOS/Hiddify` → `/Applications/Hiddify.app`).
+/// Launching the bundle through `open` initializes the app properly, while
+/// running the inner binary directly often leaves the proxy port closed.
+fn enclosing_app_bundle(binary: &Path) -> Option<PathBuf> {
+    let mut current = binary.parent()?;
+    while let Some(parent) = current.parent() {
+        let is_app = current
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"));
+        if is_app {
+            return Some(current.to_path_buf());
+        }
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    None
+}
+
+/// Accepts bool/number/string representations of a JSON enable flag.
+fn json_flag_enabled(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::Bool(enabled)) => *enabled,
+        Some(serde_json::Value::Number(number)) => {
+            number.as_u64().is_some_and(|value| value != 0)
+                || number.as_i64().is_some_and(|value| value != 0)
+        }
+        Some(serde_json::Value::String(text)) => {
+            let text = text.trim();
+            text.eq_ignore_ascii_case("true") || text == "1"
+        }
+        _ => false,
+    }
+}
+
+/// Mihomo reports `tun.enable` as the authority that it owns a tunnel. On
+/// macOS the live `utun` device name is kernel-assigned and need not equal
+/// the configured `tun_name`, so `interface_exists` alone is unreliable
+/// (mirrors the Windows backend, ADR 0104).
+#[must_use]
+fn tun_enabled(configs: &serde_json::Value) -> bool {
+    let Some(tun) = tun_section(configs) else {
+        return false;
+    };
+    json_flag_enabled(tun.get("enable"))
+}
+
+/// Writes `username\npassword` to a 0600 temp file for `--auth-user-pass`.
 /// Returns `None` when the instance has no credentials.
+/// Writes the credential file where the helper can actually read it.
+///
+/// The helper unit sets `PrivateTmp=yes`, so a file in the desktop user's
+/// `/tmp` does not exist inside the helper's mount namespace and `OpenVPN`
+/// dies immediately with "exit status: 1". `ProtectHome=read-only` still
+/// lets the helper read the user's data directory, so the file goes there,
+/// owner-only, and is deleted when the handle drops.
 fn write_side_tunnel_auth(
+    user_data_dir: &Path,
     username: Option<&str>,
     password: Option<&str>,
 ) -> Result<Option<NamedTempFile>, CoreError> {
@@ -2281,7 +2276,15 @@ fn write_side_tunnel_auth(
     if username.is_empty() {
         return Ok(None);
     }
-    let mut file = NamedTempFile::new().map_err(|error| platform_error(&error))?;
+    let directory = user_data_dir.join("side-tunnel");
+    fs::create_dir_all(&directory).map_err(|error| platform_error(&error))?;
+    let mut file = NamedTempFile::new_in(&directory).map_err(|error| platform_error(&error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(file.path(), fs::Permissions::from_mode(0o600))
+            .map_err(|error| platform_error(&error))?;
+    }
     writeln!(file, "{username}")
         .and_then(|()| writeln!(file, "{password}"))
         .and_then(|()| file.flush())
@@ -2382,6 +2385,11 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), CoreError> {
     Ok(())
 }
 
+#[allow(dead_code)]
+fn hash_bytes(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
 /// Keeps staged generations bounded; a failure is logged and ignored
 /// because staging a new generation does not depend on it.
 fn prune_staging(root: &Path) {
@@ -2391,9 +2399,9 @@ fn prune_staging(root: &Path) {
         Ok(removed) => info!(
             event = "runtime.staging_pruned",
             section = "runtime_generation",
-            initiator = "windows_platform_backend",
+            initiator = "macos_platform_backend",
             cause = "bounded_staging",
-            trace_route = "engine->windows_platform_backend->staging",
+            trace_route = "engine->macos_platform_backend->staging",
             removed,
             "removed old staged runtime generations"
         ),
@@ -2401,9 +2409,9 @@ fn prune_staging(root: &Path) {
         Err(error) => warn!(
             event = "runtime.staging_prune_failed",
             section = "runtime_generation",
-            initiator = "windows_platform_backend",
+            initiator = "macos_platform_backend",
             cause = %error.kind(),
-            trace_route = "engine->windows_platform_backend->staging",
+            trace_route = "engine->macos_platform_backend->staging",
             "could not list staged runtime generations"
         ),
     }
@@ -2411,17 +2419,74 @@ fn prune_staging(root: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        discover_local_proxy_binary_in, is_helper_absent, is_pipe_busy, tun_enabled, AppConfig,
-        WindowsBackend, WindowsPaths, HELPER_PIPE,
-    };
-    use iran_split_config::PresetId;
-    use iran_split_core::PlatformBackend;
-    use serde_json::json;
-    use std::{fs, io, path::PathBuf};
+    use super::*;
+    use iran_split_config::DefaultRoute;
 
-    fn paths(root: &std::path::Path) -> WindowsPaths {
-        let resources = root.join("resources");
+    #[test]
+    fn enclosing_app_bundle_finds_the_bundle_from_the_inner_binary() {
+        let bundle = PathBuf::from("/Applications/Hiddify.app");
+        let inner = bundle.join("Contents/MacOS/Hiddify");
+        assert_eq!(
+            enclosing_app_bundle(&inner).as_deref(),
+            Some(bundle.as_path())
+        );
+
+        let happ_inner = PathBuf::from("/Applications/Happ.app/Contents/MacOS/Happ");
+        assert_eq!(
+            enclosing_app_bundle(&happ_inner).as_deref(),
+            Some(Path::new("/Applications/Happ.app"))
+        );
+    }
+
+    #[test]
+    fn enclosing_app_bundle_returns_none_for_a_plain_binary() {
+        assert_eq!(
+            enclosing_app_bundle(&PathBuf::from("/usr/local/bin/hiddify")),
+            None
+        );
+        assert_eq!(
+            enclosing_app_bundle(&PathBuf::from("/opt/homebrew/bin/hiddify")),
+            None
+        );
+    }
+
+    #[test]
+    fn side_tunnel_auth_avoids_the_helpers_private_tmp() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let file = write_side_tunnel_auth(home.path(), Some("user"), Some("secret"))
+            .expect("auth")
+            .expect("some");
+        // PrivateTmp=yes hides /tmp from the helper: a credential file there
+        // makes OpenVPN die instantly with "exit status: 1".
+        assert!(
+            file.path().starts_with(home.path()),
+            "auth file must live under the user data directory"
+        );
+        assert_ne!(
+            file.path().parent(),
+            Some(std::env::temp_dir().as_path()),
+            "the bare temp root is exactly what the helper cannot see"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(file.path())
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "credentials must stay owner-only");
+        }
+        let contents = fs::read_to_string(file.path()).expect("read");
+        assert_eq!(contents, "user\nsecret\n");
+        assert!(write_side_tunnel_auth(home.path(), None, Some("secret"))
+            .expect("no username")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn preparation_publishes_only_allowlisted_generation_files() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let resources = directory.path().join("resources");
         fs::create_dir_all(&resources).expect("resources");
         for name in [
             "private.txt",
@@ -2432,108 +2497,29 @@ mod tests {
         ] {
             fs::write(resources.join(name), "example\n").expect("fixture");
         }
-        WindowsPaths {
-            pipe_name: HELPER_PIPE.to_owned(),
-            user_data_dir: root.join("user-data"),
-            system_runtime_dir: PathBuf::from(r"C:\ProgramData\iran-split\runtime"),
-            generation_staging_dir: root.join("staging"),
+        let paths = MacosPaths {
+            socket_path: directory.path().join("helper.sock"),
+            user_data_dir: directory.path().join("user-data"),
+            system_runtime_dir: PathBuf::from("/var/lib/iran-split"),
             resources_dir: resources,
-            rules_cache_dir: root.join("rules-cache"),
-            mihomo_binary: root.join("mihomo.exe"),
-        }
-    }
-
-    #[test]
-    fn pipe_name_is_versioned_and_fixed() {
-        assert_eq!(HELPER_PIPE, r"\\.\pipe\iran-split-helper-v1");
-        assert!(!HELPER_PIPE.contains(".."));
-    }
-
-    #[test]
-    fn packaged_connect_stages_into_the_helper_generation_root() {
-        let production = include_str!("lib.rs")
-            .split("mod tests {")
-            .next()
-            .expect("production source");
-        assert!(production.contains("generation_staging_dir"));
-        assert!(production.contains(".generation_staging_dir"));
-        // Split the needle so a whole-file `include_str!` cannot match this
-        // assertion. `#![cfg(windows)]` means Linux CI never runs this test.
-        let forbidden = [
-            "user_data_dir.join(",
-            r#""runtime""#,
-            ").join(",
-            r#""generations""#,
-            ")",
-        ]
-        .concat();
-        assert!(!production.contains(&forbidden));
-    }
-
-    #[test]
-    fn detects_busy_pipe_errors_for_bounded_retries() {
-        assert!(is_pipe_busy(&io::Error::from_raw_os_error(231)));
-        assert!(!is_pipe_busy(&io::Error::from_raw_os_error(2)));
-    }
-
-    #[test]
-    fn a_missing_pipe_reads_as_an_uninstalled_helper() {
-        assert!(is_helper_absent(&io::Error::from(io::ErrorKind::NotFound)));
-        assert!(is_helper_absent(&io::Error::from(
-            io::ErrorKind::ConnectionRefused
-        )));
-        assert!(!is_helper_absent(&io::Error::from(
-            io::ErrorKind::PermissionDenied
-        )));
-    }
-
-    #[test]
-    fn tun_is_active_when_mihomo_reports_enable() {
-        let active = json!({"tun": {"enable": true, "device": "clash-iran"}});
-        assert!(tun_enabled(&active, "clash-iran"));
-        assert!(tun_enabled(&active, "CLASH-IRAN"));
-        // Windows Mihomo commonly echoes Meta or a Wintun path, not clash-iran.
-        assert!(tun_enabled(
-            &json!({"tun": {"enable": true, "device": "Meta"}}),
-            "clash-iran"
-        ));
-        assert!(tun_enabled(
-            &json!({"tun": {"enable": true, "device": ""}}),
-            "clash-iran"
-        ));
-        assert!(tun_enabled(
-            &json!({"tun": {"enable": 1, "device": "Meta"}}),
-            "clash-iran"
-        ));
-        assert!(tun_enabled(
-            &json!({"config": {"tun": {"enable": "true"}}}),
-            "clash-iran"
-        ));
-
-        assert!(!tun_enabled(
-            &json!({"tun": {"enable": false, "device": "clash-iran"}}),
-            "clash-iran"
-        ));
-        assert!(!tun_enabled(&json!({}), "clash-iran"));
-        assert!(tun_enabled(&json!({"tun": {"enable": true}}), "clash-iran"));
-    }
-
-    #[tokio::test]
-    async fn preparation_publishes_only_allowlisted_generation_files() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let paths = paths(directory.path());
-        let backend = WindowsBackend::new(AppConfig::default(), paths.clone());
+            rules_cache_dir: directory.path().join("rules-cache"),
+            mihomo_binary: directory.path().join("mihomo"),
+        };
+        let backend = MacosBackend::new(AppConfig::default(), paths.clone());
         let generation = backend.prepare_runtime().await.expect("prepare");
         let root = paths
-            .generation_staging_dir
+            .user_data_dir
+            .join("runtime")
+            .join("generations")
             .join(generation.generation_id.to_string());
         let names = fs::read_dir(&root)
             .expect("generation")
             .map(|entry| entry.expect("entry").file_name())
             .collect::<std::collections::HashSet<_>>();
-
         // config.yaml, five bundled providers, two custom-direct, two per-client.
         assert_eq!(names.len(), 10);
+        assert!(names.contains(std::ffi::OsStr::new("iran-business-domains.txt")));
+        assert!(names.contains(std::ffi::OsStr::new("iran-cdn-networks.txt")));
         assert!(names.iter().any(|name| {
             let name = name.to_string_lossy();
             name.starts_with("custom-")
@@ -2549,49 +2535,201 @@ mod tests {
         assert!(names.contains(std::ffi::OsStr::new("config.yaml")));
         let config = fs::read_to_string(root.join("config.yaml")).expect("config");
         assert!(config.contains("path: private.txt"));
-        // Mihomo Meta 1.19+ rejects provider paths outside the process workdir.
-        assert!(!config.contains(r"C:\ProgramData"));
-        // strict_route is the Windows-only half of the shared generator.
-        assert!(config.contains("strict-route: true"));
-        assert!(config.contains("find-process-mode: always"));
-        assert!(config.contains("auto-redirect: false"));
-        // Top-level `ipv6: true` (strict-route must not block `::1`, ADR
-        // 0112); only the DNS section stays IPv4-only.
-        assert!(config.contains("ipv6: true"));
-        assert!(config.contains("ipv6: false"));
-        // DoH is pinned to the default client's group (client registry
-        // replaced the fixed "VPN" group name).
-        assert!(config.contains("dns-query#client-"));
-    }
-
-    #[tokio::test]
-    async fn validation_reports_a_missing_mihomo_before_touching_the_helper() {
-        let directory = tempfile::tempdir().expect("tempdir");
-        let backend = WindowsBackend::new(AppConfig::default(), paths(directory.path()));
-        let generation = backend.prepare_runtime().await.expect("prepare");
-        let error = backend
-            .validate_runtime(&generation)
-            .await
-            .expect_err("missing mihomo.exe");
-        assert!(matches!(error, iran_split_core::CoreError::MihomoNotFound));
+        assert!(!config.contains("/var/lib/iran-split/generations/"));
     }
 
     #[test]
-    fn hiddify_candidates_cover_the_packaged_and_installed_layouts() {
-        let candidates = WindowsBackend::hiddify_candidates(std::path::Path::new(r"C:\data"));
-        assert!(candidates
+    fn discovers_installed_hiddify_app_bundle() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let apps = directory.path().join("apps");
+        let bundle = apps.join("Hiddify.app").join("Contents/MacOS");
+        fs::create_dir_all(&bundle).expect("bundle");
+        let executable = bundle.join("Hiddify");
+        fs::write(&executable, b"macho").expect("executable");
+        let found = MacosBackend::discover_hiddify(&AppConfig::default(), directory.path());
+        assert_eq!(found, Some(executable));
+    }
+
+    fn test_paths(directory: &tempfile::TempDir) -> MacosPaths {
+        MacosPaths {
+            socket_path: directory.path().join("helper.sock"),
+            user_data_dir: directory.path().join("user-data"),
+            system_runtime_dir: PathBuf::from("/var/lib/iran-split"),
+            resources_dir: directory.path().join("resources"),
+            rules_cache_dir: directory.path().join("rules-cache"),
+            mihomo_binary: directory.path().join("mihomo"),
+        }
+    }
+
+    /// A Happ instance that can never start: closed port and missing binary.
+    fn unstartable_happ(directory: &tempfile::TempDir) -> ClientInstance {
+        let mut happ = ClientInstance::from_preset(PresetId::Happ);
+        if let ClientConfig::LocalProxy {
+            host,
+            port,
+            executable,
+            ..
+        } = &mut happ.config
+        {
+            *host = "127.0.0.1".into();
+            *port = 1;
+            *executable = ExecutableSetting::Path(directory.path().join("missing-happ"));
+        }
+        happ
+    }
+
+    #[tokio::test]
+    async fn a_required_primary_that_cannot_start_aborts_connect() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let happ = unstartable_happ(&directory);
+        let mut config = AppConfig::default();
+        config.clients.clear();
+        config.default_route = DefaultRoute::client(happ.id);
+        config.clients.push(happ);
+        let backend = MacosBackend::new(config, test_paths(&directory));
+        let error = backend
+            .ensure_enabled_clients(CancellationToken::new())
+            .await;
+        assert!(error.is_err(), "the default-route client must be required");
+    }
+
+    #[tokio::test]
+    async fn an_optional_local_proxy_launch_does_not_wait_for_its_port() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        config.clients.clear();
+        config.default_route = DefaultRoute::Direct;
+        // A binary that exists and exits immediately: the old code waited the
+        // full start timeout for port 1 to open; the new code returns at once.
+        let mut happ = ClientInstance::from_preset(PresetId::Happ);
+        if let ClientConfig::LocalProxy {
+            host,
+            port,
+            executable,
+            start_timeout_seconds,
+            ..
+        } = &mut happ.config
+        {
+            *host = "127.0.0.1".into();
+            *port = 1;
+            *executable = ExecutableSetting::Path(PathBuf::from("/usr/bin/true"));
+            *start_timeout_seconds = 45;
+        }
+        config.clients.push(happ);
+        let backend = MacosBackend::new(config, test_paths(&directory));
+        let started = tokio::time::Instant::now();
+        backend
+            .ensure_enabled_clients(CancellationToken::new())
+            .await
+            .expect("optional launch must not abort connect");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "optional client launch must not block on its port"
+        );
+        assert!(backend.egress_handles.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dead_optional_secondary_does_not_block_connect() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        // Drop the default Hiddify instance so a live dev-host proxy is
+        // never probed; DIRECT keeps every remaining client optional.
+        config.clients.clear();
+        config.default_route = DefaultRoute::Direct;
+        config.clients.push(unstartable_happ(&directory));
+        let backend = MacosBackend::new(config, test_paths(&directory));
+        backend
+            .ensure_enabled_clients(CancellationToken::new())
+            .await
+            .expect("optional client failure must not abort connect");
+        assert!(backend.egress_handles.lock().await.is_empty());
+    }
+
+    #[test]
+    fn recovery_candidates_are_enabled_local_proxies_without_handles() {
+        let mut config = AppConfig::default();
+        let happ = ClientInstance::from_preset(PresetId::Happ);
+        let happ_id = happ.id;
+        let mut disabled = ClientInstance::from_preset(PresetId::V2rayn);
+        disabled.enabled = false;
+        let side_tunnel = ClientInstance::from_preset(PresetId::Windscribe);
+        config.clients.push(happ);
+        config.clients.push(disabled);
+        config.clients.push(side_tunnel);
+
+        // The default Hiddify instance and Happ lack handles; only the
+        // disabled client and the side tunnel are excluded.
+        let candidates = clients_missing_egress(&config, &[]);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|client| client.id == happ_id));
+
+        // A handle from connect (or a previous recovery) removes a candidate.
+        let handled = config
+            .clients
             .iter()
-            .any(|path| path.ends_with("apps/Hiddify/Hiddify.exe")));
-        assert!(candidates
-            .iter()
-            .all(|path| !path.to_string_lossy().contains("..")));
+            .find(|client| client.id == happ_id)
+            .and_then(synthesized_local_handle)
+            .expect("happ handle");
+        let candidates = clients_missing_egress(&config, &[handled]);
+        assert!(!candidates.iter().any(|client| client.id == happ_id));
+    }
+
+    #[tokio::test]
+    async fn recovery_skips_clients_whose_port_is_closed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let paths = MacosPaths {
+            socket_path: directory.path().join("helper.sock"),
+            user_data_dir: directory.path().join("user-data"),
+            system_runtime_dir: PathBuf::from("/var/lib/iran-split"),
+            resources_dir: directory.path().join("resources"),
+            rules_cache_dir: directory.path().join("rules-cache"),
+            mihomo_binary: directory.path().join("mihomo"),
+        };
+        let mut config = AppConfig::default();
+        // Drop the default Hiddify instance: on a dev host a real Hiddify may
+        // be listening, and this test must never probe a live proxy.
+        config.clients.clear();
+        // Port 1 on loopback is never listening in the test environment.
+        let mut happ = ClientInstance::from_preset(PresetId::Happ);
+        if let ClientConfig::LocalProxy { host, port, .. } = &mut happ.config {
+            *host = "127.0.0.1".into();
+            *port = 1;
+        }
+        config.clients.push(happ);
+        let backend = MacosBackend::new(config, paths);
+        let recovered = backend
+            .recover_local_proxy_clients()
+            .await
+            .expect("recovery");
+        assert!(!recovered);
+        assert!(backend.egress_handles.lock().await.is_empty());
+    }
+
+    #[test]
+    fn discovers_happ_when_path_filename_is_lowercase() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = directory.path().join("happ");
+        fs::write(&binary, b"elf").expect("write");
+        let found = discover_local_proxy_binary_in(
+            &PresetId::Happ.spec(),
+            &[directory.path().to_path_buf()],
+            &[],
+        );
+        // macOS default APFS is case-insensitive, so the discovered path may
+        // carry the bypass name's casing rather than the on-disk casing.
+        assert!(found.is_some_and(|path| path.is_file()));
     }
 
     #[test]
     fn discovers_happ_from_a_well_known_install_path() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let binary = directory.path().join("Happ.exe");
-        fs::write(&binary, b"mz").expect("write");
+        let binary = directory.path().join("Happ");
+        // Write a Mach-O 64-bit magic header so `resolve_macos_binary` accepts
+        // the file as a macOS executable (not a Linux ELF).
+        let mut content = 0xfeed_facfu32.to_ne_bytes().to_vec();
+        content.extend_from_slice(&[0u8; 64]);
+        fs::write(&binary, &content).expect("write");
         let found = discover_local_proxy_binary_in(&PresetId::Happ.spec(), &[], &[binary.clone()]);
         assert_eq!(found, Some(binary));
     }
@@ -2603,5 +2741,6 @@ mod tests {
             .next()
             .expect("production source");
         assert!(production.contains("helper_ipc_reply_timeout"));
+        assert!(!production.contains("SIDE_TUNNEL_IPC_TIMEOUT"));
     }
 }

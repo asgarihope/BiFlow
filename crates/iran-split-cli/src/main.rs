@@ -146,6 +146,7 @@ impl PlatformBackend for DemoBackend {
         let running = *self.running.lock().await;
         RuntimeHealth {
             helper: ComponentStatus::new(ComponentPhase::Running, Some("Helper demo".into())),
+            helper_version: None,
             clients: Vec::new(),
             mihomo: ComponentStatus::new(
                 if running {

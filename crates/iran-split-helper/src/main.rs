@@ -48,7 +48,7 @@ fn config_path(arguments: &Arguments) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
@@ -57,6 +57,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Linux helper installation uses install-helper.sh".into());
     }
     iran_split_helper::run_linux(&config_path(&arguments)).await?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    init_tracing();
+    let arguments = Arguments::parse();
+    if arguments.install || arguments.uninstall {
+        return Err("macOS helper installation uses the launchd installer".into());
+    }
+    iran_split_helper::run_macos(&config_path(&arguments)).await?;
     Ok(())
 }
 

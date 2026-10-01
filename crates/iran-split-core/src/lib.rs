@@ -266,6 +266,8 @@ pub struct StackSnapshot {
     pub operation_id: Option<Uuid>,
     pub helper: ComponentStatus,
     #[serde(default)]
+    pub helper_version: Option<String>,
+    #[serde(default)]
     pub clients: Vec<ClientComponentStatus>,
     pub mihomo: ComponentStatus,
     pub tun: ComponentStatus,
@@ -289,6 +291,7 @@ impl Default for StackSnapshot {
             operation_client: None,
             operation_id: None,
             helper: ComponentStatus::default(),
+            helper_version: None,
             clients: Vec::new(),
             mihomo: ComponentStatus::default(),
             tun: ComponentStatus::default(),
@@ -361,6 +364,7 @@ pub struct ReadinessReport {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeHealth {
     pub helper: ComponentStatus,
+    pub helper_version: Option<String>,
     pub clients: Vec<ClientComponentStatus>,
     pub mihomo: ComponentStatus,
     pub tun: ComponentStatus,
@@ -1845,6 +1849,7 @@ impl<B: PlatformBackend> Engine<B> {
         let health = self.backend.connect_progress_health().await;
         self.update(|snapshot| {
             snapshot.helper = health.helper;
+            snapshot.helper_version = health.helper_version;
             snapshot.clients = merge_clients_during_connect(&snapshot.clients, &health.clients);
         });
         tokio::task::yield_now().await;
@@ -2162,6 +2167,7 @@ fn explain_failed_component(status: &mut ComponentStatus, detail: &str) {
 
 fn apply_health(snapshot: &mut StackSnapshot, health: RuntimeHealth) {
     snapshot.helper = health.helper;
+    snapshot.helper_version = health.helper_version;
     snapshot.clients = health.clients;
     snapshot.mihomo = health.mihomo;
     snapshot.tun = health.tun;
@@ -2368,6 +2374,7 @@ mod tests {
             let tun = self.tun.load(Ordering::SeqCst);
             RuntimeHealth {
                 helper,
+                helper_version: None,
                 clients: vec![ClientComponentStatus {
                     exit_ip: None,
                     id: ClientId::parse("11111111-1111-1111-1111-111111111111").expect("uuid"),

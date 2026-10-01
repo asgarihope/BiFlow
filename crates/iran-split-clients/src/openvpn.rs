@@ -26,7 +26,7 @@ impl ClientDriver for OpenVpnDriver {
     fn process_bypass(&self, platform: DriverPlatform) -> Vec<ProcessBypass> {
         let name = match platform {
             DriverPlatform::Windows => "openvpn.exe",
-            DriverPlatform::Linux => "openvpn",
+            DriverPlatform::Linux | DriverPlatform::Macos => "openvpn",
         };
         vec![ProcessBypass {
             name: name.into(),

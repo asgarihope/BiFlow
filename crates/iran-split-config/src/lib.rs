@@ -172,14 +172,49 @@ pub const PRODUCTION_MIXED_PORT: u16 = 17_890;
 pub const DEV_PROFILE_MIXED_PORT: u16 = 17_891;
 pub const PRODUCTION_DNS_PORT: u16 = 1_053;
 pub const DEV_PROFILE_DNS_PORT: u16 = 2_053;
+/// macOS sends DNS queries to the configured nameserver. The router (LAN
+/// resolver) bypasses the TUN and cannot resolve blocked domains, so the
+/// system DNS must point at Mihomo. The system resolver always uses port 53,
+/// so Mihomo must listen on `127.0.0.1:53` (it runs as root via the helper).
+pub const MACOS_DNS_PORT: u16 = 53;
 pub const PRODUCTION_TUN_NAME: &str = "clash-iran";
 pub const DEV_PROFILE_TUN_NAME: &str = "biflow-dev";
+/// macOS `utun` devices must be named `utunN`; the kernel rejects arbitrary
+/// names such as `clash-iran`. A high unit avoids the system's low-numbered
+/// utun adapters (iCloud/Back-to-Mac, other VPNs).
+pub const MACOS_TUN_NAME: &str = "utun9";
 
 impl MihomoConfig {
     /// Move off the installed app's loopback ports and TUN when this process
     /// uses `BIFLOW_DEV_PROFILE`. Returns whether any field changed.
     pub fn isolate_from_installed_app(&mut self) -> bool {
         self.isolate_from_installed_app_if(dev_profile_active())
+    }
+
+    /// On macOS the TUN device name must match the kernel `utunN` convention;
+    /// a stored `clash-iran` (or any non-`utun` name) makes Mihomo fail to
+    /// create the interface and the readiness TUN check never sees it.
+    /// Returns whether the name was rewritten.
+    #[must_use]
+    pub fn normalize_tun_name_for_platform(&mut self) -> bool {
+        if cfg!(target_os = "macos") && !is_valid_macos_tun_name(&self.tun_name) {
+            self.tun_name = MACOS_TUN_NAME.into();
+            return true;
+        }
+        false
+    }
+
+    /// On macOS the system DNS resolver always uses port 53, and the LAN
+    /// resolver bypasses the TUN (so Mihomo's `dns-hijack` never sees it).
+    /// Mihomo must listen on `127.0.0.1:53` so the system DNS can point at
+    /// it; it runs as root via the helper. Returns whether the port changed.
+    #[must_use]
+    pub fn normalize_dns_port_for_platform(&mut self) -> bool {
+        if cfg!(target_os = "macos") && self.dns_port != MACOS_DNS_PORT {
+            self.dns_port = MACOS_DNS_PORT;
+            return true;
+        }
+        false
     }
 
     /// Same remap as [`Self::isolate_from_installed_app`], with the env check
@@ -211,6 +246,17 @@ impl MihomoConfig {
 
 fn dev_profile_active() -> bool {
     std::env::var_os("BIFLOW_DEV_PROFILE").is_some_and(|value| !value.is_empty())
+}
+
+/// A macOS `utun` device name must be `utun` followed by 1-3 decimal digits
+/// (for example `utun9`). Arbitrary names such as `clash-iran` are rejected by
+/// the kernel `com.apple.net.utun` control and Mihomo never creates the TUN.
+#[must_use]
+pub fn is_valid_macos_tun_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix("utun") else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.len() <= 3 && suffix.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Resolvers for Iranian and user-pinned DIRECT domains (not VPN `DoH`).
@@ -567,11 +613,13 @@ impl ConfigStore {
         }
         let mut config: AppConfig = value.try_into()?;
         let isolated = config.mihomo.isolate_from_installed_app();
+        let tun_normalized = config.mihomo.normalize_tun_name_for_platform();
+        let dns_normalized = config.mihomo.normalize_dns_port_for_platform();
         let issues = config.validate();
         if !issues.is_empty() {
             return Err(ConfigError::Validation(issues));
         }
-        if schema < CURRENT_SCHEMA_VERSION || isolated {
+        if schema < CURRENT_SCHEMA_VERSION || isolated || tun_normalized || dns_normalized {
             self.write_atomic(&config)?;
         }
         Ok(config)
@@ -867,6 +915,55 @@ mod tests {
         assert!(custom.isolate_from_installed_app_if(true));
         assert_eq!(custom.controller_port, 19_095);
         assert_eq!(custom.mixed_port, DEV_PROFILE_MIXED_PORT);
+    }
+
+    #[test]
+    fn macos_tun_name_validation_accepts_utun_and_rejects_arbitrary_names() {
+        assert!(is_valid_macos_tun_name("utun9"));
+        assert!(is_valid_macos_tun_name("utun0"));
+        assert!(is_valid_macos_tun_name("utun123"));
+        assert!(!is_valid_macos_tun_name("clash-iran"));
+        assert!(!is_valid_macos_tun_name("biflow-dev"));
+        assert!(!is_valid_macos_tun_name("utun"));
+        assert!(!is_valid_macos_tun_name("utun9999"));
+        assert!(!is_valid_macos_tun_name("utun9a"));
+    }
+
+    #[test]
+    fn macos_normalize_tun_name_rewrites_clash_iran_to_utun() {
+        let mut mihomo = MihomoConfig::default();
+        assert_eq!(mihomo.tun_name, PRODUCTION_TUN_NAME);
+        let changed = mihomo.normalize_tun_name_for_platform();
+        if cfg!(target_os = "macos") {
+            assert!(changed);
+            assert_eq!(mihomo.tun_name, MACOS_TUN_NAME);
+        } else {
+            assert!(!changed);
+            assert_eq!(mihomo.tun_name, PRODUCTION_TUN_NAME);
+        }
+
+        // A manually set utun name is preserved.
+        mihomo.tun_name = "utun7".into();
+        assert!(!mihomo.normalize_tun_name_for_platform());
+        assert_eq!(mihomo.tun_name, "utun7");
+    }
+
+    #[test]
+    fn macos_normalize_dns_port_moves_off_loopback_high_port() {
+        let mut mihomo = MihomoConfig::default();
+        // The production default is a high loopback port; on macOS we need 53.
+        let changed = mihomo.normalize_dns_port_for_platform();
+        if cfg!(target_os = "macos") {
+            assert!(changed);
+            assert_eq!(mihomo.dns_port, MACOS_DNS_PORT);
+        } else {
+            assert!(!changed);
+        }
+
+        // A manually set 53 is preserved on macOS, and untouched elsewhere.
+        mihomo.dns_port = MACOS_DNS_PORT;
+        assert!(!mihomo.normalize_dns_port_for_platform());
+        assert_eq!(mihomo.dns_port, MACOS_DNS_PORT);
     }
 
     #[test]

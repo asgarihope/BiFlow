@@ -334,6 +334,12 @@ impl Supervisor {
         drop(current);
         self.push_log("info", "mihomo_started", BTreeMap::new())
             .await;
+        // On macOS the system resolver queries the configured nameserver, and
+        // the LAN/router DNS bypasses the TUN so Mihomo's `dns-hijack` never
+        // sees it. Point every network service at `127.0.0.1` (Mihomo listens
+        // on port 53 as root) so DNS flows through the TUN.
+        #[cfg(target_os = "macos")]
+        crate::macos::apply_system_dns();
         Ok(status)
     }
 
@@ -445,14 +451,14 @@ impl Supervisor {
     pub async fn cleanup(&self) -> Result<CleanupReport, HelperServiceError> {
         self.stop_all_side_tunnels().await;
         let process_stopped = !self.stop().await?.running;
-        let interface_path = Path::new("/sys/class/net").join(&self.settings.tun_name);
-        if interface_path.exists() {
+        let was_active = interface_exists(&self.settings.tun_name);
+        if was_active {
             #[cfg(unix)]
             delete_owned_interface(&self.settings.tun_name).await?;
             #[cfg(not(unix))]
             delete_owned_interface(&self.settings.tun_name);
         }
-        let tun_removed = !interface_path.exists();
+        let tun_removed = !interface_exists(&self.settings.tun_name);
         let warnings = if tun_removed {
             Vec::new()
         } else {
@@ -461,6 +467,10 @@ impl Supervisor {
                 self.settings.tun_name
             )]
         };
+        // Restore the macOS system DNS (router resolver) now that the TUN is
+        // down; Mihomo's `127.0.0.1:53` listener is gone with the process.
+        #[cfg(target_os = "macos")]
+        crate::macos::restore_system_dns();
         let report = CleanupReport {
             process_stopped,
             tun_removed,
@@ -930,7 +940,7 @@ pub fn redact(input: &str) -> String {
         .into_owned()
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 async fn delete_owned_interface(name: &str) -> Result<(), HelperServiceError> {
     let binary = [Path::new("/usr/sbin/ip"), Path::new("/usr/bin/ip")]
         .into_iter()
@@ -955,16 +965,64 @@ async fn delete_owned_interface(name: &str) -> Result<(), HelperServiceError> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+async fn delete_owned_interface(name: &str) -> Result<(), HelperServiceError> {
+    // Mihomo creates a `utun` device and destroys it when the process exits, so
+    // a leftover interface is rare. `ifconfig <name> delete` removes the
+    // address; the kernel reaps the interface once it has no addresses and no
+    // controlling process.
+    let output = Command::new("/sbin/ifconfig")
+        .args([name, "delete"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(HelperServiceError::Process(
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(1_024)
+                .collect(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(not(unix))]
 fn delete_owned_interface(_name: &str) {}
 
+/// Returns `true` when a network interface with `name` is present.
+#[cfg(target_os = "linux")]
+fn interface_exists(name: &str) -> bool {
+    Path::new("/sys/class/net").join(name).exists()
+}
+
+/// Returns `true` when a network interface with `name` is present. macOS has no
+/// `/sys/class/net`; `ifconfig <name>` exiting successfully is the portable
+/// equivalent.
+#[cfg(not(target_os = "linux"))]
+fn interface_exists(name: &str) -> bool {
+    std::process::Command::new("ifconfig")
+        .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 mod commands;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod linux;
-
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub use linux::run_linux;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::run_macos;
 
 #[cfg(windows)]
 mod windows;

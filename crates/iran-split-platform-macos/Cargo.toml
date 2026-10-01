@@ -1,5 +1,5 @@
 [package]
-name = "iran-split-helper"
+name = "iran-split-platform-macos"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,28 +7,24 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-clap.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
 hex.workspace = true
-ipnet.workspace = true
 iran-split-clients = { path = "../iran-split-clients" }
 iran-split-config = { path = "../iran-split-config" }
+iran-split-core = { path = "../iran-split-core" }
 iran-split-ipc = { path = "../iran-split-ipc" }
-regex.workspace = true
+iran-split-mihomo = { path = "../iran-split-mihomo" }
+iran-split-rules = { path = "../iran-split-rules" }
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-toml.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-nix.workspace = true
-libc.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-iran-split-helper-winacl = { path = "../iran-split-helper-winacl" }
 
 [dev-dependencies]
 tempfile.workspace = true

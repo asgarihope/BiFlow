@@ -87,6 +87,7 @@ pub enum ClientError {
 pub enum DriverPlatform {
     Linux,
     Windows,
+    Macos,
 }
 
 /// Starts, stops, and describes one catalog preset.

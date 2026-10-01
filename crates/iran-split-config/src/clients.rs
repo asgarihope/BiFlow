@@ -164,6 +164,7 @@ pub enum PresetStatus {
 pub struct PresetDownloads {
     pub linux: &'static str,
     pub windows: &'static str,
+    pub macos: &'static str,
 }
 
 /// One shipped catalog row.
@@ -177,6 +178,7 @@ pub struct PresetSpec {
     pub default_port: Option<u16>,
     pub linux_bypass: &'static [&'static str],
     pub windows_bypass: &'static [&'static str],
+    pub macos_bypass: &'static [&'static str],
     pub install_hint: &'static str,
     pub downloads: PresetDownloads,
 }
@@ -190,10 +192,12 @@ const HIDDIFY_SPEC: PresetSpec = PresetSpec {
     default_port: Some(12_334),
     linux_bypass: &["hiddify", "*Hiddify*"],
     windows_bypass: &["hiddify.exe", "Hiddify.exe", "HiddifyNext.exe", "*Hiddify*"],
+    macos_bypass: &["Hiddify", "*Hiddify*"],
     install_hint: "Install Hiddify Next and keep its mixed port on loopback.",
     downloads: PresetDownloads {
         linux: "https://github.com/hiddify/hiddify-app/releases/latest",
         windows: "https://github.com/hiddify/hiddify-app/releases/latest",
+        macos: "https://github.com/hiddify/hiddify-app/releases/latest",
     },
 };
 
@@ -206,11 +210,13 @@ const OPENVPN_SPEC: PresetSpec = PresetSpec {
     default_port: None,
     linux_bypass: &[],
     windows_bypass: &[],
+    macos_bypass: &[],
     install_hint:
         "Install OpenVPN and choose a .ovpn profile. BiFlow never lets it take the default route.",
     downloads: PresetDownloads {
         linux: "https://openvpn.net/community-downloads/",
         windows: "https://openvpn.net/community-downloads/",
+        macos: "https://openvpn.net/community-downloads/",
     },
 };
 
@@ -237,10 +243,12 @@ const HAPP_SPEC: PresetSpec = PresetSpec {
         "xray.exe",
         "v2ray.exe",
     ],
+    macos_bypass: &["Happ", "*Happ*", "sing-box", "xray", "v2ray"],
     install_hint: "Run Happ and expose a local SOCKS or mixed port (default 10808).",
     downloads: PresetDownloads {
         linux: "https://www.happ.su/main/download",
         windows: "https://www.happ.su/main/download",
+        macos: "https://www.happ.su/main/download",
     },
 };
 
@@ -253,10 +261,12 @@ const V2RAYN_SPEC: PresetSpec = PresetSpec {
     default_port: Some(10_808),
     linux_bypass: &["v2rayN", "v2rayn", "xray", "v2ray"],
     windows_bypass: &["v2rayN.exe", "v2rayn.exe", "xray.exe", "v2ray.exe"],
+    macos_bypass: &["v2rayN", "xray", "v2ray"],
     install_hint: "Run v2rayN and keep the local SOCKS port (default 10808) on loopback.",
     downloads: PresetDownloads {
         linux: "https://github.com/2dust/v2rayN/releases/latest",
         windows: "https://github.com/2dust/v2rayN/releases/latest",
+        macos: "https://github.com/2dust/v2rayN/releases/latest",
     },
 };
 
@@ -269,10 +279,12 @@ const NEKORAY_SPEC: PresetSpec = PresetSpec {
     default_port: Some(2080),
     linux_bypass: &["nekoray", "nekobox", "nekobox_core"],
     windows_bypass: &["nekoray.exe", "nekobox.exe", "nekobox_core.exe"],
+    macos_bypass: &["nekoray", "nekobox", "nekobox_core"],
     install_hint: "Run Nekoray / NekoBox and expose its mixed SOCKS port.",
     downloads: PresetDownloads {
         linux: "https://github.com/MatsuriDayo/nekoray/releases/latest",
         windows: "https://github.com/MatsuriDayo/nekoray/releases/latest",
+        macos: "https://github.com/MatsuriDayo/nekoray/releases/latest",
     },
 };
 
@@ -285,10 +297,12 @@ const SHADOWSOCKS_SPEC: PresetSpec = PresetSpec {
     default_port: Some(1080),
     linux_bypass: &["ss-local", "shadowsocks", "sslocal"],
     windows_bypass: &["ss-local.exe", "shadowsocks.exe", "sslocal.exe"],
+    macos_bypass: &["ss-local", "shadowsocks", "sslocal"],
     install_hint: "Run a local Shadowsocks client and point BiFlow at its SOCKS port.",
     downloads: PresetDownloads {
         linux: "https://github.com/shadowsocks/shadowsocks-rust/releases/latest",
         windows: "https://github.com/shadowsocks/shadowsocks-windows/releases/latest",
+        macos: "https://github.com/shadowsocks/shadowsocks-rust/releases/latest",
     },
 };
 
@@ -301,10 +315,12 @@ const WIREGUARD_SPEC: PresetSpec = PresetSpec {
     default_port: None,
     linux_bypass: &[],
     windows_bypass: &[],
+    macos_bypass: &[],
     install_hint: "WireGuard will use the same side-tunnel driver as OpenVPN. The driver is not in this version.",
     downloads: PresetDownloads {
         linux: "https://www.wireguard.com/install/",
         windows: "https://www.wireguard.com/install/",
+        macos: "https://www.wireguard.com/install/",
     },
 };
 
@@ -317,10 +333,12 @@ const WINDSCRIBE_SPEC: PresetSpec = PresetSpec {
     default_port: None,
     linux_bypass: &[],
     windows_bypass: &[],
+    macos_bypass: &[],
     install_hint: "Generate an OpenVPN profile with your Windscribe service credentials at build.windscribe.com and choose the .ovpn here. Do not run the Windscribe GUI at the same time.",
     downloads: PresetDownloads {
         linux: "https://windscribe.com/getconfig/openvpn",
         windows: "https://windscribe.com/getconfig/openvpn",
+        macos: "https://windscribe.com/getconfig/openvpn",
     },
 };
 
