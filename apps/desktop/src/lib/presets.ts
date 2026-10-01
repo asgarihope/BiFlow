@@ -14,6 +14,7 @@ export type PresetStatus = "working" | "catalog" | "unsupported";
 export interface PresetDownloads {
   linux: string;
   windows: string;
+  macos: string;
 }
 
 export interface PresetSpec {
@@ -37,6 +38,7 @@ export const PRESETS: PresetSpec[] = [
     downloads: {
       linux: "https://github.com/hiddify/hiddify-app/releases/latest",
       windows: "https://github.com/hiddify/hiddify-app/releases/latest",
+      macos: "https://github.com/hiddify/hiddify-app/releases/latest",
     },
   },
   {
@@ -50,6 +52,7 @@ export const PRESETS: PresetSpec[] = [
     downloads: {
       linux: "https://openvpn.net/community-downloads/",
       windows: "https://openvpn.net/community-downloads/",
+      macos: "https://openvpn.net/community-downloads/",
     },
   },
   {
@@ -63,6 +66,7 @@ export const PRESETS: PresetSpec[] = [
     downloads: {
       linux: "https://www.happ.su/main/download",
       windows: "https://www.happ.su/main/download",
+      macos: "https://www.happ.su/main/download",
     },
   },
   {
@@ -76,6 +80,7 @@ export const PRESETS: PresetSpec[] = [
     downloads: {
       linux: "https://github.com/2dust/v2rayN/releases/latest",
       windows: "https://github.com/2dust/v2rayN/releases/latest",
+      macos: "https://github.com/2dust/v2rayN/releases/latest",
     },
   },
   {
@@ -88,6 +93,7 @@ export const PRESETS: PresetSpec[] = [
     downloads: {
       linux: "https://github.com/MatsuriDayo/nekoray/releases/latest",
       windows: "https://github.com/MatsuriDayo/nekoray/releases/latest",
+      macos: "https://github.com/MatsuriDayo/nekoray/releases/latest",
     },
   },
   {
@@ -102,6 +108,7 @@ export const PRESETS: PresetSpec[] = [
       linux: "https://github.com/shadowsocks/shadowsocks-rust/releases/latest",
       windows:
         "https://github.com/shadowsocks/shadowsocks-windows/releases/latest",
+      macos: "https://github.com/shadowsocks/shadowsocks-rust/releases/latest",
     },
   },
   {
@@ -115,6 +122,7 @@ export const PRESETS: PresetSpec[] = [
     downloads: {
       linux: "https://www.wireguard.com/install/",
       windows: "https://www.wireguard.com/install/",
+      macos: "https://www.wireguard.com/install/",
     },
   },
   {
@@ -128,6 +136,7 @@ export const PRESETS: PresetSpec[] = [
     downloads: {
       linux: "https://windscribe.com/getconfig/openvpn",
       windows: "https://windscribe.com/getconfig/openvpn",
+      macos: "https://windscribe.com/getconfig/openvpn",
     },
   },
 ];
@@ -138,7 +147,13 @@ export function presetById(id: PresetId): PresetSpec {
 
 /** Official vendor download page for the current desktop platform. */
 export function downloadUrlFor(spec: PresetSpec, platform: string): string {
-  return platform === "windows" ? spec.downloads.windows : spec.downloads.linux;
+  if (platform === "windows") {
+    return spec.downloads.windows;
+  }
+  if (platform === "macos") {
+    return spec.downloads.macos;
+  }
+  return spec.downloads.linux;
 }
 
 export type PresetDownloadLabel =

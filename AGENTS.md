@@ -283,6 +283,33 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 - On Windows, top-level `ipv6: false` makes Mihomo drop the TUN inet6 address. sing-tun `strict-route` then installs an unconditional WFP "block ipv6" connect filter that only exempts Mihomo, so `localhost` -> `::1` fails instantly while connected. A route exclusion cannot fix a WFP block. Keep top-level `ipv6: true` on Windows and restrict AAAA through `dns.ipv6: false` instead (ADR 0112).
 
+- On macOS the LAN resolver (the router, e.g. `192.168.31.1`) is on the
+  directly-connected `en0` subnet, so DNS queries to it route around the
+  TUN and Mihomo's `dns-hijack: any:53` never sees them; the router then
+  cannot resolve blocked domains (facebook.com → "No answer") and foreign
+  sites never open even though Hiddify is up. Mihomo runs as root via the
+  helper, so it can bind `127.0.0.1:53`. `MihomoConfig::normalize_dns_port_for_platform`
+  rewrites `dns_port` to `MACOS_DNS_PORT = 53` at config load (alongside
+  `normalize_tun_name_for_platform` → `utun9`), and the helper's
+  `apply_system_dns`/`restore_system_dns` snapshot every network service's
+  DNS via `networksetup`, point them all at `127.0.0.1` on Connect, and
+  restore the snapshot on Disconnect. The helper is the only thing that
+  can hold port 53 and re-point the system resolver; the desktop cannot.
+  Ship a helper-version field in `RuntimeHealth`/`StackSnapshot` so a new
+  app with DNS code auto-reinstalls an older installed helper on Connect
+  (`prepare_stack_start` version-mismatch check) instead of silently
+  using the stale daemon. The helper daemon runs under launchd with a
+  minimal environment, so `Command::new("networksetup")` can fail PATH
+  lookup silently and leave the system DNS on the router; use the
+  absolute path `/usr/sbin/networksetup` in the helper's DNS helpers and
+  log a `helper.dns_apply_empty` warning when no services are enumerated.
+  A macOS `.app` bundle (Hiddify is Flutter) can take over a minute to
+  initialize Launch Services, build the UI, and open the proxy port; the
+  45s default `start_timeout_seconds` is too short on a cold start, so
+  `client_start_timeout` doubles the budget on macOS and
+  `launch_local_proxy_if_needed` uses that deadline instead of the raw
+  configured seconds.
+
 - Older Pillow has no `Image.Resampling`; generate icons with `Image.LANCZOS` / `Image.BICUBIC`.
 - Inner `#![allow(...)]` attributes must be the first item in a Rust module, before `use`.
 - Vitest coverage config requires `provider: "v8"` (or `istanbul`) in this Vite version.
@@ -402,6 +429,25 @@ already in progress"`. Cache the last `UpdateInfo` (never log asset URLs).
 - On Linux the running Mihomo workdir under `/var/lib/iran-split` is root-only. A desktop read of the overlaid `config.yaml` fails with `EACCES`, so every Live apply failed and client recovery retried every 10 s. Send the desktop's staged copy of the same generation (the helper verifies its SHA-256). Each staged generation is ~1 MB: prune staging to the newest few before creating one (ADR 0111).
 - A Windows Connect that dies at Mihomo readiness with `error sending request for url` is not an internal server error. `CoreError::Platform` maps to `errors.internal` in the UI; map a readiness timeout to `ControllerTimeout`. The controller client must use `no_proxy()` or Hiddify's HTTP proxy intercepts `127.0.0.1:19090`. The helper must not `env_clear()` Windows Mihomo down to PATH-only — restore `SYSTEMROOT` (and spawn with `CREATE_NO_WINDOW`), wait briefly for an immediate exit, and ship `wintun.dll` next to `mihomo.exe`.
 - A later Windows field log reached `ready: 7` / `rules_loaded: 65734` and then rolled Mihomo back with "process or TUN disappeared". `GET /configs` is still the TUN authority (no adapter enumeration), but `tun.device` on Windows is often `Meta` or empty — treat truthy `tun.enable` as active, retry the post-readiness process/TUN check for 5s, and split the error. Generate Windows YAML like clash-master: `find-process-mode: always`, `ipv6: false`, `auto-redirect: false`, DoH `#VPN`.
+- macOS `utun` devices must be named `utunN`; the kernel `com.apple.net.utun`
+  control rejects arbitrary names such as `clash-iran`, so Mihomo never
+  creates the TUN and the readiness check sees `mihomo.tun_or_process_missing`
+  even though the controller is ready. Normalize `mihomo.tun_name` to `utun9`
+  on macOS at config load time (`MihomoConfig::normalize_tun_name_for_platform`,
+  `is_valid_macos_tun_name`), and detect the TUN through `GET /configs`
+  `tun.enable` — the live `utun` device name is kernel-assigned and need not
+  equal the configured name, so `ifconfig <name>` is unreliable (mirror the
+  Windows backend, ADR 0104). Launch a `.app` bundle (Hiddify/Happ) through
+  `open <bundle>.app` via Launch Services, not the inner Mach-O binary
+  directly; running the inner executable starts the process but the
+  Flutter/Electron app often never opens its proxy port because it expects
+  the bundle environment (`enclosing_app_bundle`).
+- The privileged helper validates `mihomo_sha256` on startup and refuses to
+  serve with an empty hash (`UnsafeConfig("mihomo_sha256 must be lowercase
+SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
+  desktop times out with `helper.install_timeout`. `install_macos` must
+  compute `sha256_file(&mihomo_stage)` and write the real digest into
+  `helper.toml`, not an empty string (mirror `install_linux`).
 - An interrupted `cargo test`/`clippy` can leave `corrupt metadata` in `target/debug/deps/*.rmeta`. Delete only the file rustc names (and its sibling `.rlib`) and rebuild that crate. Do not `cargo clean`.
 - A `tokio::sync::watch` subscriber misses intermediate `operation_stage`
   values when several `update()` calls run in one worker poll. Yield after
