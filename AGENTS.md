@@ -281,7 +281,29 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 - A Windows diagnostic PowerShell run with `-File <temp .ps1>` can exit 1 in milliseconds with no stdout (execution policy set by GPO, or temp-file access), and a stdout-only runner then logs a bare exit code. Run scripts with `-EncodedCommand` (UTF-16LE Base64), force UTF-8 output, and keep the first stderr line in the error (ADR 0110).
 
-- On Windows, top-level `ipv6: false` makes Mihomo drop the TUN inet6 address. sing-tun `strict-route` then installs an unconditional WFP "block ipv6" connect filter that only exempts Mihomo, so `localhost` -> `::1` fails instantly while connected. A route exclusion cannot fix a WFP block. Keep top-level `ipv6: true` on Windows and restrict AAAA through `dns.ipv6: false` instead (ADR 0112).
+- On Windows, top-level `ipv6: false` makes Mihomo drop the TUN inet6 address. sing-tun `strict-route` then installs an unconditional WFP "block ipv6" connect filter that only exempts Mihomo, so `localhost` -> `::1` fails instantly while connected. A route exclusion cannot fix a WFP block. Keep top-level `ipv6: true` on Windows and restrict AAAA through `dns.ipv6: false` instead (ADR 0112). Mihomo v1.19.29 does **not** apply `inet6-address` to the Wintun adapter even when it is in the config (`GET /configs` reports `inet4-address` but no `inet6-address`, adapter only gets link-local `fe80::`), so `strict-route: true` still installs the block filter and `::1` stays refused. Windows must use `strict-route: false` until a Mihomo build that actually sets the inet6 address is available; `dns.ipv6: false` keeps the IPv6 leak surface minimal (ADR 0112).
+- `spawn_mihomo` uses `kill_on_drop(false)` so connectivity survives a helper crash, but when the helper restarts (reboot, reinstall, new session) `self.child` is empty and the previous Mihomo is an orphan still holding the controller port and TUN adapter. The new Mihomo cannot bind `127.0.0.1:19090`, the desktop silently talks to the stale process, and a new config (e.g. `inet6-address`) is never applied. The helper must `kill_orphaned_mihomo` (`taskkill /F /IM mihomo.exe` / `pkill -x mihomo`) before every spawn to reclaim the port and adapter (ADR 0112).
+- Sniffer `override-destination: true` with fake-ip DNS breaks IP-based TLS connections that carry an SNI. kubectl connecting to a cluster API IP (78.109.203.123:443) with a `tls-server-name` SNI has its destination overridden to the SNI's fake-ip (198.18.x.x), so even a `PROCESS-NAME,kubectl.exe,DIRECT` rule connects to the fake-ip and the TLS handshake fails with EOF. Generate `override-destination: false` so the connection keeps its original IP; domain-based rules still use the sniffed SNI (ADR 0112).
+- `ipv6: true` alone is not enough on Mihomo v1.19.29: `GET /configs`
+  reported `inet4-address` but no `inet6-address`, so the TUN had no inet6
+  address, strict-route still installed the WFP "block ipv6" filter, and
+  `loopback_ipv6_blocked` (with `client_ipv4_only_but_localhost_prefers_ipv6`)
+  persisted on 6.2.51. Emit `tun.inet6-address: fdfe:dcba:9876::1/126`
+  explicitly so the TUN keeps its inet6 address and the block filter is
+  never installed. The user must Disconnect/Connect once to recreate the
+  TUN with the new address (ADR 0112).
+- Node 26 ships an experimental `localStorage` global that stays
+  `undefined` unless `--localstorage-file` is passed, and jsdom 26 defers
+  to it instead of providing its own, so `window.localStorage` is also
+  absent under vitest. `i18n/config.ts` read the saved language at
+  module-load time, so every frontend test failed with "Cannot read
+  properties of undefined (reading 'getItem')". Install a minimal
+  in-memory `Storage` shim from a `setupFiles` entry that runs _before_
+  `src/test/setup.ts` (ES module imports are hoisted, so the shim must
+  live in its own file listed first), and guard the i18n read with
+  `typeof localStorage !== "undefined"`. Keep the shim returning
+  `string | undefined` (not `false` from `&&`) so the `lng` option stays
+  typed `string | undefined`.
 
 - On macOS the LAN resolver (the router, e.g. `192.168.31.1`) is on the
   directly-connected `en0` subnet, so DNS queries to it route around the

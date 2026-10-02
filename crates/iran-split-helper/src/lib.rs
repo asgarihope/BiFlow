@@ -525,11 +525,40 @@ impl Supervisor {
     }
 }
 
+/// Kills any Mihomo process the helper is not tracking.
+///
+/// `spawn_mihomo` uses `kill_on_drop(false)` so connectivity survives a helper
+/// crash. When the helper restarts (machine reboot, reinstall, or a new
+/// desktop session), `self.child` is empty and the previous Mihomo is now an
+/// orphan holding the controller port and the TUN adapter. The new Mihomo
+/// then fails to bind and the desktop silently talks to the stale process.
+/// This runs before every spawn to reclaim the port and the adapter.
+fn kill_orphaned_mihomo(binary: &Path) {
+    let Some(name) = binary.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let mut command = if cfg!(windows) {
+        let mut c = std::process::Command::new("taskkill");
+        c.args(["/F", "/IM", name]);
+        c
+    } else {
+        let mut c = std::process::Command::new("pkill");
+        c.args(["-x", name]);
+        c
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = command.status();
+}
+
 fn spawn_mihomo(
     settings: &HelperSettings,
     generation_root: &Path,
     config_path: &Path,
 ) -> Result<Child, HelperServiceError> {
+    kill_orphaned_mihomo(&settings.mihomo_binary);
     let mut command = Command::new(&settings.mihomo_binary);
     command
         .arg("-d")
@@ -1104,6 +1133,20 @@ tun_name = "clash-iran"
         set_file_permissions(path);
         set_directory_permissions(path);
         delete_owned_interface("unused");
+    }
+
+    /// `kill_orphaned_mihomo` must not panic when no matching process exists.
+    /// It swallows the non-zero exit from `taskkill`/`pkill` and returns, so a
+    /// fresh helper can reclaim the controller port even when no orphan is
+    /// running.
+    #[test]
+    fn kill_orphaned_mihomo_swallows_missing_process() {
+        let name = if cfg!(windows) {
+            "biflow-test-no-such-process-9f3a.exe"
+        } else {
+            "biflow-test-no-such-process-9f3a"
+        };
+        kill_orphaned_mihomo(Path::new(name));
     }
 
     #[cfg(windows)]
