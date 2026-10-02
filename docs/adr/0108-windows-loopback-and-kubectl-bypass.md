@@ -13,8 +13,15 @@ must remain usable without disconnecting BiFlow.
 ## Decision
 
 - Exclude IPv4 and IPv6 loopback destinations (`127.0.0.0/8` and `::1/128`)
-  from Windows TUN routes. These addresses stay local and do not enter Mihomo.
-- Keep the route exclusion Windows-only. Linux routing is unchanged.
+  from Windows and macOS TUN routes. These addresses stay local and do not
+  enter Mihomo.
+- Keep the route exclusion off Linux. Linux routing is unchanged (`lo`
+  already wins over the TUN default). macOS needs the same exclusion as
+  Windows because the helper redirects system DNS to Mihomo; a `localhost`
+  fake-ip then collides with `private.txt` and local dev servers
+  (`http://localhost:4200`) never reach the real listener.
+- Put `localhost` and `+.localhost` in `fake-ip-filter` on every platform.
+  `+.local` does not cover `localhost`.
 - Application routes, including `kubectl.exe`, are configured by the user in
   List Management (ADR 0109) instead of being hard-coded to DIRECT.
 

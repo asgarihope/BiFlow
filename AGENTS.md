@@ -269,7 +269,7 @@ If a required command fails or emits a warning from project code, fix it in the 
 - Values read from Windows-edited config files in shell scripts must strip a trailing carriage return before passing them to tools; rustup rejects `1.88.0\r` as an invalid toolchain. Keep build-script contract tests for this normalization.
 - Windscribe profiles can retain a mixed `ncp-ciphers` list containing AES-256-CBC even when BiFlow passes AEAD-only `--data-ciphers`. On Windows OpenVPN 2.7 this disables ovpn-dco and can fall back to TAP, which has no usable gateway. Drop `ncp-ciphers` only from the Windows sanitized temporary copy and keep regression fixtures for Windows removal and Linux preservation (ADR 0106).
 - Git Bash on Windows does not resolve `pnpm.cmd` as `pnpm`. The pre-commit hook must use `pnpm` when present and fall back to `pnpm.cmd`, with a script contract test, so the CI-mirror frontend gate still runs.
-- Windows TUN `strict-route` can disrupt localhost services independently of Mihomo's DIRECT rules. Put loopback CIDRs in `tun.route-exclude-address`; configure `kubectl.exe` and other app process routes through List Management rather than hard-coding their outbound (ADRs 0108–0109).
+- Windows TUN `strict-route` and macOS TUN `auto-route` can disrupt localhost services independently of Mihomo's DIRECT rules. Put loopback CIDRs in `tun.route-exclude-address` on both; keep Linux unchanged. Also put `localhost` and `+.localhost` in `fake-ip-filter` — `+.local` does not cover `localhost`, and on macOS the helper points system DNS at Mihomo so the name can receive a `198.18.0.0/16` fake-ip that then collides with `private.txt` (witness: `http://localhost:4200`). Configure `kubectl.exe` and other app process routes through List Management rather than hard-coding their outbound (ADRs 0108–0109).
 - When extending `RoutePinsDocument`, also extend `RawPinsDocument` and every explicit struct initializer; use `#[serde(default)]` so existing saved rule files remain readable.
 - `getByText("1 running", { exact: true })` can match multiple application rows; scope repeated values to a row or select a locator with `.first()` in Playwright assertions.
 - A missing Playwright Chromium executable is an environment setup failure. Install it with `pnpm exec playwright install chromium`, then rerun the e2e command.
@@ -293,7 +293,11 @@ If a required command fails or emits a warning from project code, fix it in the 
   `normalize_tun_name_for_platform` → `utun9`), and the helper's
   `apply_system_dns`/`restore_system_dns` snapshot every network service's
   DNS via `networksetup`, point them all at `127.0.0.1` on Connect, and
-  restore the snapshot on Disconnect. The helper is the only thing that
+  restore the snapshot on Disconnect. That same redirect is why
+  `localhost` must skip fake-ip (`fake-ip-filter: localhost`, `+.localhost`)
+  and why macOS TUN must `route-exclude-address` `127.0.0.0/8` and `::1/128`:
+  otherwise `http://localhost:4200` resolves to `198.18.0.0/16` and never
+  reaches the real loopback listener. The helper is the only thing that
   can hold port 53 and re-point the system resolver; the desktop cannot.
   Ship a helper-version field in `RuntimeHealth`/`StackSnapshot` so a new
   app with DNS code auto-reinstalls an older installed helper on Connect
@@ -308,7 +312,11 @@ If a required command fails or emits a warning from project code, fix it in the 
   45s default `start_timeout_seconds` is too short on a cold start, so
   `client_start_timeout` doubles the budget on macOS and
   `launch_local_proxy_if_needed` uses that deadline instead of the raw
-  configured seconds.
+  configured seconds. Clearing a Hiddify system proxy on macOS must set
+  every `networksetup` proxy kind to `off`; replaying the snapshot's
+  `*_enabled` flags leaves HTTP/SOCKS pointed at Hiddify, and the browser
+  then returns 502 for `localhost` (ADR 0062). Use `/usr/sbin/networksetup`
+  in the desktop backend too — a GUI `PATH` can omit `/usr/sbin`.
 
 - Older Pillow has no `Image.Resampling`; generate icons with `Image.LANCZOS` / `Image.BICUBIC`.
 - Inner `#![allow(...)]` attributes must be the first item in a Rust module, before `use`.
@@ -380,7 +388,7 @@ If a required command fails or emits a warning from project code, fix it in the 
 - `cargo fmt --all --check` is the first Rust CI step and part of the done gate. Clippy and tests can pass while rustfmt still wants a one-line `.and_then` or a wrapped `assert!`. Run the check before calling the change done; apply `cargo fmt --all` in the same change if it fails.
 - Tauri 2.5 AppImage bundling downloads `AppRun-x86_64` with ureq/rustls. GitHub can close TLS without `close_notify`, which rustls reports as `peer closed connection without sending TLS close_notify`. Prefetch the tools into `~/.cache/tauri` with `curl --retry` (`scripts/prefetch-appimage-tools.sh`) before `tauri build`; Tauri skips the download when the files already exist.
 - `bundle.createUpdaterArtifacts` plus a committed updater public key makes local `tauri build` fail with `A public key has been found, but no private key` after the packages already exist. When `TAURI_SIGNING_PRIVATE_KEY` is unset, `build.sh` merges `createUpdaterArtifacts: false` so unsigned local packages still finish. GitHub Release signing that fails with `incorrect updater private key password: Missing comment in secret key` is a secret-format or password mismatch, not a bundler bug: the NSIS/deb/AppImage already exist. Use repository secrets (not environment secrets); store the Base64 private key from `pnpm tauri signer generate`; set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` only when the key was generated with a password. Do not export an empty password env var at workflow scope. Validate with `scripts/prepare-tauri-signing.mjs --require --verify-sign` before `tauri-action`. Invoke the Tauri CLI as `node node_modules/@tauri-apps/cli/tauri.js`; `spawn("pnpm")` is `ENOENT` on Windows runners. After rotating keys, commit the new `plugins.updater.pubkey` in the same change.
-- `pnpm tauri build --bundles deb,appimage` always rebuilds the frontend, the release binary, and both packages. Split `build.sh` into compile/deb/appimage/collect (and compile/nsis/collect on Windows). Skip a stage when this version's artifact already exists; `--from STAGE` starts at the failed stage; `--force` rebuilds all. Skip `beforeBuildCommand` when `apps/desktop/dist/index.html` is present, and prefetch AppImage tools only in the AppImage stage.
+- `pnpm tauri build --bundles deb,appimage` always rebuilds the frontend, the release binary, and both packages. Split `build.sh` into compile/deb/appimage/collect (and compile/nsis/collect on Windows). Skip a stage when this version's artifact already exists; `--from STAGE` starts at the failed stage; `--force` rebuilds all. Skip `beforeBuildCommand` when `apps/desktop/dist/index.html` is present, and prefetch AppImage tools only in the AppImage stage. macOS `bundle_dmg.sh --skip-jenkins` writes the `.dmg` into cwd and `hdiutil convert` fails with `File exists` if a leftover from the Finder-AppleScript attempt is still there; delete `rw.*.dmg` plus the versioned name and run the fallback from `target/release/bundle/dmg` so `macos_dmg_path` matches.
 - `set -e` treats a trailing `[[ -f missing ]] && log` as a failed function. `print_summary` must use `if` so a Linux-only package run does not exit 1 after writing artifacts.
 - WebKitGTK 2.44+ DMA-BUF rendering paints a blank Tauri window on VMware SVGA and NVIDIA while JavaScript and IPC still run. Set `WEBKIT_DISABLE_DMABUF_RENDERER=1` before GTK starts; also set `WEBKIT_DISABLE_COMPOSITING_MODE=1` on virtual/NVIDIA GPUs and `LIBGL_ALWAYS_SOFTWARE=1` on virtual machines. Workspace `unsafe_code = "forbid"` blocks `env::set_var`, so `exec()` the process with those variables instead of `Command::status()`-waiting on a child (that leftover parent keeps a terminal open). Do not wait until after `tauri::Builder::build`. Closing the window leaves the process in the tray; `tauri-plugin-single-instance` then shows that old window when a new package is launched. Include the full `X.Y.Z` version in the Linux D-Bus id (`app.biflow.desktop.v1_2_6`) so a newly built package is not swallowed by an older tray instance. The plugin `semver` feature only suffixes the major version and does not separate 1.2.2 from 1.2.5.
 - A Windows GUI exe without `#![cfg_attr(windows, windows_subsystem = "windows")]` is a console binary, so Explorer and NSIS open a cmd window behind the UI. Put that attribute on `src-tauri/src/main.rs` and `iran-split-helper`; logs already go to `debug.log`. Pin Linux `.desktop` `Terminal=false` via `bundle.linux.deb.desktopTemplate`.

@@ -870,8 +870,15 @@ build_macos() {
       dmg_script="${dmg_dir}/bundle_dmg.sh"
       app_dir="${TARGET_DIR}/release/bundle/macos"
       [[ -f "${dmg_script}" ]] || die "dmg bundle script is missing: ${dmg_script}"
-      rm -f "${app_dir}"/rw.*.dmg "${dmg_dir}"/rw.*.dmg "${dmg_dir}"/*.dmg 2>/dev/null || true
-      ( cd -- "${PROJECT_DIR}" && bash "${dmg_script}" --skip-jenkins \
+      # bundle_dmg.sh writes <name>.dmg into cwd and `hdiutil convert`
+      # fails with "File exists" if a leftover from the first attempt is
+      # still there. Run from the Tauri dmg dir so macos_dmg_path matches.
+      rm -f "${PROJECT_DIR}/$(macos_dmg_name)" \
+        "${PROJECT_DIR}"/rw.*.dmg \
+        "${app_dir}"/rw.*.dmg \
+        "${dmg_dir}"/rw.*.dmg \
+        "${dmg_dir}/$(macos_dmg_name)"
+      ( cd -- "${dmg_dir}" && bash "${dmg_script}" --skip-jenkins \
           "$(macos_dmg_name)" "${app_dir}" ) \
         || die "bundle_dmg.sh --skip-jenkins failed"
     fi

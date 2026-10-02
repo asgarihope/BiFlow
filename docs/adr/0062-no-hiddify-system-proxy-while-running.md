@@ -6,8 +6,9 @@ Accepted
 
 ## Context
 
-Hiddify sets the desktop system proxy (GNOME/KDE on Linux, WinINET on Windows)
-to its own mixed port when it starts or reconnects. Browsers honor that proxy
+Hiddify sets the desktop system proxy (GNOME/KDE on Linux, WinINET on
+Windows, `networksetup` on macOS) to its own mixed port when it starts or
+reconnects. Browsers honor that proxy
 and send every request to Hiddify over loopback, which the TUN never sees, so
 Mihomo's split routing is bypassed entirely: DIRECT domains exit through the
 tunnel's foreign IP and Iranian hosts refuse or time out.
@@ -36,6 +37,10 @@ every Pause → Resume cycle.
 - `PlatformBackend::clear_hiddify_system_proxy` now returns whether something
   was cleared so the engine can log with evidence. Non-Hiddify (corporate)
   proxies are untouched, as before.
+- On macOS, `apply_disabled` must pass `off` for HTTP, HTTPS, and SOCKS. The
+  first port replayed each service's `*_enabled` flag from the snapshot, so
+  "clear" left Hiddify's proxy up. Safari/Chrome then sent `localhost` through
+  Hiddify and got HTTP 502 even though the TUN loopback path was fine.
 
 ## Consequences
 

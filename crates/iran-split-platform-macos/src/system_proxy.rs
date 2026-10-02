@@ -15,6 +15,10 @@ use std::{
 use tokio::process::Command;
 use tracing::{info, warn};
 
+/// Absolute path: a GUI `PATH` can omit `/usr/sbin`, and then every
+/// `networksetup` call silently looks like "no proxy configured".
+const NETWORKSETUP: &str = "/usr/sbin/networksetup";
+
 /// One network service's proxy configuration, as reported by `networksetup`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ServiceProxy {
@@ -109,7 +113,7 @@ pub async fn restore(persist: &Path) -> Result<(), CoreError> {
 
 /// Reads the proxy state of every network service.
 async fn read_current() -> Result<Option<Snapshot>, CoreError> {
-    if !which("networksetup") {
+    if !Path::new(NETWORKSETUP).is_file() {
         return Ok(None);
     }
     let services = list_services().await?;
@@ -133,15 +137,13 @@ async fn read_current() -> Result<Option<Snapshot>, CoreError> {
 }
 
 async fn apply_disabled(snapshot: &Snapshot) -> Result<(), CoreError> {
+    // Always off. Replaying each service's saved enabled flag left Hiddify's
+    // HTTP/SOCKS proxy in place while "connected", so Safari/Chrome sent
+    // `localhost` through Hiddify and got 502 (ADR 0062).
     for service in &snapshot.services {
-        set_proxy_state(&service.service, ProxyKind::Web, service.web_enabled).await?;
-        set_proxy_state(
-            &service.service,
-            ProxyKind::SecureWeb,
-            service.secure_web_enabled,
-        )
-        .await?;
-        set_proxy_state(&service.service, ProxyKind::Socks, service.socks_enabled).await?;
+        set_proxy_state(&service.service, ProxyKind::Web, false).await?;
+        set_proxy_state(&service.service, ProxyKind::SecureWeb, false).await?;
+        set_proxy_state(&service.service, ProxyKind::Socks, false).await?;
     }
     Ok(())
 }
@@ -190,23 +192,23 @@ impl ProxyKind {
 async fn set_proxy_state(service: &str, kind: ProxyKind, enabled: bool) -> Result<(), CoreError> {
     let flag = format!("-set{}", kind.state_flag());
     run_ok(
-        "networksetup",
+        NETWORKSETUP,
         &[&flag, service, if enabled { "on" } else { "off" }],
     )
     .await
 }
 
 async fn set_web_proxy(service: &str, host: &str, port: &str) -> Result<(), CoreError> {
-    run_ok("networksetup", &["-setwebproxy", service, host, port]).await
+    run_ok(NETWORKSETUP, &["-setwebproxy", service, host, port]).await
 }
 
 async fn set_secure_web_proxy(service: &str, host: &str, port: &str) -> Result<(), CoreError> {
-    run_ok("networksetup", &["-setsecurewebproxy", service, host, port]).await
+    run_ok(NETWORKSETUP, &["-setsecurewebproxy", service, host, port]).await
 }
 
 async fn set_socks_proxy(service: &str, host: &str, port: &str) -> Result<(), CoreError> {
     run_ok(
-        "networksetup",
+        NETWORKSETUP,
         &["-setsocksfirewallproxy", service, host, port],
     )
     .await
@@ -214,7 +216,7 @@ async fn set_socks_proxy(service: &str, host: &str, port: &str) -> Result<(), Co
 
 /// Lists network services, skipping the header line `networksetup` prints.
 async fn list_services() -> Result<Vec<String>, CoreError> {
-    let output = Command::new("networksetup")
+    let output = Command::new(NETWORKSETUP)
         .arg("-listallnetworkservices")
         .output()
         .await
@@ -262,7 +264,7 @@ async fn read_service(service: &str) -> Result<ServiceProxy, CoreError> {
 /// Authenticated Proxy Enabled: 0
 /// ```
 async fn read_proxy(service: &str, kind: &str) -> Result<(bool, String, String), CoreError> {
-    let output = Command::new("networksetup")
+    let output = Command::new(NETWORKSETUP)
         .args([kind, service])
         .output()
         .await
@@ -312,11 +314,6 @@ async fn run_ok(program: &str, args: &[&str]) -> Result<(), CoreError> {
             "could not update the macOS system proxy".into(),
         ))
     }
-}
-
-fn which(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
 }
 
 fn write_snapshot(path: &Path, snapshot: &Snapshot) -> Result<(), CoreError> {
@@ -385,6 +382,31 @@ mod tests {
             services: vec![service("Wi-Fi", "proxy.corp.example", "8080")],
         };
         assert!(!points_at_hiddify(&snapshot, "127.0.0.1", 12334));
+    }
+
+    #[test]
+    fn apply_disabled_turns_proxies_off_instead_of_replaying_snapshot() {
+        // `include_str` of this file would match the assertion itself if we
+        // scanned `mod tests`. Only the production half is the contract.
+        let production = include_str!("system_proxy.rs")
+            .split("mod tests")
+            .next()
+            .expect("production");
+        let body = production
+            .split("async fn apply_disabled")
+            .nth(1)
+            .and_then(|rest| rest.split("async fn apply_snapshot").next())
+            .expect("apply_disabled body");
+        assert!(
+            body.contains("ProxyKind::Web, false")
+                && body.contains("ProxyKind::SecureWeb, false")
+                && body.contains("ProxyKind::Socks, false"),
+            "apply_disabled must force every proxy kind off"
+        );
+        assert!(
+            !body.contains("service.web_enabled"),
+            "replaying snapshot enabled flags leaves the Hiddify proxy up"
+        );
     }
 
     #[test]

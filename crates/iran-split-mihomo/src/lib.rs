@@ -294,6 +294,14 @@ pub fn generate_config_with_handles(
     let fake_ip_filter = vec![
         "+.lan".into(),
         "+.local".into(),
+        // `localhost` is not covered by `+.local`. If it receives a fake-ip
+        // (198.18.0.0/16), `private.txt`'s 198.18.0.0/15 sends the connection
+        // DIRECT to a nonexistent address and `http://localhost:4200` never
+        // reaches the real loopback listener. macOS is the witness: the helper
+        // points system DNS at Mihomo, so the lookup no longer stops at
+        // /etc/hosts (ADR 0108 on Windows; same collision as ADR 0061).
+        "localhost".into(),
+        "+.localhost".into(),
         "localhost.ptlogin2.qq.com".into(),
         "rule-set:custom-direct-domains".into(),
         "rule-set:iran-domains".into(),
@@ -325,7 +333,12 @@ pub fn generate_config_with_handles(
             auto_redirect: false,
             auto_detect_interface: true,
             strict_route: platform == Platform::Windows,
-            route_exclude_address: if platform == Platform::Windows {
+            // Windows `strict-route` and macOS `auto-route` can steal loopback
+            // destinations even when the rule list says DIRECT. Keep
+            // `localhost` / `127.0.0.1` / `::1` on the OS loopback interface
+            // so local dev servers (witness: `:4200`) stay reachable. Linux
+            // already keeps `lo` more specific than the TUN default.
+            route_exclude_address: if matches!(platform, Platform::Windows | Platform::Macos) {
                 vec!["127.0.0.0/8".into(), "::1/128".into()]
             } else {
                 Vec::new()
@@ -1597,6 +1610,8 @@ mod tests {
             .and_then(serde_yaml::Value::as_sequence)
             .expect("fake-ip-filter");
         for key in [
+            "localhost",
+            "+.localhost",
             "rule-set:custom-direct-domains",
             "rule-set:iran-domains",
             "rule-set:iran-business-domains",
@@ -1658,6 +1673,32 @@ mod tests {
         .expect("config");
         assert!(!generated.yaml.contains("route-exclude-address"));
         assert!(!generated.yaml.contains("kubectl.exe"));
+    }
+
+    #[test]
+    fn macos_excludes_loopback_from_tun_routes() {
+        let generated = generate_config(
+            &AppConfig::default(),
+            Platform::Macos,
+            &paths(),
+            &RoutePinsDocument::default(),
+        )
+        .expect("config");
+        assert!(generated.yaml.contains("route-exclude-address:"));
+        assert!(generated.yaml.contains("- 127.0.0.0/8"));
+        assert!(generated.yaml.contains("- ::1/128"));
+        assert!(generated.yaml.contains("strict-route: false"));
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&generated.yaml).expect("generated yaml");
+        let filter = parsed
+            .get("dns")
+            .and_then(|dns| dns.get("fake-ip-filter"))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("fake-ip-filter");
+        assert!(filter.iter().any(|item| item.as_str() == Some("localhost")));
+        assert!(filter
+            .iter()
+            .any(|item| item.as_str() == Some("+.localhost")));
     }
 
     #[test]
@@ -1757,6 +1798,8 @@ mod tests {
             .and_then(serde_yaml::Value::as_sequence)
             .expect("fake-ip-filter");
         for key in [
+            "localhost",
+            "+.localhost",
             "rule-set:custom-direct-domains",
             "rule-set:iran-domains",
             "rule-set:iran-business-domains",
