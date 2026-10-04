@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "taskbar-traffic-window",
+  "description": "Event listen for the Windows taskbar speed overlay",
+  "windows": ["taskbar-traffic"],
+  "permissions": ["core:event:default"]
+}

@@ -16,6 +16,9 @@ mod windows_impl;
 #[cfg(windows)]
 pub use windows_impl::create_helper_server;
 
+#[cfg(windows)]
+pub mod notify;
+
 #[cfg(test)]
 mod tests {
     use super::HELPER_PIPE_SDDL;

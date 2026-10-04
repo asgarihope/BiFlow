@@ -337,4 +337,41 @@ describe("mock transport", () => {
       "/tmp/biflow-mock-profile.ovpn",
     );
   });
+
+  it("previews the live taskbar overlay rates", async () => {
+    // The Settings page calls this with a representative rate so the
+    // operator can sanity-check unit and bits choices before saving.
+    const view = await mockApi.previewTaskbarTraffic(9_600_000, 9_600_000 / 2);
+    expect(view.download).toBe("9.6 MB");
+    expect(view.upload).toBe("4.8 MB");
+  });
+});
+
+import { mockFormatRate, mockTaskbarTrafficDisplay } from "./mock";
+
+describe("taskbar overlay formatter (mock)", () => {
+  it("uses auto-scaling for the default display", () => {
+    expect(mockFormatRate(500, mockTaskbarTrafficDisplay())).toBe("500 B");
+    expect(mockFormatRate(2_400, mockTaskbarTrafficDisplay())).toBe("2.4 KB");
+    expect(mockFormatRate(7_500_000, mockTaskbarTrafficDisplay())).toBe(
+      "7.5 MB",
+    );
+  });
+
+  it("respects a pinned unit even at small rates", () => {
+    const display = {
+      unit: "megabytes" as const,
+      bits: false,
+    };
+    expect(mockFormatRate(7_500, display)).toBe("0 MB");
+  });
+
+  it("multiplies by eight and swaps the suffix when bits", () => {
+    const bits = {
+      unit: "auto" as const,
+      bits: true,
+    };
+    expect(mockFormatRate(125_000, bits)).toBe("1.0 Mb");
+    expect(mockFormatRate(2_400, bits)).toBe("19.2 Kb");
+  });
 });

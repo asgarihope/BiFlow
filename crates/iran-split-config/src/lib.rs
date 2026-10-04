@@ -380,6 +380,15 @@ pub struct BehaviorConfig {
     /// When a client's egress is down, REJECT its traffic (and unmatched
     /// traffic bound for it) instead of leaking the real IP over DIRECT.
     pub fail_closed: bool,
+    /// Render a tiny live `D:` / `U:` overlay next to the taskbar clock
+    /// (Windows-only at the moment, ADR 0114).
+    pub taskbar_traffic_enabled: bool,
+    /// Upper unit the formatter is allowed to grow into when `Auto`, or the
+    /// fixed unit it must use otherwise. Cross-platform: any future macOS
+    /// / Linux menubar / panel widget reuses the same formatter.
+    pub taskbar_traffic_unit: TaskbarTrafficUnit,
+    /// Multiply the raw byte rate by 8 and append `b` instead of `B`.
+    pub taskbar_traffic_bits: bool,
 }
 
 impl Default for BehaviorConfig {
@@ -389,7 +398,252 @@ impl Default for BehaviorConfig {
             connect_at_launch: false,
             close_to_tray: true,
             fail_closed: true,
+            taskbar_traffic_enabled: true,
+            taskbar_traffic_unit: TaskbarTrafficUnit::default(),
+            taskbar_traffic_bits: false,
         }
+    }
+}
+
+/// User-facing unit choice for the live taskbar overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskbarTrafficUnit {
+    /// Auto-scale up through `B`, `KB`, `MB`, `GB` (or `b`/`Kb`/... when bits).
+    Auto,
+    /// Always render raw bytes (or bits).
+    Bytes,
+    /// Always render kilobytes (or kilobits).
+    Kilobytes,
+    /// Always render megabytes (or megabits).
+    Megabytes,
+    /// Always render gigabytes (or gigabits).
+    Gigabytes,
+}
+
+impl Default for TaskbarTrafficUnit {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl TaskbarTrafficUnit {
+    /// Decimal exponent this unit pins to. `Auto` is reported as `None` so
+    /// callers fall back to the auto-scaling ladder.
+    #[must_use]
+    pub const fn exponent(self) -> Option<u32> {
+        match self {
+            Self::Auto => None,
+            Self::Bytes => Some(0),
+            Self::Kilobytes => Some(1),
+            Self::Megabytes => Some(2),
+            Self::Gigabytes => Some(3),
+        }
+    }
+}
+
+/// What the live overlay shows for one direction of traffic.
+///
+/// `Auto` resolves to the largest unit that still leaves a value of at
+/// least 1, falling back to `Gigabytes` when even `GB` would round down
+/// to zero (e.g. a 200 MB/s link with the user-pinned `Megabytes`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TaskbarTrafficDisplay {
+    pub unit: TaskbarTrafficUnit,
+    pub bits: bool,
+}
+
+impl From<&BehaviorConfig> for TaskbarTrafficDisplay {
+    fn from(value: &BehaviorConfig) -> Self {
+        Self {
+            unit: value.taskbar_traffic_unit,
+            bits: value.taskbar_traffic_bits,
+        }
+    }
+}
+
+/// Render `bytes_per_second` for the live overlay.
+///
+/// `Auto` picks the largest decimal unit that leaves a value of at least
+/// `1`.
+///
+/// `bits` multiplies the byte rate by `8` and swaps the suffix from
+/// `B` / `KB` / `MB` / `GB` to `b` / `Kb` / `Mb` / `Gb`.
+///
+/// Returns `"0 B"` (or `"0 b"` when bits) when the rate is zero — an
+/// honest idle reading rather than a flashing `0.0 B` ↔ `1.0 KB`.
+#[must_use]
+pub fn format_bandwidth_rate(bytes_per_second: u64, display: TaskbarTrafficDisplay) -> String {
+    let multiplier = if display.bits { 8 } else { 1 };
+    let raw = bytes_per_second.saturating_mul(multiplier);
+    let exponent = display
+        .unit
+        .exponent()
+        .unwrap_or_else(|| auto_exponent(raw));
+    let (value, label) = render_at_exponent(raw, exponent);
+    if display.bits {
+        format_bandwidth(value, label, 'b')
+    } else {
+        format_bandwidth(value, label, 'B')
+    }
+}
+
+/// Render a `(download, upload)` pair for the overlay in one call.
+#[must_use]
+pub fn format_bandwidth_pair(
+    download_bps: u64,
+    upload_bps: u64,
+    display: TaskbarTrafficDisplay,
+) -> (String, String) {
+    (
+        format_bandwidth_rate(download_bps, display),
+        format_bandwidth_rate(upload_bps, display),
+    )
+}
+
+fn auto_exponent(raw: u64) -> u32 {
+    if raw < 1_000 {
+        0
+    } else if raw < 1_000_000 {
+        1
+    } else if raw < 1_000_000_000 {
+        2
+    } else {
+        3
+    }
+}
+
+/// Convert `raw` bytes (or bits) into a `(value, label)` pair at the
+/// chosen decimal exponent. Always renders one decimal place so a 900
+/// KB/s reading and a 1.0 MB/s reading stay distinguishable.
+///
+/// `u64 → f64` only loses precision above 9 PB/s — far beyond any
+/// realistic TUN link — and even then the rounded mantissa is still
+/// fine for the human-facing label this drives. The cast is therefore
+/// acceptable for the overlay.
+fn render_at_exponent(raw: u64, exponent: u32) -> (f64, &'static str) {
+    let denominator = 10_u64.checked_pow(exponent.saturating_mul(3)).unwrap_or(1);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "overlay formatter accepts the f64 rounding above 9 PB/s"
+    )]
+    let value = if denominator == 0 {
+        raw as f64
+    } else {
+        raw as f64 / denominator as f64
+    };
+    let label = match exponent {
+        0 => "",
+        1 => "K",
+        2 => "M",
+        _ => "G",
+    };
+    (value, label)
+}
+
+fn format_bandwidth(value: f64, label: &str, suffix: char) -> String {
+    if value < 0.05 {
+        // Treat anything that rounds to "0.0" as honest zero so the
+        // overlay does not flicker between "0.0 B" and "1.0 KB".
+        return format!("0 {label}{suffix}");
+    }
+    if value >= 100.0 {
+        // Three or more leading digits: a single decimal steals useful
+        // precision on the overlay, so drop it.
+        format!("{value:.0} {label}{suffix}")
+    } else {
+        format!("{value:.1} {label}{suffix}")
+    }
+}
+
+#[cfg(test)]
+mod behavior_tests {
+    use super::{
+        format_bandwidth_pair, format_bandwidth_rate, BehaviorConfig, TaskbarTrafficDisplay,
+        TaskbarTrafficUnit,
+    };
+
+    #[test]
+    fn default_behavior_keeps_the_overlay_on_with_auto_bytes() {
+        let config = BehaviorConfig::default();
+        assert!(config.taskbar_traffic_enabled);
+        assert_eq!(config.taskbar_traffic_unit, TaskbarTrafficUnit::Auto);
+        assert!(!config.taskbar_traffic_bits);
+    }
+
+    #[test]
+    fn zero_bytes_renders_an_idle_label() {
+        let display = TaskbarTrafficDisplay::default();
+        assert_eq!(format_bandwidth_rate(0, display), "0 B");
+        let bits = TaskbarTrafficDisplay {
+            bits: true,
+            ..display
+        };
+        assert_eq!(format_bandwidth_rate(0, bits), "0 b");
+    }
+
+    #[test]
+    fn auto_mode_climbs_through_kb_mb_and_gb() {
+        let display = TaskbarTrafficDisplay::default();
+        assert_eq!(format_bandwidth_rate(500, display), "500 B");
+        assert_eq!(format_bandwidth_rate(2_400, display), "2.4 KB");
+        assert_eq!(format_bandwidth_rate(7_500_000, display), "7.5 MB");
+        assert_eq!(format_bandwidth_rate(2_300_000_000, display), "2.3 GB");
+    }
+
+    #[test]
+    fn fixed_units_skip_the_auto_ladder() {
+        let display = TaskbarTrafficDisplay {
+            unit: TaskbarTrafficUnit::Megabytes,
+            bits: false,
+        };
+        assert_eq!(format_bandwidth_rate(2_400_000, display), "2.4 MB");
+        assert_eq!(format_bandwidth_rate(7_500, display), "0 MB");
+    }
+
+    #[test]
+    fn bits_multiply_by_eight_and_swap_the_suffix() {
+        let display = TaskbarTrafficDisplay {
+            bits: true,
+            ..TaskbarTrafficDisplay::default()
+        };
+        assert_eq!(format_bandwidth_rate(125_000, display), "1.0 Mb");
+        assert_eq!(format_bandwidth_rate(2_400, display), "19.2 Kb");
+    }
+
+    #[test]
+    fn hundred_or_more_drops_the_decimal() {
+        let display = TaskbarTrafficDisplay::default();
+        assert_eq!(format_bandwidth_rate(120_000_000, display), "120 MB");
+        let bits = TaskbarTrafficDisplay {
+            bits: true,
+            ..display
+        };
+        assert_eq!(format_bandwidth_rate(15_000_000, bits), "120 Mb");
+    }
+
+    #[test]
+    fn a_pair_returns_download_and_upload_in_order() {
+        let display = TaskbarTrafficDisplay::default();
+        let (down, up) = format_bandwidth_pair(2_400_000, 350_000, display);
+        assert_eq!(down, "2.4 MB");
+        assert_eq!(up, "350 KB");
+    }
+
+    #[test]
+    fn display_can_be_built_from_behavior() {
+        // ADR 0114: the formatter is the same regardless of platform,
+        // and the settings store is the single source of truth.
+        let config = BehaviorConfig {
+            taskbar_traffic_unit: TaskbarTrafficUnit::Megabytes,
+            taskbar_traffic_bits: true,
+            ..BehaviorConfig::default()
+        };
+        let display = TaskbarTrafficDisplay::from(&config);
+        assert_eq!(display.unit, TaskbarTrafficUnit::Megabytes);
+        assert!(display.bits);
+        assert_eq!(format_bandwidth_rate(125_000, display), "1.0 Mb");
     }
 }
 

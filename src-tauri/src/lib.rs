@@ -11,6 +11,7 @@ mod platform_paths;
 mod profile;
 mod profile_picker;
 mod reachability;
+mod taskbar_traffic;
 mod traffic;
 mod tray;
 mod version;
@@ -75,6 +76,10 @@ struct AppServices {
     paths: AppPaths,
     updates: Arc<UpdateCoordinator>,
     traffic: tokio::sync::Mutex<traffic::SessionAccumulator>,
+    /// Tracks the previous lifetime total so the 2 s traffic loop can
+    /// publish a bytes-per-second reading to the taskbar overlay without
+    /// waking the controller on every tick.
+    rate_sampler: tokio::sync::Mutex<taskbar_traffic::RateSampler>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -751,6 +756,34 @@ async fn session_traffic_sample(
 }
 
 #[tauri::command]
+async fn preview_taskbar_traffic(
+    download_bps: u64,
+    upload_bps: u64,
+    app: AppHandle,
+) -> Result<taskbar_traffic::TaskbarTrafficView, String> {
+    diagnostics::trace_action(
+        "taskbar",
+        "tauri_command",
+        "preview_taskbar_traffic",
+        async move {
+            let services = services(&app)?;
+            let config = services
+                .config_store
+                .load_or_create()
+                .map_err(|error| error.to_string())?;
+            Ok(taskbar_traffic::preview_rates(
+                taskbar_traffic::RateSample {
+                    download_bps,
+                    upload_bps,
+                },
+                &config,
+            ))
+        },
+    )
+    .await
+}
+
+#[tauri::command]
 async fn list_active_connections(app: AppHandle) -> Result<Vec<ActiveConnection>, String> {
     diagnostics::trace_action(
         "connections",
@@ -1206,6 +1239,12 @@ async fn save_settings(
             "saved settings"
         );
         services.backend.update_config(saved.clone()).await;
+        let enabled = saved.behavior.taskbar_traffic_enabled;
+        if enabled {
+            taskbar_traffic::ensure_overlay_window(&app);
+        } else {
+            taskbar_traffic::destroy_overlay_window(&app);
+        }
         Ok(saved.redacted())
     })
     .await
@@ -3447,6 +3486,7 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
         paths,
         updates: Arc::new(UpdateCoordinator::new()),
         traffic: tokio::sync::Mutex::new(traffic::SessionAccumulator::default()),
+        rate_sampler: tokio::sync::Mutex::new(taskbar_traffic::RateSampler::default()),
     })
 }
 
@@ -3697,6 +3737,18 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Tauri command the tiny taskbar overlay invokes when the operator
+/// clicks the live rates. Mirrors the tray-icon left click so the
+/// overlay is not a dead end.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "tauri commands must take the `AppHandle` by value"
+)]
+fn show_main_window<R: Runtime>(app: AppHandle<R>) {
+    show_main(&app);
+}
+
 fn show_main<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         if let Err(cause) = window.unminimize() {
@@ -3762,7 +3814,9 @@ fn initialize_diagnostics() {
 }
 
 /// Samples session traffic every 2 s while connected, independent of the
-/// webview (whose timers are throttled when the window is hidden).
+/// webview (whose timers are throttled when the window is hidden). Also
+/// feeds the rate sampler that powers the optional taskbar overlay so a
+/// hidden main window never starves the bandwidth readout.
 fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         loop {
@@ -3772,11 +3826,70 @@ fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
                     services.engine.snapshot().phase,
                     StackPhase::Running | StackPhase::Degraded
                 ) {
-                    sample_traffic(services).await;
+                    sample_traffic_and_publish(services, &handle).await;
+                } else {
+                    let mut sampler = services.rate_sampler.lock().await;
+                    sampler.reset();
                 }
             }
         }
     });
+}
+
+async fn sample_traffic_and_publish<R: Runtime>(services: &AppServices, handle: &AppHandle<R>) {
+    let session = sample_traffic(services).await;
+    // Re-read the raw lifetime totals so the rate sampler can compute
+    // bytes-per-second. Pulling them off the same controller sample that
+    // the accumulator just folded means the overlay and the session
+    // totals always agree on the same instant.
+    let raw = match session_traffic_sample(services).await {
+        Ok((sample, _)) => Some((sample.upload_total, sample.download_total)),
+        Err(cause) => {
+            warn!(
+                event = "taskbar.rate_sample_unavailable",
+                section = "taskbar",
+                initiator = "traffic_loop",
+                cause = %cause,
+                trace_route = "traffic_loop->mihomo_controller",
+                "taskbar overlay rate sample could not be read; keeping the previous baseline"
+            );
+            None
+        }
+    };
+    let Some((upload_total, download_total)) = raw else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let rates = {
+        let mut sampler = services.rate_sampler.lock().await;
+        sampler.observe(upload_total, download_total, now)
+    };
+    let Some(rates) = rates else {
+        // First sample, or a paused clock — wait one more tick so we
+        // never publish a misleading zero.
+        let _ = session;
+        return;
+    };
+    let config = match services.config_store.load_or_create() {
+        Ok(config) => config,
+        Err(cause) => {
+            warn!(
+                event = "taskbar.config_unavailable",
+                section = "taskbar",
+                initiator = "traffic_loop",
+                cause = %cause,
+                trace_route = "traffic_loop->config_store",
+                "taskbar overlay could not read the current settings"
+            );
+            return;
+        }
+    };
+    if !config.behavior.taskbar_traffic_enabled {
+        return;
+    }
+    let view = taskbar_traffic::render_rates(rates, &config.behavior);
+    taskbar_traffic::emit_to_window(handle, &view);
+    let _ = session;
 }
 
 /// Refreshes health and rejoins late local proxies every 10 seconds.
@@ -3797,6 +3910,19 @@ fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
                 // after Connect rejoins live routing without a full reconnect.
                 health_engine.recover_clients().await;
             }
+        }
+    });
+}
+
+/// Keeps the taskbar overlay glued to the system-tray anchor even when
+/// the monitor layout, DPI, or Explorer clock moves. Runs once every
+/// five seconds so the operator never sees the overlay drift behind the
+/// date / time indicator.
+fn spawn_overlay_reposition_loop<R: Runtime>(handle: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            taskbar_traffic::reposition_overlay_window(&handle);
         }
     });
 }
@@ -3874,6 +4000,8 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     if let Some(window) = app.get_webview_window("main") {
         restore_main_window_size(&window, &data_dir);
     }
+    taskbar_traffic::ensure_overlay_window(app.handle());
+    spawn_overlay_reposition_loop(app.handle().clone());
     setup_tray(app).map_err(|cause| {
         error!(
             event = "startup.tray_failed",
@@ -4024,6 +4152,10 @@ pub use egress_cli::run_probe_cli;
 /// # Panics
 ///
 /// Panics when the diagnostic log or Tauri event loop cannot initialize.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Tauri entry point wires plugins, capabilities, commands and runtime events"
+)]
 pub fn run() {
     #[cfg(target_os = "linux")]
     apply_linux_webview_workarounds();
@@ -4064,6 +4196,8 @@ pub fn run() {
             get_network_status,
             check_reachability,
             get_traffic_totals,
+            preview_taskbar_traffic,
+            show_main_window,
             list_active_connections,
             start_stack,
             stop_stack,
