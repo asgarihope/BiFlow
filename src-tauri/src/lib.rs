@@ -3729,12 +3729,20 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let icon = initial_tray_icon();
     TrayIconBuilder::with_id("main")
         .icon(icon)
+        .tooltip(initial_tray_tooltip())
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| handle_tray_icon(tray, &event))
         .on_menu_event(|app, event| handle_tray_menu(app, &event))
         .build(app)?;
     Ok(())
+}
+
+/// Title shown when the operator hovers over the `BiFlow` tray icon
+/// before any traffic sample has landed. The live loop overwrites it
+/// with the formatted rates a few seconds after `Connect`.
+fn initial_tray_tooltip() -> &'static str {
+    "BiFlow — live traffic\r\nD: 0 B\r\nU: 0 B"
 }
 
 #[cfg(target_os = "windows")]
@@ -3912,10 +3920,11 @@ async fn sample_traffic_and_publish<R: Runtime>(services: &AppServices, handle: 
                 download_bps: 0,
                 upload_bps: 0,
             },
+            &config.behavior,
         );
         return;
     }
-    taskbar_traffic::publish_to_tray(handle, rates);
+    taskbar_traffic::publish_to_tray(handle, rates, &config.behavior);
     let _ = session;
 }
 

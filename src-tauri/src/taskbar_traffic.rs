@@ -125,15 +125,35 @@ pub fn preview_rates(rates: RateSample, config: &AppConfig) -> TaskbarTrafficVie
     render_rates(rates, &config.behavior)
 }
 
-/// Redraw the `BiFlow` tray icon with the current rates, or with the
-/// idle icon (0 / 0) when the icon has not been seeded yet.
+/// Build the multi-line Windows tray tooltip.
+///
+/// Windows tray tooltips are line-break aware (`\r\n`) and the GDI
+/// renderer truncates anything longer than 127 chars; the two rate
+/// lines stay short so neither line ever gets clipped.
+#[must_use]
+pub fn tray_tooltip_text(rates: RateSample, behavior: &BehaviorConfig) -> String {
+    let view = render_rates(rates, behavior);
+    format!(
+        "BiFlow — live traffic\r\nD: {}\r\nU: {}",
+        view.download, view.upload
+    )
+}
+
+/// Redraw the `BiFlow` tray icon with the current rates and refresh
+/// its hover tooltip with the matching formatted rates.
 ///
 /// On Windows the icon is rendered into a 32×32 RGBA buffer by
 /// `iran_split_helper_winacl::tray_icon::render_rate_icon` and pushed
-/// into Tauri via `TrayIcon::set_icon`. macOS / Linux currently keep
-/// the default `BiFlow` icon and only forward the formatted strings on
-/// the `taskbar-traffic` event channel for a future widget.
-pub fn publish_to_tray<R: Runtime>(app: &AppHandle<R>, rates: RateSample) {
+/// into Tauri via `TrayIcon::set_icon`; the tooltip is updated via
+/// `TrayIcon::set_title`. macOS / Linux currently keep the default
+/// `BiFlow` icon and only forward the formatted strings on the
+/// `taskbar-traffic` event channel for a future widget.
+pub fn publish_to_tray<R: Runtime>(
+    app: &AppHandle<R>,
+    rates: RateSample,
+    behavior: &BehaviorConfig,
+) {
+    let tooltip = tray_tooltip_text(rates, behavior);
     #[cfg(target_os = "windows")]
     {
         use tauri::image::Image;
@@ -154,12 +174,22 @@ pub fn publish_to_tray<R: Runtime>(app: &AppHandle<R>, rates: RateSample) {
                     "tray icon image could not be replaced"
                 );
             }
+            if let Err(cause) = tray.set_title(Some(tooltip)) {
+                warn!(
+                    event = "taskbar.tray_title_update_failed",
+                    section = "taskbar",
+                    initiator = "traffic_loop",
+                    cause = %cause,
+                    trace_route = "traffic_loop->tray.set_title",
+                    "tray icon tooltip could not be replaced"
+                );
+            }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
-        let _ = rates;
+        let _ = tooltip;
     }
     // Always forward the formatted payload so future cross-platform
     // widgets and the Settings preview agree on the same string.
@@ -241,5 +271,45 @@ mod tests {
         );
         assert_eq!(view.download, "1.0 Mb");
         assert_eq!(view.upload, "0.2 Mb");
+    }
+
+    #[test]
+    fn tray_tooltip_text_includes_both_directions() {
+        let behavior = BehaviorConfig::default();
+        let tooltip = tray_tooltip_text(
+            RateSample {
+                download_bps: 2_400_000,
+                upload_bps: 350_000,
+            },
+            &behavior,
+        );
+        // Windows GDI truncates anything past 127 chars; pin the cap
+        // so a future unit change cannot silently break the tooltip.
+        assert!(
+            tooltip.len() < 127,
+            "tooltip must stay under the GDI 127-char limit"
+        );
+        assert!(tooltip.starts_with("BiFlow — live traffic\r\n"));
+        assert!(tooltip.contains("D: 2.4 MB"));
+        assert!(tooltip.contains("U: 350 KB"));
+    }
+
+    #[test]
+    fn tray_tooltip_text_stays_short_when_rate_pinned_to_huge_unit() {
+        // A 9 PB/s reading must not blow past the GDI truncation
+        // limit just because the unit made the digits explode.
+        let behavior = BehaviorConfig {
+            taskbar_traffic_unit: iran_split_config::TaskbarTrafficUnit::Gigabytes,
+            taskbar_traffic_bits: false,
+            ..BehaviorConfig::default()
+        };
+        let tooltip = tray_tooltip_text(
+            RateSample {
+                download_bps: u64::MAX,
+                upload_bps: u64::MAX,
+            },
+            &behavior,
+        );
+        assert!(tooltip.len() < 127);
     }
 }
