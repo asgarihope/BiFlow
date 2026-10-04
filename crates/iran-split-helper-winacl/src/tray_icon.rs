@@ -20,8 +20,11 @@ pub const ICON_HEIGHT: u32 = 32;
 pub const STRIDE_BYTES: usize = (ICON_WIDTH as usize) * 4;
 
 /// How much of the icon width the rate bar reaches at the saturation point
-/// (≈256 MB/s). Below this rate the bar grows linearly; above it stays full.
-pub const SATURATION_BPS: u64 = 256 * 1024 * 1024;
+/// (≈16 MB/s). Below this rate the bar grows linearly; above it stays
+/// full. The 16 MB/s ceiling matches a typical Iranian home link so
+/// 1 MB/s → ~12 % fill, 4 MB/s → ~25 % fill, and a saturated 8 MB/s
+/// line fills the bar without an unrealistic 256 MB/s peak.
+pub const SATURATION_BPS: u64 = 16 * 1024 * 1024;
 
 /// Returns a 32×32 RGBA buffer with two stacked rows (`D` over `U`) that
 /// show the live download and upload speed. Bytes are top-down in RGBA
@@ -98,7 +101,11 @@ fn paint_label(buffer: &mut [u8], letter: char, top: u32, bottom: u32, color: [u
             continue;
         }
         for (col, bit) in line.iter().enumerate() {
-            if *bit == 0 {
+            // Glyph rows are byte strings: `'1'` (0x31) = pixel on,
+            // `'0'` (0x30) = pixel off. Comparing to `0` would always
+            // be false and would paint a solid 7×9 block; the byte
+            // literal `b'0'` is the actual gate.
+            if *bit == b'0' {
                 continue;
             }
             let x = horizontal_offset + col as i32;
@@ -162,6 +169,45 @@ fn write_pixel(buffer: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
 mod tests {
     use super::*;
 
+    /// Dump a few rendered icons as PPM files (any image viewer can
+    /// open them) for visual review. Always runs in `cargo test` so
+    /// the developer can pipe the four artefacts through image tools
+    /// without remembering an opt-in flag.
+    #[test]
+    fn dump_render_rate_icons_for_review() {
+        let dir = std::env::temp_dir().join("biflow-tray-icons");
+        std::fs::create_dir_all(&dir).expect("mkdir icons");
+        for (label, download_bps, upload_bps) in [
+            ("idle", 0, 0),
+            ("small", 24_000, 12_000),
+            ("half", 8 * 1024 * 1024, 4 * 1024 * 1024),
+            ("saturated", SATURATION_BPS * 2, SATURATION_BPS * 2),
+        ] {
+            let bytes = render_rate_icon(download_bps, upload_bps);
+            let path = dir.join(format!("tray-{label}.ppm"));
+            write_ppm(&path, &bytes);
+            eprintln!("wrote {}", path.display());
+        }
+    }
+
+    /// PPM (Portable Pixmap, P6) writer — header + raw RGB bytes.
+/// Trivially readable by image tools, so no extra crate dependency.
+fn write_ppm(path: &std::path::Path, rgba: &[u8]) {
+    use std::fmt::Write as _;
+    let mut header = String::new();
+    let _ = writeln!(header, "P6");
+    let _ = writeln!(header, "{ICON_WIDTH} {ICON_HEIGHT}");
+    let _ = writeln!(header, "255");
+    let mut bytes = header.into_bytes();
+    bytes.reserve(rgba.len() / 4 * 3);
+    for pixel in rgba.chunks_exact(4) {
+        bytes.push(pixel[0]);
+        bytes.push(pixel[1]);
+        bytes.push(pixel[2]);
+    }
+    std::fs::write(path, &bytes).expect("write ppm");
+}
+
     #[test]
     fn render_rate_icon_returns_a_32x32_buffer() {
         let bytes = render_rate_icon(1024 * 1024, 512 * 1024);
@@ -205,19 +251,46 @@ mod tests {
     fn render_rate_icon_paints_the_d_and_u_labels() {
         let bytes = render_rate_icon(SATURATION_BPS, SATURATION_BPS);
         let label_left = 2_u32;
-        // The first column inside the D glyph (offset 0) should be the
-        // download label color, not the panel background.
-        let glyph_column = bytes[(4 * ICON_WIDTH as usize + (label_left as usize + 1)) * 4];
+        // The glyph sits centred vertically: 9 rows inside a 16-row
+        // half → vertical_offset = 3, so the painted band lives at
+        // rows 3..11 (top) / 19..27 (bottom).
+        let top_half_first_row = 3_usize;
+        let top_half_hollow_row = 5_usize;
+        let bottom_half_first_row = ICON_HEIGHT as usize / 2 + 3;
+        let bottom_half_hollow_row = ICON_HEIGHT as usize / 2 + 5;
+
+        // Row 2 of the D bitmap is "1100110" — col 0 is set, col 1 is
+        // set. Pinned to vertical_offset = 3 that lands at top row 5.
+        // Use the col-1 cell to assert the painted rim survived.
+        let d_painted_cell =
+            bytes[(top_half_first_row * ICON_WIDTH as usize + label_left as usize + 1) * 4];
         assert_eq!(
-            glyph_column, LABEL_COLOR_DOWNLOAD[0],
-            "top row must show the D glyph"
+            d_painted_cell, LABEL_COLOR_DOWNLOAD[0],
+            "D glyph must still paint its outer rim"
         );
-        let glyph_column = bytes[((ICON_HEIGHT as usize / 2 + 4) * ICON_WIDTH as usize
-            + (label_left as usize + 1))
-            * 4];
+
+        // Same row, col 2 is the hollow centre of the D. A regression
+        // that compares the bitmap byte to numeric `0` paints a solid
+        // block and this cell turns into LABEL_COLOR instead.
+        let d_panel_cell =
+            bytes[(top_half_hollow_row * ICON_WIDTH as usize + label_left as usize + 2) * 4];
         assert_eq!(
-            glyph_column, LABEL_COLOR_UPLOAD[0],
-            "bottom row must show the U glyph"
+            d_panel_cell, PANEL_COLOR[0],
+            "D glyph must keep its hollow centre; a solid block hides the letter"
+        );
+
+        // Same checks for the U glyph in the bottom half.
+        let u_painted_cell =
+            bytes[(bottom_half_first_row * ICON_WIDTH as usize + label_left as usize + 1) * 4];
+        assert_eq!(
+            u_painted_cell, LABEL_COLOR_UPLOAD[0],
+            "U glyph must still paint its outer rim"
+        );
+        let u_panel_cell =
+            bytes[(bottom_half_hollow_row * ICON_WIDTH as usize + label_left as usize + 2) * 4];
+        assert_eq!(
+            u_panel_cell, PANEL_COLOR[0],
+            "U glyph must keep its hollow centre; a solid block hides the letter"
         );
     }
 }

@@ -3849,18 +3849,41 @@ fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             if let Ok(services) = services(&handle) {
-                if matches!(
+                let running = matches!(
                     services.engine.snapshot().phase,
                     StackPhase::Running | StackPhase::Degraded
-                ) {
+                );
+                if running {
                     sample_traffic_and_publish(services, &handle).await;
                 } else {
+                    // Disconnected / paused / stopped: the rate sampler
+                    // forgets its previous baseline AND the tray icon
+                    // collapses back to the idle form so the operator
+                    // is never shown a stale rate.
                     let mut sampler = services.rate_sampler.lock().await;
                     sampler.reset();
+                    publish_idle_tray(&handle, services);
                 }
             }
         }
     });
+}
+
+/// Re-publish the tray badge in its idle (0 / 0) state. Used when
+/// the engine is no longer Running / Degraded so the operator never
+/// sees a stale reading from a previous session.
+fn publish_idle_tray<R: Runtime>(handle: &AppHandle<R>, services: &AppServices) {
+    let Ok(config) = services.config_store.load_or_create() else {
+        return;
+    };
+    taskbar_traffic::publish_to_tray(
+        handle,
+        taskbar_traffic::RateSample {
+            download_bps: 0,
+            upload_bps: 0,
+        },
+        &config.behavior,
+    );
 }
 
 async fn sample_traffic_and_publish<R: Runtime>(services: &AppServices, handle: &AppHandle<R>) {
