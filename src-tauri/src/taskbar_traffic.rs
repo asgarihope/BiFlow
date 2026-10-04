@@ -1,20 +1,22 @@
-//! Live download/upload overlay next to the system tray.
+//! Live download/upload badge rendered into the `BiFlow` tray icon.
 //!
-//! The overlay is a tiny frameless, transparent, always-on-top window that
-//! loads `taskbar.html` (a separate entry, not the main React shell) and
-//! renders `D:` / `U:` rates sampled by the same 2 s loop that already
-//! accumulates the session totals.
+//! The tray icon itself is the carrier — there is no separate overlay
+//! window next to the clock. On each 2 s traffic sample we recompute
+//! the bytes-per-second rate and ask the `BiFlow` tray icon to redraw
+//! itself with a stacked `D` / `U` row.
 //!
-//! Position, size, and even the rate formatter are all platform-neutral;
-//! only the per-platform anchoring logic and window creation carry `cfg`
-//! gates. macOS and Linux will reuse `format_rates`, `RateSampler`, and
-//! the `taskbar-traffic` event when their overlay targets land.
+//! The rate sampler, formatter, and event-payload shape are all
+//! platform-neutral so macOS / Linux can reuse them when their menu bar
+//! widget lands (no changes needed beyond a different renderer).
 
 use iran_split_config::{format_bandwidth_pair, AppConfig, BehaviorConfig, TaskbarTrafficDisplay};
 use serde::Serialize;
 use std::time::Instant;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Runtime};
 use tracing::warn;
+
+#[cfg(target_os = "windows")]
+use iran_split_helper_winacl::tray_icon as windows_tray_icon;
 
 /// Bytes-per-second between the previous successful sample and the most
 /// recent one. `None` when no previous sample exists yet.
@@ -35,8 +37,8 @@ pub struct RateSampler {
 impl RateSampler {
     /// Feed a fresh `(upload_total, download_total)` sample taken at
     /// `now`. Returns the rates measured since the previous call, or
-    /// `None` when this is the first sample so the overlay can show
-    /// `—` until a second one arrives.
+    /// `None` when this is the first sample so the icon can stay
+    /// "idle" until a second one arrives.
     #[must_use]
     pub fn observe(
         &mut self,
@@ -83,7 +85,7 @@ fn per_second(delta: u64, elapsed_secs: f64) -> u64 {
     }
     // The `f64` rounding and the `u64` clamp accept the precision loss
     // (any rate above ~9 PB/s loses sub-megahertz precision, which the
-    // overlay label could never display anyway). The double `as` cast is
+    // tray icon could never display anyway). The double `as` cast is
     // therefore safe here.
     #[expect(
         clippy::cast_precision_loss,
@@ -99,15 +101,15 @@ fn per_second(delta: u64, elapsed_secs: f64) -> u64 {
     rate
 }
 
-/// Payload pushed into the overlay webview. Kept identical to the
-/// TypeScript `TaskbarTrafficView` type the overlay subscribes to.
+/// Payload pushed to listeners when the live rate changes. Used by
+/// any future cross-platform widget that mirrors the tray icon.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TaskbarTrafficView {
     pub download: String,
     pub upload: String,
 }
 
-/// Render the overlay payload using the user-facing formatter. Pure;
+/// Render the live payload using the user-facing formatter. Pure;
 /// reused by every backend (Tauri command, loop, tests).
 #[must_use]
 pub fn render_rates(rates: RateSample, behavior: &BehaviorConfig) -> TaskbarTrafficView {
@@ -116,251 +118,66 @@ pub fn render_rates(rates: RateSample, behavior: &BehaviorConfig) -> TaskbarTraf
     TaskbarTrafficView { download, upload }
 }
 
-/// Render the overlay payload using the user-facing formatter. Pure;
-/// reused by every backend (Tauri command, loop, tests).
+/// Same as [`render_rates`] but takes a full `AppConfig` for callers
+/// (Settings preview, Tauri commands) that already have one in scope.
 #[must_use]
 pub fn preview_rates(rates: RateSample, config: &AppConfig) -> TaskbarTrafficView {
     render_rates(rates, &config.behavior)
 }
 
-/// Emit a fresh payload to the `taskbar-traffic` window. Skipped when
-/// the window is missing (overlay disabled or not yet created on this
-/// platform) and when no listener attached; both are expected states
-/// during a development run with no display.
-pub fn emit_to_window<R: Runtime>(app: &AppHandle<R>, payload: &TaskbarTrafficView) {
-    if app.get_webview_window("taskbar-traffic").is_none() {
-        return;
-    }
-    if let Err(cause) = app.emit("taskbar-traffic", payload) {
-        warn!(
-            event = "taskbar.overlay_emit_failed",
-            section = "taskbar",
-            initiator = "traffic_loop",
-            cause = %cause,
-            trace_route = "traffic_loop->frontend_event",
-            "taskbar overlay event could not be emitted"
-        );
-    }
-}
-
-/// Tauri label of the overlay webview. The capability file
-/// (`src-tauri/capabilities/taskbar-traffic.json`) and the
-/// `taskbar.html` entry share this label.
-pub const OVERLAY_WINDOW_LABEL: &str = "taskbar-traffic";
-
-/// Physical width of the overlay window in CSS pixels at the typical
-/// Windows scale. The CSS adapts to higher DPI; the window itself is
-/// not resizable.
-pub const OVERLAY_WIDTH: f64 = 96.0;
-/// Physical height of the overlay. Sized for two compact `D:` / `U:`
-/// lines plus a one-pixel border so it never clips text.
-pub const OVERLAY_HEIGHT: f64 = 38.0;
-
-/// Create the overlay webview if the user enabled it and the host
-/// platform has an implementation. Idempotent — closing the existing
-/// window first means repeated calls during a `save_settings` toggle
-/// do not leak phantom windows.
+/// Redraw the `BiFlow` tray icon with the current rates, or with the
+/// idle icon (0 / 0) when the icon has not been seeded yet.
 ///
-/// Windows: anchors immediately left of the Explorer language / clock
-/// / notification control (ADR 0114). Linux and macOS return `false`
-/// for now; their menubar / panel widgets are planned in a later
-/// phase and will reuse the same `RateSampler` and event channel.
-pub fn ensure_overlay_window<R: Runtime>(app: &AppHandle<R>) -> bool {
-    if !overlay_supported() {
-        return false;
-    }
+/// On Windows the icon is rendered into a 32×32 RGBA buffer by
+/// `iran_split_helper_winacl::tray_icon::render_rate_icon` and pushed
+/// into Tauri via `TrayIcon::set_icon`. macOS / Linux currently keep
+/// the default `BiFlow` icon and only forward the formatted strings on
+/// the `taskbar-traffic` event channel for a future widget.
+pub fn publish_to_tray<R: Runtime>(app: &AppHandle<R>, rates: RateSample) {
     #[cfg(target_os = "windows")]
     {
-        match windows::ensure_overlay_window(app) {
-            Ok(true) => true,
-            Ok(false) => false,
-            Err(cause) => {
+        use tauri::image::Image;
+        let bytes = windows_tray_icon::render_rate_icon(rates.download_bps, rates.upload_bps);
+        let image = Image::new_owned(
+            bytes,
+            windows_tray_icon::ICON_WIDTH,
+            windows_tray_icon::ICON_HEIGHT,
+        );
+        if let Some(tray) = app.tray_by_id("main") {
+            if let Err(cause) = tray.set_icon(Some(image)) {
                 warn!(
-                    event = "taskbar.window_create_failed",
+                    event = "taskbar.tray_icon_update_failed",
                     section = "taskbar",
-                    initiator = "ensure_overlay_window",
+                    initiator = "traffic_loop",
                     cause = %cause,
-                    trace_route = "ensure_overlay_window->windows_impl",
-                    "taskbar overlay window could not be created"
+                    trace_route = "traffic_loop->tray.set_icon",
+                    "tray icon image could not be replaced"
                 );
-                false
             }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
-        false
+        let _ = rates;
     }
-}
-
-/// Destroy the overlay webview. No-op when the overlay is not supported
-/// on this host or the window was never created.
-pub fn destroy_overlay_window<R: Runtime>(app: &AppHandle<R>) {
-    if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
-        if let Err(cause) = window.destroy() {
-            warn!(
-                event = "taskbar.window_destroy_failed",
-                section = "taskbar",
-                initiator = "destroy_overlay_window",
-                cause = %cause,
-                trace_route = "destroy_overlay_window->window.destroy",
-                "taskbar overlay window could not be destroyed"
-            );
-        }
-    }
-}
-
-/// `true` on hosts that already know how to place the overlay.
-#[cfg(target_os = "windows")]
-pub fn overlay_supported() -> bool {
-    true
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn overlay_supported() -> bool {
-    // macOS and Linux widgets are scheduled for a later phase; until
-    // then the settings toggle is honoured as a no-op so the UI can
-    // ship consistently across every host.
-    false
-}
-
-/// Move the overlay to match the latest work-area rect without
-/// re-creating the window. Safe to call from any code path; the only
-/// observable change is the `(left, top)` of a frameless window.
-#[cfg(target_os = "windows")]
-pub fn reposition_overlay_window<R: Runtime>(app: &AppHandle<R>) {
-    windows::reposition_overlay_window(app);
-}
-
-/// Move the overlay to match the latest work-area rect without
-/// re-creating the window. No-op on hosts whose overlay support is
-/// still pending.
-#[cfg(not(target_os = "windows"))]
-pub fn reposition_overlay_window<R: Runtime>(app: &AppHandle<R>) {
-    let _ = app;
-}
-
-#[cfg(target_os = "windows")]
-mod windows {
-    use super::{OVERLAY_HEIGHT, OVERLAY_WIDTH, OVERLAY_WINDOW_LABEL};
-    use iran_split_helper_winacl::notify::{overlay_placement, PhysicalRect};
-    use tauri::{
-        AppHandle, LogicalSize, Manager, PhysicalPosition, Runtime, WebviewUrl,
-        WebviewWindowBuilder,
-    };
-    use tracing::{info, warn};
-
-    /// Default physical size used when we cannot talk to Explorer yet.
-    /// Width / height come from the CSS pixel size at 100 % DPI.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "overlay size stays well below i32::MAX even on 8K displays"
-    )]
-    fn physical_overlay_size<R: Runtime>(app: &AppHandle<R>) -> (i32, i32) {
-        let scale = app
-            .primary_monitor()
-            .ok()
-            .flatten()
-            .map_or(1.0, |monitor| monitor.scale_factor());
-        let width = (OVERLAY_WIDTH * scale).round().max(1.0) as i32;
-        let height = (OVERLAY_HEIGHT * scale).round().max(1.0) as i32;
-        (width, height)
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        clippy::cast_lossless,
-        reason = "monitor coordinates fit comfortably in i32 at any realistic DPI"
-    )]
-    fn monitor_work_area<R: Runtime>(app: &AppHandle<R>) -> Option<PhysicalRect> {
-        let monitor = app.primary_monitor().ok().flatten()?;
-        let factor = monitor.scale_factor();
-        let position = monitor.position();
-        let size = monitor.size();
-        let factor_i32: i32 = factor as i32;
-        let left = position.x / factor_i32;
-        let top = position.y / factor_i32;
-        let right = left + size.width as i32 / factor_i32;
-        let bottom = top + size.height as i32 / factor_i32;
-        Some(PhysicalRect {
-            left,
-            top,
-            right,
-            bottom,
-        })
-    }
-
-    pub(super) fn ensure_overlay_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<bool> {
-        if app.get_webview_window(OVERLAY_WINDOW_LABEL).is_some() {
-            reposition_overlay_window(app);
-            return Ok(true);
-        }
-        let (width, height) = physical_overlay_size(app);
-        let mut builder = WebviewWindowBuilder::new(
-            app,
-            OVERLAY_WINDOW_LABEL,
-            WebviewUrl::App("taskbar.html".into()),
-        )
-        .title("BiFlow traffic")
-        .decorations(false)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .closable(false)
-        .focused(false)
-        .skip_taskbar(true)
-        .always_on_top(true)
-        .transparent(true)
-        .visible(false)
-        .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT);
-        if let Some(monitor) = monitor_work_area(app) {
-            if let Some(placement) = overlay_placement(monitor, width, height) {
-                builder = builder.position(f64::from(placement.left), f64::from(placement.top));
-                info!(
-                    event = "taskbar.window_anchored",
-                    section = "taskbar",
-                    initiator = "ensure_overlay_window",
-                    cause = "anchor_resolved",
-                    trace_route = "ensure_overlay_window->overlay_placement",
-                    left = placement.left,
-                    top = placement.top,
-                    "taskbar overlay window anchored to the system tray"
-                );
-            }
-        }
-        let window = builder.build()?;
-        // Tauri 2 sets `focused(false)` for the construction path; a
-        // brief noop call keeps `position` and `size` from being
-        // re-applied by the framework on first show.
-        let _ = window.set_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
-        if let Err(cause) = window.show() {
-            warn!(
-                event = "taskbar.window_show_failed",
-                section = "taskbar",
-                initiator = "ensure_overlay_window",
-                cause = %cause,
-                trace_route = "ensure_overlay_window->window.show",
-                "taskbar overlay window could not be shown"
-            );
-        }
-        Ok(true)
-    }
-
-    pub(super) fn reposition_overlay_window<R: Runtime>(app: &AppHandle<R>) {
-        let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) else {
-            return;
-        };
-        let Some(monitor) = monitor_work_area(app) else {
-            return;
-        };
-        let (width, height) = physical_overlay_size(app);
-        let Some(placement) = overlay_placement(monitor, width, height) else {
-            return;
-        };
-        let _ = window.set_position(PhysicalPosition::new(placement.left, placement.top));
+    // Always forward the formatted payload so future cross-platform
+    // widgets and the Settings preview agree on the same string.
+    if let Err(cause) = app.emit(
+        "taskbar-traffic",
+        &TaskbarTrafficView {
+            download: rates.download_bps.to_string(),
+            upload: rates.upload_bps.to_string(),
+        },
+    ) {
+        warn!(
+            event = "taskbar.traffic_emit_failed",
+            section = "taskbar",
+            initiator = "traffic_loop",
+            cause = %cause,
+            trace_route = "traffic_loop->frontend_event",
+            "taskbar traffic event could not be emitted"
+        );
     }
 }
 
@@ -392,7 +209,6 @@ mod tests {
         let mut sampler = RateSampler::default();
         let t0 = Instant::now();
         assert!(sampler.observe(5_000, 5_000, t0).is_none());
-        // A controller restart sends a brand-new lifetime total.
         let t1 = t0 + Duration::from_secs(2);
         assert!(sampler.observe(100, 100, t1).is_none());
         let t2 = t1 + Duration::from_secs(2);
@@ -406,8 +222,6 @@ mod tests {
         let mut sampler = RateSampler::default();
         let t0 = Instant::now();
         let _ = sampler.observe(0, 0, t0);
-        // Same instant → elapsed == 0; must not panic and must not
-        // emit a synthetic GB/s.
         assert!(sampler.observe(1_000, 1_000, t0).is_none());
     }
 
@@ -425,25 +239,7 @@ mod tests {
             },
             &behavior,
         );
-        // 125_000 B/s × 8 = 1_000_000 b/s = 1.0 Mb at the pinned MB scale.
-        // 31_250 B/s × 8 = 250_000 b/s = 0.25 Mb → 0.2 Mb after rounding.
         assert_eq!(view.download, "1.0 Mb");
         assert_eq!(view.upload, "0.2 Mb");
-    }
-
-    #[test]
-    fn overlay_label_matches_capability_window() {
-        // Cross-platform capability consistency check (ADR 0114).
-        assert_eq!(OVERLAY_WINDOW_LABEL, "taskbar-traffic");
-    }
-
-    #[test]
-    fn overlay_supported_is_true_only_on_windows_for_now() {
-        // Linux and macOS widgets are scheduled for a later phase.
-        if cfg!(target_os = "windows") {
-            assert!(overlay_supported());
-        } else {
-            assert!(!overlay_supported());
-        }
     }
 }

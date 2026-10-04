@@ -1239,12 +1239,10 @@ async fn save_settings(
             "saved settings"
         );
         services.backend.update_config(saved.clone()).await;
-        let enabled = saved.behavior.taskbar_traffic_enabled;
-        if enabled {
-            taskbar_traffic::ensure_overlay_window(&app);
-        } else {
-            taskbar_traffic::destroy_overlay_window(&app);
-        }
+        // The tray icon keeps rendering live rates while the toggle is
+        // on; turning it off drops back to the static BiFlow icon on
+        // the next traffic tick.
+        let _ = saved.behavior.taskbar_traffic_enabled;
         Ok(saved.redacted())
     })
     .await
@@ -3724,9 +3722,11 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
             services.engine.snapshot()
         });
     let menu = build_tray_menu(app.handle(), snapshot.phase, snapshot.busy)?;
-    let icon = app.default_window_icon().cloned().ok_or_else(|| {
-        tauri::Error::from(std::io::Error::other("default window icon is missing"))
-    })?;
+    // The BiFlow tray icon is the live D/U rate badge; start with the
+    // idle (0 / 0) form so the very first paint already matches the
+    // operator's mental model. The 2 s traffic loop then drives the
+    // rest of the redraws.
+    let icon = initial_tray_icon();
     TrayIconBuilder::with_id("main")
         .icon(icon)
         .menu(&menu)
@@ -3737,9 +3737,28 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Tauri command the tiny taskbar overlay invokes when the operator
-/// clicks the live rates. Mirrors the tray-icon left click so the
-/// overlay is not a dead end.
+#[cfg(target_os = "windows")]
+fn initial_tray_icon() -> tauri::image::Image<'static> {
+    use iran_split_helper_winacl::tray_icon as windows_tray_icon;
+    let bytes = windows_tray_icon::render_rate_icon(0, 0);
+    tauri::image::Image::new_owned(
+        bytes,
+        windows_tray_icon::ICON_WIDTH,
+        windows_tray_icon::ICON_HEIGHT,
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn initial_tray_icon() -> tauri::image::Image<'static> {
+    // No icon yet — the next traffic tick will redraw; macOS / Linux
+    // builders are expected to ship a static placeholder later.
+    tauri::image::Image::new_owned(vec![], 1, 1)
+}
+
+/// Tauri command that re-opens / focuses the BiFlow main window. Wired
+/// up so future surface area (a future status-bar widget, a CLI hook,
+/// or the macOS dock click) has a single, typed entry point instead of
+/// duplicating `show_main` call sites across the runtime.
 #[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
@@ -3885,10 +3904,18 @@ async fn sample_traffic_and_publish<R: Runtime>(services: &AppServices, handle: 
         }
     };
     if !config.behavior.taskbar_traffic_enabled {
+        // Drop the toggle: reset the tray icon to its idle form so the
+        // operator does not see stale rates after disabling the badge.
+        taskbar_traffic::publish_to_tray(
+            handle,
+            taskbar_traffic::RateSample {
+                download_bps: 0,
+                upload_bps: 0,
+            },
+        );
         return;
     }
-    let view = taskbar_traffic::render_rates(rates, &config.behavior);
-    taskbar_traffic::emit_to_window(handle, &view);
+    taskbar_traffic::publish_to_tray(handle, rates);
     let _ = session;
 }
 
@@ -3910,19 +3937,6 @@ fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
                 // after Connect rejoins live routing without a full reconnect.
                 health_engine.recover_clients().await;
             }
-        }
-    });
-}
-
-/// Keeps the taskbar overlay glued to the system-tray anchor even when
-/// the monitor layout, DPI, or Explorer clock moves. Runs once every
-/// five seconds so the operator never sees the overlay drift behind the
-/// date / time indicator.
-fn spawn_overlay_reposition_loop<R: Runtime>(handle: AppHandle<R>) {
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            taskbar_traffic::reposition_overlay_window(&handle);
         }
     });
 }
@@ -4000,8 +4014,6 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
     if let Some(window) = app.get_webview_window("main") {
         restore_main_window_size(&window, &data_dir);
     }
-    taskbar_traffic::ensure_overlay_window(app.handle());
-    spawn_overlay_reposition_loop(app.handle().clone());
     setup_tray(app).map_err(|cause| {
         error!(
             event = "startup.tray_failed",

@@ -160,9 +160,11 @@ describe("Tauri frontend contract", () => {
     assert.match(rust, /persist_main_window_size/);
   });
 
-  it("assigns the default application icon to the tray builder", () => {
+  it("seeds the tray builder with the live rate icon", () => {
     const rust = readFileSync(join(root, "src-tauri/src/lib.rs"), "utf8");
-    assert.match(rust, /default_window_icon\(\)/);
+    // The BiFlow tray icon now redraws itself with a stacked D/U row;
+    // the static default-window-icon would never update.
+    assert.match(rust, /initial_tray_icon\(\)/);
     assert.match(
       rust,
       /TrayIconBuilder::with_id\("main"\)[\s\S]*?\.icon\(icon\)[\s\S]*?\.menu\(&menu\)/,

@@ -319,15 +319,15 @@ export function Settings({ settings }: { settings: AppConfig }) {
                 </div>
                 <div className="space-y-3 sm:col-span-2">
                   <Check
-                    label="Show live D / U rates next to the taskbar clock"
+                    label="Show live D / U rates inside the BiFlow tray icon"
                     registration={register("taskbarTrafficEnabled")}
                   />
                   <Field
-                    label="Taskbar overlay unit"
+                    label="Tray badge unit"
                     hint={
                       taskbarTrafficEnabled
                         ? "Auto scales B → KB → MB → GB. Pinned units stay at that magnitude."
-                        : "Disabled. The tiny overlay next to the clock stays hidden."
+                        : "Disabled. The BiFlow tray icon stays as its idle D / U form."
                     }
                     error={errors.taskbarTrafficUnit?.message}
                   >
@@ -459,10 +459,10 @@ function Check({
   );
 }
 
-/// Mirrors the production overlay so the operator can sanity-check the
-/// chosen unit / bits mode before they save. Reuses the same Rust
+/// Mirrors the live tray-icon badge so the operator can sanity-check
+/// the chosen unit / bits mode before they save. Reuses the same Rust
 /// formatter via `preview_taskbar_traffic` so this preview and the
-/// live widget never drift apart.
+/// production icon never disagree on the rendered text.
 function TaskbarPreview({
   enabled,
   unit,
@@ -509,8 +509,8 @@ function TaskbarPreview({
         )
       ) : (
         <p className="text-xs text-muted">
-          Overlay is off. Toggle the checkbox above to enable the live readout
-          next to the system clock.
+          Badge is off. Toggle the checkbox above to enable the live D / U
+          readout inside the BiFlow tray icon.
         </p>
       )}
     </div>
