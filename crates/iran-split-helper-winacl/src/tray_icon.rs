@@ -191,22 +191,22 @@ mod tests {
     }
 
     /// PPM (Portable Pixmap, P6) writer — header + raw RGB bytes.
-/// Trivially readable by image tools, so no extra crate dependency.
-fn write_ppm(path: &std::path::Path, rgba: &[u8]) {
-    use std::fmt::Write as _;
-    let mut header = String::new();
-    let _ = writeln!(header, "P6");
-    let _ = writeln!(header, "{ICON_WIDTH} {ICON_HEIGHT}");
-    let _ = writeln!(header, "255");
-    let mut bytes = header.into_bytes();
-    bytes.reserve(rgba.len() / 4 * 3);
-    for pixel in rgba.chunks_exact(4) {
-        bytes.push(pixel[0]);
-        bytes.push(pixel[1]);
-        bytes.push(pixel[2]);
+    /// Trivially readable by image tools, so no extra crate dependency.
+    fn write_ppm(path: &std::path::Path, rgba: &[u8]) {
+        use std::fmt::Write as _;
+        let mut header = String::new();
+        let _ = writeln!(header, "P6");
+        let _ = writeln!(header, "{ICON_WIDTH} {ICON_HEIGHT}");
+        let _ = writeln!(header, "255");
+        let mut bytes = header.into_bytes();
+        bytes.reserve(rgba.len() / 4 * 3);
+        for pixel in rgba.chunks_exact(4) {
+            bytes.push(pixel[0]);
+            bytes.push(pixel[1]);
+            bytes.push(pixel[2]);
+        }
+        std::fs::write(path, &bytes).expect("write ppm");
     }
-    std::fs::write(path, &bytes).expect("write ppm");
-}
 
     #[test]
     fn render_rate_icon_returns_a_32x32_buffer() {
