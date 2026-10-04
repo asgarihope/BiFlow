@@ -406,17 +406,26 @@ impl Default for BehaviorConfig {
 }
 
 /// User-facing unit choice for the live taskbar overlay.
+///
+/// The `kb` / `mb` / `gb` aliases keep existing user settings written
+/// before the rename alive — deserializing `"kb"` lands on `Kilobytes`
+/// without breaking startup. New code should still serialize the full
+/// name through `rename_all = "snake_case"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskbarTrafficUnit {
     /// Auto-scale up through `B`, `KB`, `MB`, `GB` (or `b`/`Kb`/... when bits).
     Auto,
+    #[serde(alias = "b")]
     /// Always render raw bytes (or bits).
     Bytes,
+    #[serde(alias = "kb")]
     /// Always render kilobytes (or kilobits).
     Kilobytes,
+    #[serde(alias = "mb")]
     /// Always render megabytes (or megabits).
     Megabytes,
+    #[serde(alias = "gb")]
     /// Always render gigabytes (or gigabits).
     Gigabytes,
 }
@@ -644,6 +653,31 @@ mod behavior_tests {
         assert_eq!(display.unit, TaskbarTrafficUnit::Megabytes);
         assert!(display.bits);
         assert_eq!(format_bandwidth_rate(125_000, display), "1.0 Mb");
+    }
+
+    #[test]
+    fn unit_aliases_keep_existing_settings_alive() {
+        // The first scaffolded settings wrote the short form
+        // (`kb`/`mb`/`gb`/`b`); reading them must still land on the
+        // full enum so a startup panic does not brick the installed
+        // application (this file's regression fix).
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            unit: TaskbarTrafficUnit,
+        }
+        for (text, variant) in [
+            ("b", TaskbarTrafficUnit::Bytes),
+            ("kb", TaskbarTrafficUnit::Kilobytes),
+            ("mb", TaskbarTrafficUnit::Megabytes),
+            ("gb", TaskbarTrafficUnit::Gigabytes),
+            ("auto", TaskbarTrafficUnit::Auto),
+            ("bytes", TaskbarTrafficUnit::Bytes),
+            ("kilobytes", TaskbarTrafficUnit::Kilobytes),
+        ] {
+            let parsed: Wrapper =
+                toml::from_str(&format!("unit = \"{text}\"")).expect("alias parses");
+            assert_eq!(parsed.unit, variant, "alias {text:?} should map correctly");
+        }
     }
 }
 
