@@ -9,7 +9,10 @@
 //! platform-neutral so macOS / Linux can reuse them when their menu bar
 //! widget lands (no changes needed beyond a different renderer).
 
-use iran_split_config::{format_bandwidth_pair, AppConfig, BehaviorConfig, TaskbarTrafficDisplay};
+use iran_split_config::{
+    format_bandwidth_pair, format_bandwidth_rate_compact, AppConfig, BehaviorConfig,
+    TaskbarTrafficDisplay,
+};
 use serde::Serialize;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Runtime};
@@ -154,10 +157,18 @@ pub fn publish_to_tray<R: Runtime>(
     behavior: &BehaviorConfig,
 ) {
     let tooltip = tray_tooltip_text(rates, behavior);
+    let display = TaskbarTrafficDisplay::from(behavior);
+    let download_compact = format_bandwidth_rate_compact(rates.download_bps, display);
+    let upload_compact = format_bandwidth_rate_compact(rates.upload_bps, display);
     #[cfg(target_os = "windows")]
     {
         use tauri::image::Image;
-        let bytes = windows_tray_icon::render_rate_icon(rates.download_bps, rates.upload_bps);
+        let bytes = windows_tray_icon::render_rate_icon(
+            rates.download_bps,
+            rates.upload_bps,
+            download_compact,
+            upload_compact,
+        );
         let image = Image::new_owned(
             bytes,
             windows_tray_icon::ICON_WIDTH,

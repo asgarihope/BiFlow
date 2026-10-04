@@ -3748,7 +3748,13 @@ fn initial_tray_tooltip() -> &'static str {
 #[cfg(target_os = "windows")]
 fn initial_tray_icon() -> tauri::image::Image<'static> {
     use iran_split_helper_winacl::tray_icon as windows_tray_icon;
-    let bytes = windows_tray_icon::render_rate_icon(0, 0);
+    let idle = iran_split_config::TaskbarCompactRate {
+        hundreds: None,
+        tens: None,
+        ones: Some(0),
+        unit: None,
+    };
+    let bytes = windows_tray_icon::render_rate_icon(0, 0, idle, idle);
     tauri::image::Image::new_owned(
         bytes,
         windows_tray_icon::ICON_WIDTH,

@@ -2198,6 +2198,7 @@ dependencies = [
 name = "iran-split-helper-winacl"
 version = "6.2.61"
 dependencies = [
+ "iran-split-config",
  "tokio",
  "windows",
 ]

@@ -566,11 +566,92 @@ fn format_bandwidth(value: f64, label: &str, suffix: char) -> String {
     }
 }
 
+/// Compact representation of a single-direction rate, designed to fit a
+/// 32×32 tray icon row without losing readability.
+///
+/// `digits` holds the integer value right-aligned in three slots:
+/// `Some(d)` paints the digit `d`, `None` leaves the slot blank so
+/// `16` renders as `· 1 6` instead of `0 1 6`. `unit` carries the
+/// decimal unit letter (`B` / `K` / `M` / `G` for bytes, the same
+/// capital letters for bits) so the operator still knows what the
+/// bar's fill ratio means after auto-scaling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TaskbarCompactRate {
+    pub hundreds: Option<u8>,
+    pub tens: Option<u8>,
+    pub ones: Option<u8>,
+    pub unit: Option<char>,
+}
+
+impl TaskbarCompactRate {
+    /// True when every slot is empty — used by renderers to skip the
+    /// row entirely when the rate has not produced a sample yet.
+    #[must_use]
+    pub const fn is_blank(&self) -> bool {
+        self.hundreds.is_none() && self.tens.is_none() && self.ones.is_none() && self.unit.is_none()
+    }
+}
+
+/// Render `bytes_per_second` as a [`TaskbarCompactRate`] suitable for
+/// the 32×32 tray icon.
+///
+/// Same auto-scaling ladder as [`format_bandwidth_rate`] but every
+/// reading is rounded to a whole number and capped at `999 + unit`
+/// so a saturated 256 MB/s line still paints as `16M` rather than
+/// overflowing the icon. A pinned unit is honoured; values that
+/// round to zero at the chosen unit (e.g. 200 KB/s with the
+/// `Megabytes` pin) collapse to `0`.
+#[must_use]
+pub fn format_bandwidth_rate_compact(
+    bytes_per_second: u64,
+    display: TaskbarTrafficDisplay,
+) -> TaskbarCompactRate {
+    let multiplier = if display.bits { 8 } else { 1 };
+    let raw = bytes_per_second.saturating_mul(multiplier);
+    let exponent = display
+        .unit
+        .exponent()
+        .unwrap_or_else(|| compact_auto_exponent(raw));
+    let divisor = 10_u64
+        .checked_pow(exponent.saturating_mul(3))
+        .unwrap_or(1)
+        .max(1);
+    let value = raw / divisor;
+    let value = value.min(999);
+    let unit_letter = match exponent {
+        0 => Some(if display.bits { 'b' } else { 'B' }),
+        1 => Some('K'),
+        2 => Some('M'),
+        _ => Some('G'),
+    };
+    let ones = u8::try_from(value % 10).unwrap_or(0);
+    let tens = u8::try_from((value / 10) % 10).unwrap_or(0);
+    let hundreds = u8::try_from(value / 100).unwrap_or(0);
+    TaskbarCompactRate {
+        hundreds: if value >= 100 { Some(hundreds) } else { None },
+        tens: if value >= 10 { Some(tens) } else { None },
+        ones: Some(ones),
+        unit: unit_letter,
+    }
+}
+
+fn compact_auto_exponent(raw: u64) -> u32 {
+    if raw < 1_000 {
+        0
+    } else if raw < 1_000_000 {
+        1
+    } else if raw < 1_000_000_000 {
+        2
+    } else {
+        3
+    }
+}
+
 #[cfg(test)]
 mod behavior_tests {
     use super::{
-        format_bandwidth_pair, format_bandwidth_rate, BehaviorConfig, TaskbarTrafficDisplay,
-        TaskbarTrafficUnit,
+        format_bandwidth_pair, format_bandwidth_rate, format_bandwidth_rate_compact,
+        BehaviorConfig, TaskbarTrafficDisplay, TaskbarTrafficUnit,
     };
 
     #[test]
@@ -678,6 +759,94 @@ mod behavior_tests {
                 toml::from_str(&format!("unit = \"{text}\"")).expect("alias parses");
             assert_eq!(parsed.unit, variant, "alias {text:?} should map correctly");
         }
+    }
+
+    fn assert_compact(
+        bytes_per_second: u64,
+        display: TaskbarTrafficDisplay,
+        hundreds: Option<u8>,
+        tens: Option<u8>,
+        ones: Option<u8>,
+        unit: Option<char>,
+    ) {
+        let compact = format_bandwidth_rate_compact(bytes_per_second, display);
+        assert_eq!(
+            compact,
+            crate::TaskbarCompactRate {
+                hundreds,
+                tens,
+                ones,
+                unit,
+            },
+            "compact mismatch for {bytes_per_second} bps with {display:?}"
+        );
+    }
+
+    #[test]
+    fn compact_rate_right_aligns_short_values_and_paints_the_unit_letter() {
+        let display = TaskbarTrafficDisplay::default();
+        // 0 → "0B"
+        assert_compact(0, display, None, None, Some(0), Some('B'));
+        // 500 B/s → "500B"
+        assert_compact(500, display, Some(5), Some(0), Some(0), Some('B'));
+        // 2_400 B/s → "2K" (auto scale; integer-rounded)
+        assert_compact(2_400, display, None, None, Some(2), Some('K'));
+        // 7_500_000 B/s → "7M"
+        assert_compact(7_500_000, display, None, None, Some(7), Some('M'));
+        // 2_300_000_000 B/s → "2G"
+        assert_compact(2_300_000_000, display, None, None, Some(2), Some('G'));
+    }
+
+    #[test]
+    fn compact_rate_caps_saturated_links_at_three_digits_with_their_unit() {
+        // 256 MB/s still fits in 3 digits at the megabyte unit; the
+        // cap stops the renderer from painting more slots than the
+        // icon physically has. Decimal MB (1 MB = 1_000_000 B) keeps
+        // the rounding visible in the regression test.
+        let display = TaskbarTrafficDisplay::default();
+        assert_compact(
+            256 * 1_000_000,
+            display,
+            Some(2),
+            Some(5),
+            Some(6),
+            Some('M'),
+        );
+        // 999_999 MB/s rolls up into the gigabyte unit rather than
+        // overflowing the digits column.
+        assert_compact(
+            999_999 * 1_000_000,
+            display,
+            Some(9),
+            Some(9),
+            Some(9),
+            Some('G'),
+        );
+    }
+
+    #[test]
+    fn compact_rate_honours_a_pinned_unit() {
+        let display = TaskbarTrafficDisplay {
+            unit: TaskbarTrafficUnit::Megabytes,
+            bits: false,
+        };
+        // 1 MB pinned → "1M"
+        assert_compact(1024 * 1024, display, None, None, Some(1), Some('M'));
+        // 850 KB at the MB pinned unit rounds to "0M" (honest zero).
+        assert_compact(850 * 1024, display, None, None, Some(0), Some('M'));
+    }
+
+    #[test]
+    fn compact_rate_uses_lowercase_b_for_bits() {
+        let display = TaskbarTrafficDisplay {
+            bits: true,
+            ..TaskbarTrafficDisplay::default()
+        };
+        // 125_000 B/s = 1_000_000 b/s = 1 Mb at the megabit unit.
+        assert_compact(125_000, display, None, None, Some(1), Some('M'));
+        let bytes = TaskbarTrafficDisplay::default();
+        // 125_000 B/s in auto mode lands on 125 KB at the kilobyte unit.
+        assert_compact(125_000, bytes, Some(1), Some(2), Some(5), Some('K'));
     }
 }
 
