@@ -265,23 +265,36 @@ if ($Stage) {
     Write-Host '  The installer will register the widget automatically.' -ForegroundColor Green
 } elseif ($Install) {
     Write-Host "`n[4/4] Installing for the current user" -ForegroundColor Yellow
-    # The self-signed certificate must be trusted as a *root* before the
-    # package will install, and importing into a root store always raises a
-    # confirmation dialog - which is why it is a documented manual step rather
-    # than something this script does silently. Run this once in an elevated
-    # (or interactive) PowerShell:
+    # Register the unpacked layout rather than installing the packed MSIX.
     #
-    #   Import-Certificate -FilePath <dist>\signing.cer `
-    #                      -CertStoreLocation Cert:\LocalMachine\Root
+    # Add-AppxPackage -Path needs a signature chain the machine trusts, and an
+    # unsigned package is refused outright on current Windows (0x80073D2C).
+    # -Register deploys the same package straight from the dist folder with
+    # developer mode, no certificate and no interactive root-trust prompt, which
+    # is what makes this a single command.
+    $devMode = (Get-ItemProperty `
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' `
+            -ErrorAction SilentlyContinue).AllowDevelopmentWithoutDevLicense
+    if ($devMode -ne 1) {
+        Write-Warning 'Developer mode is off, so -Register will be refused. Enable it in Settings > Privacy & security > For developers.'
+    }
+
     try {
-        Add-AppxPackage -Path $msix -ErrorAction Stop
-        Write-Host 'Installed. Open the Widgets Board and pin "BiFlow Traffic" from the + menu.' -ForegroundColor Green
+        Add-AppxPackage -Register (Join-Path $DistDir 'AppxManifest.xml') `
+            -DisableDevelopmentMode:$false -ForceApplicationShutdown -ErrorAction Stop
+        Write-Host '  Registered.' -ForegroundColor Green
     } catch {
         Write-Host "  Add-AppxPackage failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host '  If it is 0x800B0109, trust the development certificate first:' -ForegroundColor Yellow
-        Write-Host "    Import-Certificate -FilePath `"$cer`" -CertStoreLocation Cert:\LocalMachine\Root" -ForegroundColor Yellow
         throw
     }
+
+    $package = Get-AppxPackage -Name 'IranSplit.BiFlow.WidgetProvider' -ErrorAction SilentlyContinue
+    if ($package) {
+        Write-Host "  $($package.Name) $($package.Version) -> $($package.InstallLocation)" -ForegroundColor Green
+    } else {
+        Write-Warning 'The package did not appear in Get-AppxPackage.'
+    }
+    Write-Host '  Open the Widgets Board (Win+W), press + , pick BiFlow, then pin "BiFlow Traffic".' -ForegroundColor Green
 } else {
     Write-Host "`n[4/4] Skipped install (pass -Install or -Stage)" -ForegroundColor Yellow
 }
