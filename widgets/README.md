@@ -101,16 +101,64 @@ Install the app (or run `build.ps1 -Install`), then `Win+W` → `+` → **BiFlow
 **BiFlow Traffic**. Restart the Widgets Board if a freshly installed package
 does not appear immediately.
 
+## Inspecting the card without pinning anything
+
+The shell is the only thing that starts the provider, and it starts it only once
+a widget is pinned. So if the card renders as an empty skeleton there is nothing
+to inspect from outside the widget host. `--dump-card` prints exactly what
+`UpdateWidget` would send, for both sizes:
+
+```powershell
+.\widgets\WindowsWidgetProvider\build\Release\BiFlow.WidgetProvider.exe --dump-card
+```
+
+It prints the snapshot it read (`connected`, the two totals, the reason) followed
+by the two Adaptive Card documents. Worth knowing when reading the output:
+
+- The document must **parse**. A property appended after the object it belongs
+  to — `"color":}"accent"` — is invalid JSON, and the host answers that by
+  drawing nothing at all rather than by reporting an error.
+- Enum values are camelCase and case-sensitive (`extraLarge`, `bolder`,
+  `accent`), and the declared `version` must be at most `1.5`.
+- The runtime lifecycle trace is separate, in `%TEMP%\biflow-widget.log`, and is
+  only written once the host has actually launched the provider.
+
+The contract test in `scripts/tauri-contract.test.mjs` runs `--dump-card` and
+parses the result whenever the provider has been built, so a malformed card fails
+`pnpm test:scripts` instead of failing silently on someone's desktop.
+
 ## Bundling it with the BiFlow installer
 
-`build.ps1 -Stage` copies the MSIX to `packaging\staged\windows\widget\`.
-`tauri.conf.json` maps that directory to `$INSTDIR\widget`, and the NSIS hook
-runs `Add-AppxPackage` after install and `Remove-AppxPackage` before uninstall.
+`build.ps1 -Stage` copies **two** files to `packaging\staged\windows\widget\`:
+the MSIX, and `signing.cer` — the trust anchor.
 
-The widget step is **best-effort and never aborts the install** — Windows 10,
-an untrusted certificate, and a missing MSIX are all ordinary conditions on a
-perfectly good BiFlow installation. Only the privileged Helper is allowed to
-abort, because a machine without it cannot connect.
+`tauri.conf.json` maps that directory to `$INSTDIR\widget`, and the NSIS hook
+then, in order:
+
+1. `certutil -addstore -f Root "$INSTDIR\widget\signing.cer"`
+2. `Add-AppxPackage -Path "$INSTDIR\widget\BiFlow.WidgetProvider.msix"`
+
+The order is not optional. An app package is refused unless its signature chains
+to a root the machine trusts (`0x800B0109`), and an unsigned one is refused
+outright (`0x80073D2C`). Because the BiFlow installer is **perMachine** it is
+already elevated, and `certutil -f` writes `Cert:\LocalMachine\Root` with no
+confirmation dialog — so an ordinary user sees one UAC prompt for the app
+install and nothing else. The widget simply appears.
+
+On uninstall the hook removes the package _and_ deletes that root certificate.
+A trust anchor left behind would keep trusting anything it ever signed.
+
+Both steps sit behind `IfFileExists`, so a build signed by a real CA certificate
+(or published through the Store) ships no `.cer` and skips them.
+
+The widget step is **best-effort and never aborts the install** — Windows 10
+and any host failure are ordinary conditions on a perfectly good BiFlow
+installation. Only the privileged Helper is allowed to abort, because a machine
+without it cannot connect.
+
+> Shipping a self-signed root is right for internal and beta distribution. A
+> public release should pass `-CertificateThumbprint` and carry a CA-issued
+> chain instead.
 
 ## Windows 10
 

@@ -45,6 +45,27 @@
 
   DetailPrint "Installing the BiFlow Windows 11 widget..."
 
+  ;  An app package is refused unless its signature chains to a root the
+  ;  machine trusts (0x800B0109), and an unsigned one is refused outright
+  ;  (0x80073D2C). So the package must ship the trust anchor and install it
+  ;  before Add-AppxPackage. This installer is perMachine, therefore already
+  ;  elevated, and certutil -f writes LocalMachine\Root silently - no second
+  ;  UAC prompt and no certificate-warning dialog for the user to dismiss.
+  ;
+  ;  A build signed by a real CA certificate has no .cer beside it and skips
+  ;  this block entirely; Add-AppxPackage then just works.
+  ClearErrors
+  IfFileExists "$INSTDIR\widget\signing.cer" 0 widget_trust_done
+    DetailPrint "  Trusting the BiFlow widget signing certificate..."
+    ; -f forces without a confirmation dialog, which is what keeps this
+    ; silent. Failure is not fatal: Add-AppxPackage will report the real
+    ; reason below.
+    nsExec::ExecToLog 'certutil.exe -addstore -f Root "$INSTDIR\widget\signing.cer"'
+    Pop $R0
+    StrCmp $R0 "0" widget_trust_done
+    DetailPrint "  Could not add the signing certificate (exit: $R0)."
+  widget_trust_done:
+
   ;  Add-AppxPackage rejects an untrusted package and its error text is
   ;  unreadable in the installer log, so capture it and print a human sentence.
   ;  Tee-Object keeps the text on stdout for nsExec while also writing the file.
@@ -79,6 +100,19 @@
   ; --------------------------------------------------------------------------
   nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-AppxPackage -Name ''IranSplit.BiFlow.WidgetProvider'' -ErrorAction SilentlyContinue | Remove-AppxPackage -ErrorAction SilentlyContinue"'
   Pop $R0
+
+  ;  Remove the trust anchor the post-install hook added. Leaving a root
+  ;  certificate behind after uninstall would keep trusting anything that
+  ;  certificate ever signed, so this must not be best-effort-and-forgotten.
+  ClearErrors
+  IfFileExists "$INSTDIR\widget\signing.cer" 0 widget_untrust_done
+    DetailPrint "Removing the BiFlow widget signing certificate..."
+    ;  NSIS performs variable substitution inside single-quoted strings too,
+    ;  so every PowerShell $ must be written as $$ or makensis rewrites it as
+    ;  an (unknown) NSIS variable and silently empties the command.
+    nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$c = Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $$_.Subject -eq ''CN=BiFlow Widget Provider'' }; if ($$c) { $$c | Remove-Item -Force }"'
+    Pop $R0
+  widget_untrust_done:
 
   nsExec::ExecToLog '"$INSTDIR\helper\iran-split-helper.exe" --uninstall'
   Pop $R0

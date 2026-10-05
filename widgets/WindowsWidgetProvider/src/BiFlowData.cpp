@@ -46,6 +46,44 @@ namespace BiFlow::Widget
             return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
         }
 
+        // The one rule for reading `key = value` out of a config.toml line.
+        // Whitespace around the '=' is optional, because the Rust writer emits
+        // `controller_secret = "..."` with spaces: a parser that only accepts
+        // `key=value` silently finds nothing, and the defaults (127.0.0.1,
+        // 19090, no secret) look plausible right up until the controller
+        // answers 401. Every key in this file must go through here.
+        std::wstring tomlValue(std::wstring_view line, std::wstring_view key)
+        {
+            if (!startsWith(line, key))
+            {
+                return {};
+            }
+            auto at = key.size();
+            while (at < line.size() && (line[at] == L' ' || line[at] == L'\t'))
+            {
+                ++at;
+            }
+            if (at >= line.size() || line[at] != L'=')
+            {
+                return {};
+            }
+            ++at;
+            while (at < line.size() && (line[at] == L' ' || line[at] == L'\t'))
+            {
+                ++at;
+            }
+            return trim(line.substr(at));
+        }
+
+        std::wstring unquote(std::wstring value)
+        {
+            if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"')
+            {
+                return value.substr(1, value.size() - 2);
+            }
+            return value;
+        }
+
         std::wstring configPath()
         {
             PWSTR raw{};
@@ -110,26 +148,11 @@ namespace BiFlow::Widget
             ControllerConfig config;
             for (auto const& line : lines(text))
             {
-                auto valueOf = [&line](std::wstring_view key) -> std::wstring {
-                    if (!startsWith(line, key) || line.size() <= key.size() + 1 || line[key.size()] != L'=')
-                    {
-                        return {};
-                    }
-                    return trim(std::wstring_view{line}.substr(key.size() + 1));
-                };
-                auto unquote = [](std::wstring value) {
-                    if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"')
-                    {
-                        return value.substr(1, value.size() - 2);
-                    }
-                    return value;
-                };
-
-                if (auto v = valueOf(L"controller_host"); !v.empty())
+                if (auto v = tomlValue(line, L"controller_host"); !v.empty())
                 {
                     config.host = unquote(v);
                 }
-                if (auto v = valueOf(L"controller_port"); !v.empty())
+                if (auto v = tomlValue(line, L"controller_port"); !v.empty())
                 {
                     try
                     {
@@ -139,7 +162,7 @@ namespace BiFlow::Widget
                     {
                     }
                 }
-                if (auto v = valueOf(L"controller_secret"); !v.empty())
+                if (auto v = tomlValue(line, L"controller_secret"); !v.empty())
                 {
                     config.secret = unquote(v);
                 }
@@ -171,16 +194,15 @@ namespace BiFlow::Widget
                 {
                     continue;
                 }
-                if (startsWith(line, L"enabled = true"))
+                if (tomlValue(line, L"enabled") == L"true")
                 {
                     ++enabled;
                 }
-                if (firstPreset.empty() && startsWith(line, L"preset = "))
+                if (firstPreset.empty())
                 {
-                    firstPreset = trim(std::wstring_view{line}.substr(9));
-                    if (firstPreset.size() >= 2 && firstPreset.front() == L'"' && firstPreset.back() == L'"')
+                    if (auto v = tomlValue(line, L"preset"); !v.empty())
                     {
-                        firstPreset = firstPreset.substr(1, firstPreset.size() - 2);
+                        firstPreset = unquote(v);
                     }
                 }
             }
@@ -371,17 +393,23 @@ namespace BiFlow::Widget
 
         std::wstring metricColumn(std::wstring_view label, std::uint64_t bytes, bool downloadAccent)
         {
+            // The color belongs *inside* the TextBlock object. textBlock()
+            // closes the object it builds, so appending ,"color":"accent"
+            // after the call emits `"color":}"accent"` - invalid JSON, which
+            // the host answers by showing its placeholder skeleton forever
+            // instead of the card.
+            std::wstring valueExtra = L",\"weight\":\"bolder\",\"wrap\":true,\"spacing\":\"none\",\"color\":\"";
+            valueExtra += downloadAccent ? L"accent" : L"warning";
+            valueExtra += L"\"";
+
             // Cyan for download, amber for upload - the same two hues the
             // desktop used for its live-connection view, so the widget and
             // the app read as one product.
             std::wstring out;
             out += L"{\"type\":\"Column\",\"width\":\"stretch\",\"items\":[";
-            out += textBlock(label, L"Caption", L",\"isSubtle\":true,\"spacing\":\"None\"");
+            out += textBlock(label, L"small", L",\"isSubtle\":true,\"spacing\":\"none\"");
             out += L",";
-            out += textBlock(formatBytes(bytes), L"Large",
-                             L",\"weight\":\"Bolder\",\"wrap\":true,\"spacing\":\"None\",\"color\":");
-            out += downloadAccent ? L"\"Accent\"" : L"\"Warning\"";
-            out += L"}";
+            out += textBlock(formatBytes(bytes), L"large", valueExtra);
             out += L"]}";
             return out;
         }
@@ -466,32 +494,39 @@ namespace BiFlow::Widget
         }
 
         std::wstring body;
-        body += textBlock(headline, L"ExtraLarge", L",\"weight\":\"Bolder\",\"wrap\":true,\"spacing\":\"None\"");
+        body += textBlock(headline, L"extraLarge", L",\"weight\":\"bolder\",\"wrap\":true,\"spacing\":\"none\"");
         body += L",";
-        body += textBlock(subtitle, L"Small", L",\"isSubtle\":true,\"spacing\":\"None\",\"maxLines\":2,\"wrap\":true");
+        body += textBlock(subtitle, L"small", L",\"isSubtle\":true,\"spacing\":\"none\",\"maxLines\":2,\"wrap\":true");
 
         if (withTotals)
         {
             body += L",";
-            body += textBlock(L" ", L"Small", L",\"spacing\":\"None\"");
+            body += textBlock(L" ", L"small", L",\"spacing\":\"none\"");
             body += L",";
             body += L"{\"type\":\"ColumnSet\",\"columns\":[" +
                     metricColumn(L"Download", snapshot.downloadedTotal, true) + L"," +
                     metricColumn(L"Upload", snapshot.uploadedTotal, false) + L"]}";
             body += L",";
-            body += textBlock(snapshot.defaultRouteLabel, L"Small",
-                              L",\"isSubtle\":true,\"spacing\":\"Small\",\"wrap\":true,\"maxLines\":1");
+            body += textBlock(snapshot.defaultRouteLabel, L"small",
+                              L",\"isSubtle\":true,\"spacing\":\"small\",\"wrap\":true,\"maxLines\":1");
         }
         else
         {
             // Small card: one combined line, no column set.
             body += L",";
-            body += textBlock(L"\xE2\x86\x93 " + formatBytes(snapshot.downloadedTotal) + L"   \xE2\x86\x91 " +
+            // U+2193 / U+2191 written as escapes, not the three UTF-8 bytes:
+            // L"\xE2\x86\x93" is U+00E2 U+0086 U+0093 and renders as "â†“".
+            body += textBlock(L"↓ " + formatBytes(snapshot.downloadedTotal) + L"   ↑ " +
                                   formatBytes(snapshot.uploadedTotal),
-                              L"Medium", L",\"wrap\":true,\"spacing\":\"Small\",\"maxLines\":2");
+                              L"medium", L",\"wrap\":true,\"spacing\":\"small\",\"maxLines\":2");
         }
 
+        // The widget host's Adaptive Card renderer accepts 1.0 to 1.5 and
+        // refuses a higher declared version outright - it then shows its
+        // placeholder skeleton and never renders the body. Every enum here is
+        // camelCase for the same reason: an unrecognised value is dropped, and
+        // a TextBlock with no recognised size does not lay out.
         return L"{\"type\":\"AdaptiveCard\",\"$schema\":\"http://adaptivecards.io/schemas/adaptive-card.json\","
-               L"\"version\":\"1.6\",\"body\":[" + body + L"]}";
+               L"\"version\":\"1.0\",\"body\":[" + body + L"]}";
     }
 }

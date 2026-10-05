@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -252,6 +253,25 @@ describe("Tauri frontend contract", () => {
     assert.match(hooks, /!macro NSIS_HOOK_PREUNINSTALL/);
     assert.match(hooks, /Remove-AppxPackage/);
 
+    // A normal user must get the widget with no certificate prompt and no
+    // extra UAC step. The package is refused unless its signature chains to a
+    // trusted root (0x800B0109), so the installer ships the .cer and - being
+    // perMachine, therefore already elevated - adds it to LocalMachine\Root
+    // with certutil -f, which is what suppresses the confirmation dialog.
+    assert.match(
+      hooks,
+      /IfFileExists "\$INSTDIR\\widget\\signing\.cer"/,
+      "the hook must trust the bundled certificate before Add-AppxPackage",
+    );
+    assert.match(hooks, /certutil\.exe -addstore -f Root/);
+    // The trust must be undone on uninstall: a root certificate left behind
+    // keeps trusting everything it ever signed.
+    const preUninstall = hooks.match(
+      /!macro NSIS_HOOK_PREUNINSTALL[\s\S]*?!macroend/,
+    )[0];
+    assert.match(preUninstall, /Cert:\\LocalMachine\\Root/);
+    assert.match(preUninstall, /Remove-Item/);
+
     // The widget is optional: its failure must never abort the install.
     // Only the Helper is allowed to `Abort`, so count the aborts and pin
     // that exactly one remains, on the Helper path.
@@ -396,6 +416,139 @@ describe("Tauri frontend contract", () => {
     assert.match(installer, /certutil\.exe -addstore -f Root/);
     assert.match(installer, /Add-AppxPackage -Path \$msix/);
     assert.match(installer, /-Verb RunAs/);
+
+    // The same trust anchor has to reach the *installer*, or an ordinary user
+    // gets no widget at all: the staging step is the only thing that puts the
+    // .cer next to the MSIX that the hook looks for.
+    assert.match(
+      build,
+      /Copy-Item \$cer -Destination \$StageDir/,
+      "-Stage must copy the signing certificate next to the MSIX",
+    );
+    // It is a per-machine build artifact of one developer's dev certificate.
+    // Committing it would make every other machine trust that certificate.
+    assert.match(
+      readFileSync(join(root, ".gitignore"), "utf8"),
+      /packaging\/staged\/windows\/widget\/\*\.cer/,
+    );
+  });
+
+  it("emits a card the Windows widget host can actually render", (t) => {
+    const source = readFileSync(
+      join(root, "widgets/WindowsWidgetProvider/src/BiFlowData.cpp"),
+      "utf8",
+    );
+    const build = scriptCode(
+      readFileSync(
+        join(root, "widgets/WindowsWidgetProvider/build.ps1"),
+        "utf8",
+      ),
+    );
+
+    // The host's Adaptive Card renderer accepts 1.0 to 1.5 and refuses a
+    // higher declared version outright. Nothing reports the refusal: the
+    // widget just stays on the host's placeholder skeleton forever.
+    assert.match(source, /\\"version\\":\\"1\.0\\"/);
+    assert.doesNotMatch(source, /\\"version\\":\\"1\.[6-9]/);
+
+    // Enums are camelCase, and there is no "caption" size at all - the
+    // TextBlock size enum is exactly default/small/medium/large/extraLarge/
+    // adaptive. An unrecognised value is dropped, and a TextBlock with no
+    // recognised size does not lay out.
+    const validSizes = new Set([
+      "default",
+      "small",
+      "medium",
+      "large",
+      "extraLarge",
+      "adaptive",
+    ]);
+    const sizes = [...source.matchAll(/textBlock\([^,]+, L"([^"]+)"/g)].map(
+      (match) => match[1],
+    );
+    assert.ok(sizes.length > 0, "no textBlock() size arguments were found");
+    for (const size of sizes) {
+      assert.ok(
+        validSizes.has(size),
+        `"${size}" is not a valid Adaptive Cards TextBlock size`,
+      );
+    }
+
+    // textBlock() closes the object it builds, so a property appended *after*
+    // the call lands outside it: `"color":}"accent"`. That is invalid JSON,
+    // which the host answers by rendering nothing.
+    assert.doesNotMatch(
+      source,
+      /L"\\"accent\\""/,
+      "the color value must not be appended as a separately quoted string",
+    );
+
+    // A card property written as `key = value` silently matches nothing when
+    // the Rust writer emits `key = value` with spaces. Every key goes through
+    // the one tolerant reader, so there is no second parser to drift.
+    assert.match(source, /std::wstring tomlValue\(std::wstring_view line/);
+    assert.doesNotMatch(
+      source,
+      /line\[key\.size\(\)\] != L'='/,
+      "an exact-adjacency key match cannot read the desktop's config.toml",
+    );
+    const controllerReader = source.match(
+      /ControllerConfig readControllerConfig[\s\S]*?\n        \}/,
+    )[0];
+    assert.match(controllerReader, /tomlValue\(line, L"controller_secret"\)/);
+
+    // Non-ASCII source needs /utf-8. Without it MSVC decodes in the machine's
+    // ANSI code page and the card's arrows become three unrelated characters.
+    assert.match(build, /cl .*\/utf-8/);
+
+    // The always-on coverage above is source-level, so it cannot prove the
+    // assembled card parses. When the provider has actually been built, ask it
+    // for the real payload and parse that.
+    const exe = join(
+      root,
+      "widgets/WindowsWidgetProvider/build/Release/BiFlow.WidgetProvider.exe",
+    );
+    if (!existsSync(exe)) {
+      t.diagnostic(
+        "provider not built; run widgets\\WindowsWidgetProvider\\build.ps1 for the live card check",
+      );
+      return;
+    }
+    const dump = execFileSync(exe, ["--dump-card"]).toString("utf8");
+    const cards = [
+      ...dump.matchAll(/--- card: (\w+) ---\r?\n(\{[\s\S]*?\})\r?\n/g),
+    ];
+    assert.equal(
+      cards.length,
+      2,
+      `--dump-card emitted ${cards.length} cards, expected the small and the medium one`,
+    );
+    for (const [, size, json] of cards) {
+      let card;
+      try {
+        card = JSON.parse(json);
+      } catch (error) {
+        assert.fail(
+          `the ${size} card is not valid JSON (${error.message}); the host shows ` +
+            `its placeholder skeleton instead. Payload: ${json.slice(0, 200)}`,
+        );
+      }
+      assert.equal(card.type, "AdaptiveCard");
+      assert.equal(card.version, "1.0");
+      assert.ok(card.body.length > 0, `the ${size} card has an empty body`);
+      for (const [, value] of json.matchAll(/"size":"([^"]+)"/g)) {
+        assert.ok(
+          validSizes.has(value),
+          `the ${size} card renders TextBlock size "${value}"`,
+        );
+      }
+    }
+    const small = JSON.parse(cards[1][2]);
+    assert.match(
+      small.body.at(-1).text,
+      /[\u2193\u2191]/,
+      "the small card must carry real up/down arrows, not mojibake",
+    );
   });
 
   it("disables WebKitGTK DMA-BUF rendering before the Linux webview starts", () => {

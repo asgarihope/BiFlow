@@ -22,6 +22,10 @@ packaging/staged/windows/*
 !packaging/staged/windows/widget/
 !packaging/staged/windows/widget/**
 packaging/staged/windows/widget/*.msix
+# The .cer beside it is the machine-specific self-signed dev certificate that
+# build.ps1 generates. The NSIS hook trusts it, so a committed copy from
+# another developer's machine would be trusted on yours.
+packaging/staged/windows/widget/*.cer
 resources/rules/cache/
 
 test-results/

@@ -203,7 +203,10 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir $ExeName
 
 $sources = @(Get-ChildItem $SourceDir -Filter '*.cpp' | ForEach-Object { "`"$($_.FullName)`"" })
-$command = "call `"$vcvars`" >nul && cl /nologo /std:c++20 /EHsc $optFlag /W3 /WX /permissive- " +
+# /utf-8 is load-bearing, not hygiene: without it MSVC decodes the source in the
+# machine's ANSI code page, so a non-ASCII character in a string literal - the
+# card's up/down arrows - silently becomes three different characters.
+$command = "call `"$vcvars`" >nul && cl /nologo /std:c++20 /EHsc $optFlag /W3 /WX /permissive- /utf-8 " +
     "/DUNICODE /D_UNICODE $includes /Fe:`"$exe`" /Fo`"$outDir\\`" " +
     ($sources -join ' ') +
     ' ole32.lib oleaut32.lib user32.lib shell32.lib windowsapp.lib'
@@ -259,8 +262,15 @@ if ($Stage) {
     # Clear any previous build so a stale MSIX is never bundled.
     Get-ChildItem $StageDir -Filter '*.msix' -ErrorAction SilentlyContinue | Remove-Item -Force
     Copy-Item $msix -Destination $StageDir
+    # Ship the trust anchor next to the package. The NSIS hook runs elevated
+    # (perMachine install) and adds it to Cert:\LocalMachine\Root before
+    # Add-AppxPackage, which is what lets an ordinary user's install register
+    # the widget with no certificate prompt and no extra UAC step. A build
+    # signed by a real CA certificate does not need this file.
+    Copy-Item $cer -Destination $StageDir
     Write-Host "`n[4/4] Staged for the NSIS installer" -ForegroundColor Yellow
     Write-Host "  $StageDir\$([IO.Path]::GetFileName($msix))" -ForegroundColor Green
+    Write-Host "  $StageDir\signing.cer  (trust anchor for Add-AppxPackage)" -ForegroundColor Green
     Write-Host '  Run: pnpm tauri build --bundles nsis' -ForegroundColor Green
     Write-Host '  The installer will register the widget automatically.' -ForegroundColor Green
 } elseif ($Install) {

@@ -88,6 +88,13 @@ controller endpoint and client roster, then issues
 Bearer token — the same request, on the same loopback endpoint, that the
 desktop's own 2 s traffic loop already issues.
 
+Reading that config is a parser contract, not a formality. The desktop writes
+`key = value` with spaces, so every key goes through one reader that tolerates
+whitespace around `=`. An exact `key=value` match reads nothing and falls back
+to defaults — and because the default host and port happen to be the correct
+ones, only the empty secret shows up, as an HTTP 401 and a `0 B` card. A
+config reader that can fall back must be able to say so.
+
 This is the load-bearing choice. The obvious alternative — have the
 desktop export a state file or expose a new Tauri command for the widget
 to read — would couple two artifacts that should stay independent, and
@@ -137,23 +144,60 @@ than a checked-in artifact.
   there is no Widgets Board, so the shell never activates the COM class,
   the provider process never starts, and no runtime feature detection is
   required in Rust precisely because the two artifacts share nothing.
-- The C# provider is not compiled by the Rust or Node gates. It needs the
-  .NET SDK plus the Windows SDK and is built by `widgets/WindowsWidgetProvider/build.ps1`.
+- The C++/WinRT provider is not compiled by the Rust or Node gates. It needs the
+  Windows SDK plus the Visual Studio C++ toolset and is built by
+  `widgets/WindowsWidgetProvider/build.ps1`.
+- The card is an **Adaptive Cards 1.0** document assembled by string
+  concatenation, and the host treats it as a strict contract: a property
+  appended after the object closes, an enum value that is not camelCase, or a
+  declared version above 1.5 each produce a widget that renders as **nothing**,
+  with no error anywhere. The contract test pins the invariants, and when the
+  provider has been built it also runs `--dump-card` and `JSON.parse`s the real
+  payload.
+- The provider therefore ships `--dump-card`. The shell is the only thing that
+  starts it, and the shell starts it only once a widget is pinned, so without
+  that mode a card which renders as nothing cannot be inspected at all.
 - The card reports **Disconnected** with a reason (timeout, HTTP status,
   invalid JSON) rather than a bare `0`, so a silent zero is never
   ambiguous — the failure mode of the discarded tray badge.
 - Byte formatting uses binary units (`KiB`, `MiB`, `GiB`) to match the
   desktop status bar exactly, so the same number never appears with two
   different suffixes in two places.
-- Automatic registration needs a **signed** package. An unsigned MSIX does not
-  install at all on current Windows: `Add-AppxPackage -AllowUnsigned` rejects
-  it with `0x80073D2C`. The build therefore signs with a self-signed
-  development certificate, and the manifest's `Identity/@Publisher` must equal
-  that certificate's subject DN or the MSIX subject interface fails with a bare
-  `SignerSign() failed` (0x8007000B). That root certificate must then be trusted
-  by a human — importing into a root store always raises a confirmation dialog,
-  so it cannot be done silently by a build script. The hook reports the exact
-  command when the trust step is still missing.
+- Automatic registration needs a **signed** package, and an app package is
+  refused unless its signature chains to a root the machine trusts
+  (`0x800B0109`); an unsigned one is refused outright (`0x80073D2C`). The
+  installer therefore ships the trust anchor beside the MSIX and adds it with
+  `certutil -addstore -f` before `Add-AppxPackage`. The NSIS installer is
+  perMachine, so it is already elevated — this costs the user no second UAC
+  prompt and no certificate-warning dialog, which is what makes "install the
+  app, get the widget" true for an ordinary user rather than only for a
+  developer machine. The uninstall hook removes the root again, because a
+  certificate left behind keeps trusting everything it ever signed.
+
+  The whole trust block sits behind `IfFileExists`, so a build signed by a real
+  CA certificate — or published through the Store — needs none of it. Bundling
+  a self-signed root is the right answer for internal and beta distribution and
+  is _not_ what a public release should do; that build should pass
+  `-CertificateThumbprint` and carry a CA-issued chain instead.
+
+  `Identity/@Publisher` must equal the certificate subject DN or the MSIX
+  subject interface fails with a bare `SignerSign() failed` (0x8007000B), and
+  the manifest's Publisher is therefore generated with the certificate rather
+  than hand-written.
+
+- A widget provider cannot be deployed with `Add-AppxPackage -Register`. A
+  loose registration reports `Status: Ok` and appears in `Get-AppxPackage`, so
+  every superficial check passes, but it leaves an AppModel repository entry
+  with **no subkeys** while healthy packages carry `App`/`Extensions` ones. The
+  app extension is never indexed, the Widgets Board never lists the provider,
+  and the package is completely inert. Install the real MSIX.
+- `Screenshots` inside `ThemeResources` is **required**, and it is the element
+  the widget picker actually renders. Without it the package installs, the COM
+  class registers, the provider runs — and the host has nothing to draw in the
+  Add Widgets dialog, so it drops the provider silently. It must be 300×304
+  with transparent rounded corners. The picker requirement lives outside the
+  card layout, which is exactly why it is easy to miss on an otherwise
+  functional widget.
 - Fixing the hook exposed a latent install bug: the Helper line used
   `"$PROGRAMDATA\iran-split\staging"`, and NSIS has no `$PROGRAMDATA` — the
   token expanded to empty, leaving `--staging-dir` valueless, which

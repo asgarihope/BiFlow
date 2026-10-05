@@ -700,6 +700,54 @@ failed` (0x8007000B). Trusting the self-signed root still needs a human:
   which needs elevation — so the installer elevates itself and uses
   `certutil -addstore -f Root`, which suppresses the confirmation dialog that
   `Import-Certificate` refuses to suppress (ADR 0116).
+- NSIS performs variable substitution inside **single-quoted** strings too —
+  `'...'` only suppresses WordBreak parsing. A PowerShell one-liner embedded in
+  a hook must write every `$` as `$$`, or makensis treats `$c` / `$_` as unknown
+  NSIS variables, silently empties the command, and reports only
+  `warning 6000`. Compile `target/release/nsis/x64/installer.nsi` directly with
+  `makensis` and treat any warning as a broken command, not a nitpick (ADR 0116).
+- An app package is refused unless its signature chains to a root the machine
+  trusts (0x800B0109), and an unsigned one is refused outright (0x80073D2C). So
+  "install the widget automatically for an ordinary user" means the installer
+  must ship the trust anchor and add it itself: the NSIS installer is
+  perMachine, so it is already elevated, and `certutil -addstore -f` writes
+  `Cert:\LocalMachine\Root` with no confirmation dialog and no second UAC
+  prompt. The uninstall hook must remove that root again — a certificate left
+  behind keeps trusting everything it ever signed. Keep the trust step behind
+  `IfFileExists` so a CA-signed build, which has no local `.cer`, skips it
+  (ADR 0116).
+- **A widget provider has no other entry point.** The shell is the only thing
+  that starts this process, and the shell starts it only once a widget is
+  pinned — so a card that renders as nothing is uninspectable from outside.
+  `BiFlow.WidgetProvider.exe --dump-card` prints exactly the payload
+  `UpdateWidget` would carry, for both card sizes, and is how the empty card
+  below was diagnosed. Give any host-invoked component such a mode; without it
+  every question about its output needs the user to click through UI (ADR 0116).
+- **Adaptive Card reports a malformed card as no card.** `textBlock()` closes
+  the object it builds, so concatenating `,"color":"accent"` _after_ the call
+  emits `"color":}"accent"}`. The host answers invalid JSON with its placeholder
+  skeleton, never with an error, so the only symptom is a permanently empty
+  widget. A property belongs inside the object, and a source contract plus a
+  `JSON.parse` of the real `--dump-card` output both pin it (ADR 0116).
+- **Adaptive Card enums are camelCase, case-sensitively, and the host refuses a
+  declared version above 1.5.** `"ExtraLarge"`, `"Bolder"`, `"None"` and
+  `"Warning"` are all silently dropped — and there is no `caption` size at all
+  (`default`/`small`/`medium`/`large`/`extraLarge`/`adaptive`). Declaring
+  `version: "1.6"` is as fatal as a typo. Prefer the version the host
+  definitely renders: copy `"version": "1.0"` (ADR 0116).
+- **A default that looks right hides a parser that read nothing.**
+  `readControllerConfig` matched `key=value` with no spaces, while the Rust
+  writer emits `key = value`, so host, port _and_ secret all came back empty
+  and silently fell back to defaults. Host and port happened to be correct, so
+  the only symptom was HTTP 401 and a `0 B` card — three hours before anyone
+  checked whether the secret had been read at all. Every key must go through
+  one tolerant reader, and a parser that can fall back must be able to say so
+  (ADR 0116).
+- **`cl` without `/utf-8` decodes source in the machine's ANSI code page**, so
+  a non-ASCII character in a string literal silently becomes one or more
+  unrelated characters — the card's `↓` rendered as `â†“`. Related: three UTF-8
+  bytes in a wide string literal are three characters, not one, so
+  `L"\xE2\x86\x93"` is U+00E2 U+0086 U+0093 and not U+2193 (ADR 0116).
 - PowerShell variable names are **case-insensitive**, so `$ObjDir` (the build
   root) and `$objDir` (the per-configuration child) were one variable. The
   assignment silently rebound the root, so every later "build root" path —

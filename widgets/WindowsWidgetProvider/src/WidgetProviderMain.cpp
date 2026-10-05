@@ -72,6 +72,40 @@ namespace
         sprintf_s(buffer, "0x%08X", static_cast<unsigned>(code));
         return buffer;
     }
+
+    void writeStdout(std::string const& text)
+    {
+        DWORD written = 0;
+        ::WriteFile(::GetStdHandle(STD_OUTPUT_HANDLE), text.data(),
+                    static_cast<DWORD>(text.size()), &written, nullptr);
+    }
+
+    // `--dump-card` prints exactly the payload UpdateWidget would carry, for
+    // both card sizes. It exists because the shell is the only thing that ever
+    // launches this process, and the shell launches it only once a widget is
+    // pinned - so on a machine with nothing pinned there is otherwise no way
+    // to see, let alone validate, the card. WriteFile covers both a real
+    // console and a redirected pipe, which stdout alone would not.
+    int dumpCard()
+    {
+        ::AttachConsole(ATTACH_PARENT_PROCESS);
+        ::SetConsoleOutputCP(CP_UTF8);
+
+        auto snapshot = BiFlow::Widget::readSnapshot();
+        writeStdout("connected   : " + std::string(snapshot.connected ? "yes" : "no") + "\n");
+        writeStdout("downloaded  : " + std::to_string(snapshot.downloadedTotal) + "\n");
+        writeStdout("uploaded    : " + std::to_string(snapshot.uploadedTotal) + "\n");
+        writeStdout("route label : " + winrt::to_string(snapshot.defaultRouteLabel) + "\n");
+        writeStdout("reason      : " + winrt::to_string(snapshot.failureReason) + "\n");
+
+        for (bool withTotals : { true, false })
+        {
+            writeStdout(std::string("\n--- card: ") + (withTotals ? "medium" : "small") + " ---\n");
+            writeStdout(winrt::to_string(BiFlow::Widget::buildCard(snapshot, withTotals)));
+            writeStdout("\n");
+        }
+        return 0;
+    }
 }
 
 namespace wp = winrt::Microsoft::Windows::Widgets::Providers;
@@ -247,6 +281,11 @@ namespace BiFlow::Widget
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
+    if (std::wstring(::GetCommandLineW()).find(L"--dump-card") != std::wstring::npos)
+    {
+        return dumpCard();
+    }
+
     winrt::init_apartment();
 
     auto factory = winrt::make<BiFlow::Widget::ProviderFactory>();
