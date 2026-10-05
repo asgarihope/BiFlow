@@ -31,8 +31,12 @@ $packageName = 'IranSplit.BiFlow.WidgetProvider'
 
 function Say($text, $colour = 'Gray') { Write-Host $text -ForegroundColor $colour }
 
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent())
-    .IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# Split across statements on purpose: a method call on a line that *starts*
+# with a dot only parses in PowerShell 7, and this script is launched by
+# install-widget.cmd, which is Windows PowerShell 5.1.
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
     if ($Elevated) {
@@ -97,3 +101,8 @@ if ($entry) {
 Say ''
 Say 'Press Win+W, click +, and pin "BiFlow Traffic".' 'Cyan'
 Start-Process 'explorer.exe' 'ms-widgetboard:'
+
+# The elevated run is its own window; hold it open so the result above is
+# actually readable instead of vanishing the instant the work is done.
+Say ''
+Read-Host 'Press Enter to close this window'
