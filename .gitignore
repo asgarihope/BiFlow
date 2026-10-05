@@ -28,3 +28,12 @@ test-results/
 apps/desktop/test-results/
 test-results/.last-run.json
 .claude/launch.json
+
+# Windows widget provider build output. The projection headers, the object
+# files, the signing material and the packed MSIX are all produced by
+# widgets\WindowsWidgetProvider\build.ps1 and must never be committed -
+# signing.pfx especially.
+widgets/WindowsWidgetProvider/obj/
+widgets/WindowsWidgetProvider/bin/
+widgets/WindowsWidgetProvider/build/
+widgets/WindowsWidgetProvider/dist/

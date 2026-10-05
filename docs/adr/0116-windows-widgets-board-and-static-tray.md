@@ -43,22 +43,41 @@ the decision cannot silently invert.
 **2. Live status moves to a real Windows 11 widget, built as a separate
 optional MSIX in `widgets/WindowsWidgetProvider`.**
 
-`IWidgetProvider` is a WinRT/COM interface shipped by the Windows App SDK
-(2.3.1 is the earliest release with a stable `Microsoft.Windows.Widgets.Providers`
-surface). It cannot be implemented by the Tauri desktop binary: a Rust
-process cannot register the `windows.widgets` app-extension category, and
-the interface is not pluggable into an existing webview. The official
-route for any host that is not a C#/C++ WinUI app is a small
-out-of-process provider returning **Adaptive Card** JSON. That is the
-companion, and it is deliberately minimal: one COM server, no UI, no
-window, no message pump beyond serving the host's calls.
+`IWidgetProvider` is a WinRT/COM interface. It cannot be implemented by the
+Tauri desktop binary: a Rust process cannot register the `windows.widgets`
+app-extension category, and the interface is not pluggable into an existing
+webview. The official route for any host that is not a C#/C++ WinUI app is a
+small out-of-process provider returning **Adaptive Card** JSON. That is the
+companion, and it is deliberately minimal: one COM server, no UI, no window.
 
 The package declares two manifest extensions and nothing else:
 
-- `uap3:AppExtension Category="windows.widgets"` — puts BiFlow in the
-  board's **+** menu.
 - `com:Extension Category="windows.comServer"` — registers the CLSID the
   widget host activates.
+- `uap3:Extension Category="windows.appExtension"` with
+  `Name="com.microsoft.windows.widgets"` — puts BiFlow in the board's **+** menu.
+  There is **no** `windows.widgets` category in the packaging schema: a
+  `uap3:AppExtension` element, or this extension at package level instead of
+  under `<Application><Extensions>`, is rejected by `makeappx` with C00CE014.
+  Everything under `uap3:Properties` is the widget host's own contract and the
+  packaging schema only requires it to be well-formed XML.
+
+**2b. The provider is C++/WinRT, not C#.**
+
+This is forced, not preferred. The provider needs a real `IClassFactory` and a
+real `IWidgetProvider` vtable. `ComExport` was removed in .NET Core, and the
+Windows App SDK's `CWidgetProvider` helper exists **only in the native
+`Microsoft.Windows.Widgets.dll`** — it is absent from the `.winmd` and is never
+projected into managed code, in any Windows App SDK release. A C# provider would
+mean hand-writing the vtable and marshaling for six methods, which is exactly
+the kind of code that compiles and then never activates.
+
+`winrt::implements` generates both, so the provider is C++/WinRT. The projection
+headers are generated from the `.winmd` by `cppwinrt.exe` at build time, so there
+is no checked-in generated code. Two ordering rules are load-bearing and pinned
+by a contract test: `<unknwn.h>` must precede every C++/WinRT header, and the
+generated `winrt\base.h` must be kept out of the include path because it is an
+older snapshot that silently removes `winrt::make` and several stream APIs.
 
 **3. The provider reads the Mihomo controller directly, so the desktop
 changes nothing.**
@@ -126,10 +145,15 @@ than a checked-in artifact.
 - Byte formatting uses binary units (`KiB`, `MiB`, `GiB`) to match the
   desktop status bar exactly, so the same number never appears with two
   different suffixes in two places.
-- Automatic registration needs an **unsigned package to be trusted**
-  (developer mode) or a signed one. `Add-AppxPackage` refuses a package signed
-  by a certificate the machine does not trust, and the hook reports exactly
-  that rather than failing the install.
+- Automatic registration needs a **signed** package. An unsigned MSIX does not
+  install at all on current Windows: `Add-AppxPackage -AllowUnsigned` rejects
+  it with `0x80073D2C`. The build therefore signs with a self-signed
+  development certificate, and the manifest's `Identity/@Publisher` must equal
+  that certificate's subject DN or the MSIX subject interface fails with a bare
+  `SignerSign() failed` (0x8007000B). That root certificate must then be trusted
+  by a human — importing into a root store always raises a confirmation dialog,
+  so it cannot be done silently by a build script. The hook reports the exact
+  command when the trust step is still missing.
 - Fixing the hook exposed a latent install bug: the Helper line used
   `"$PROGRAMDATA\iran-split\staging"`, and NSIS has no `$PROGRAMDATA` — the
   token expanded to empty, leaving `--staging-dir` valueless, which

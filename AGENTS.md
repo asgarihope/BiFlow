@@ -665,3 +665,27 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   after editing the hook rather than assuming the bundle step validated it.
   Scan the hook through `nsisCode()` so its "why we avoid X" comments neither
   trip a negative contract nor satisfy a positive one (ADR 0116).
+- A widget provider registers through
+  `<uap3:Extension Category="windows.appExtension" Name="com.microsoft.windows.widgets">`
+  inside `<Application><Extensions>`. There is **no** `windows.widgets` category
+  in the packaging schema, and a `<uap3:AppExtension Category="windows.widgets">`
+  element fails `makeappx` with C00CE014 — so does moving the extension to a
+  package-level `<Extensions>` block. The payload under `uap3:Properties` is the
+  widget host's own contract; the packaging schema only checks that it is
+  well-formed XML (ADR 0116).
+- `ComExport` does not exist in .NET Core, and the Windows App SDK's
+  `CWidgetProvider` lives only in the native `Microsoft.Windows.Widgets.dll` —
+  it is absent from the `.winmd` and is never projected into managed code, in any
+  SDK version. A C# widget provider must hand-write the vtable and marshaling;
+  `winrt::implements` in C++/WinRT generates it. Two C++/WinRT rules are
+  load-bearing: `<unknwn.h>` must precede every `winrt/` header, and
+  `cppwinrt.exe`'s own generated `winrt\base.h` must be kept out of the include
+  path because it is an older snapshot missing `winrt::make`,
+  `DataReader::from_buffer` and the `ReadAsync` overloads (ADR 0116).
+- An unsigned MSIX does not install on current Windows: `Add-AppxPackage
+-AllowUnsigned` rejects it with `0x80073D2C` whatever publisher is declared.
+  Sign it, and keep `Identity/@Publisher` byte-identical to the certificate
+  subject DN or the MSIX subject interface fails with a bare `SignerSign()
+failed` (0x8007000B). Trusting the self-signed root still needs a human:
+  importing into a root store always raises a confirmation dialog, so no build
+  script can do it silently (ADR 0116).

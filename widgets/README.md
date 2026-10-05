@@ -1,129 +1,121 @@
-# BiFlow — Windows 11 Widgets Board provider
+# BiFlow Windows 11 Widgets Board provider
 
-A **third-party Windows 11 widget** for BiFlow. Pin it from
-_Widgets → Add a widget → BiFlow Traffic_ and it shows live split-tunnel
-state plus download/upload totals next to the weather and finance widgets.
+A **third-party widget** for the Windows 11 Widgets Board (the panel that opens
+from the left edge of the taskbar, or with `Win+W`).
 
-## What this is (and is not)
+This directory is the entire widget. The BiFlow desktop app is a Tauri v2
+binary and cannot implement `IWidgetProvider` — that is a WinRT/COM contract
+that only an out-of-process COM server can satisfy — so this is a small,
+separate, **optional** companion. It shows live split-tunnel status and
+traffic totals; the desktop app itself knows nothing about it and does not
+depend on it.
 
-|        |                                                                                                                                                              |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| ✅ Yes | An `IWidgetProvider` COM server registered under the `windows.widgets` app-extension category, rendered by the Windows 11 Widgets Board as an Adaptive Card. |
-| ❌ No  | A desktop window, a toast notification, a taskbar overlay, or a replacement for the Windows Weather widget.                                                  |
-| ❌ No  | Any change to the BiFlow desktop application. It ships and runs exactly as before, including its **static logo tray icon**.                                  |
+## What the user sees
 
-The provider is a **separate, optional MSIX package**. The BiFlow desktop is
-an unrelated NSIS installer. Uninstalling the widget package never touches
-the desktop, and a machine that never installs the widget package behaves
-exactly as BiFlow did before.
+One card, **BiFlow Traffic**, offered by the board's `+` ("Add a widget")
+menu, in `small` and `medium` sizes. It shows the routing state, the total
+downloaded and uploaded since Mihomo started, and a caption naming the active
+client roster. Bytes use binary units (`KiB`, `MiB`, `GiB`) so the same number
+never appears with two different suffixes in the widget and in the app.
 
-## Why a companion process is required
+When the controller is unreachable the card says **Disconnected** and names the
+reason, rather than showing a silent `0`.
 
-`IWidgetProvider` is a **WinRT/COM interface** shipped by the Windows App
-SDK. Only a process built against that SDK can implement it — a Rust
-binary compiled for the Tauri app cannot, and the interface is not
-pluggable into an existing Tauri webview. The official guidance for
-non-C#/C++ hosts is a small out-of-process provider that returns
-**Adaptive Card** JSON. That is exactly this project, and it is the
-smallest component that can satisfy the platform contract.
+## How the data is read
 
-The provider holds **no state and no privilege**. Every value on the card
-comes from sources the desktop already uses:
+`BiFlowData.cpp` reads exactly two things:
 
-- `%APPDATA%\biflow\config.toml` — controller endpoint, client roster
-- the local Mihomo REST controller (`127.0.0.1:19090`) — live counters
+- `%APPDATA%\biflow\config.toml` — controller endpoint, shared secret, and the
+  `[[clients]]` roster
+- the local Mihomo REST controller, `GET http://127.0.0.1:<port>/connections`
+  with the shared secret as a `Bearer` token
 
-Because the controller is already the authoritative live source, the
-desktop needs **no widget-facing state file and no new Tauri command**.
-That keeps the change strictly additive (ADR 0111: session totals stay in
-the desktop process on purpose).
+The controller is already authoritative, already authenticated, and only
+answers while Mihomo runs, so **a successful response is itself the "connected"
+signal** — there is no stack-phase handshake to read.
 
-## Files
+The HTTP request is issued over a raw `StreamSocket` rather than
+`Windows.Web.Http`, because `HttpClient` honours the system proxy and BiFlow
+itself installs the tunnel. A raw loopback socket cannot loop back into our own
+TUN.
 
-```
-widgets/WindowsWidgetProvider/
-├── BiFlow.WidgetProvider.csproj   Windows App SDK 2.3.1, x64, headless
-├── Program.cs                     COM server entry point (CoRegisterClassObject)
-├── WidgetProviderFactory.cs       IClassFactory projection
-├── WidgetProvider.cs              IWidgetProvider implementation
-├── BiFlowDataSource.cs            config.toml + Mihomo controller reader
-├── AdaptiveCardBuilder.cs         Adaptive Card JSON (small + medium)
-├── WidgetIds.cs                   CLSID / widget-id single source of truth
-├── Package.appxmanifest           windows.widgets + windows.comServer
-├── app.manifest                   DPI awareness + Common Controls v6
-├── Assets/                        StoreLogo / Square44 / Wide310 (from app logo)
-└── build.ps1                      compile → stage → MakeAppx → optional install
-```
+The desktop therefore needs **zero** widget-facing changes, and session traffic
+totals stay an in-memory accumulator inside the desktop process (ADR 0111).
 
-## Build
+## Why C++/WinRT and not C#
 
-Prerequisites: **.NET SDK 8.0+** (not just the runtime) and the Windows 10
-SDK for `makeappx.exe`.
+The provider must register a real `IClassFactory` and expose a real
+`IWidgetProvider` vtable.
+
+- `ComExport` was removed in .NET Core, so the classic managed COM route is gone.
+- The Windows App SDK ships a `CWidgetProvider` helper, but **only in the native
+  `Microsoft.Windows.Widgets.dll`** — it is not in the `.winmd` and is never
+  projected into the C# projection, in any Windows App SDK version.
+- Doing it in C#/WinRT means hand-writing the vtable and the marshaling for six
+  methods.
+
+In C++/WinRT, `winrt::implements` generates both. That is the whole reason for
+the language choice; the rest of the provider is ordinary C++.
+
+## Building
 
 ```powershell
-winget install Microsoft.DotNet.SDK.8
-
-# Unsigned development package, installed for the current user:
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -Install
-
-# Signed release package:
-powershell -ExecutionPolicy Bypass -File .\build.ps1 `
-    -CertificateThumbprint ABCDEF0123456789ABCDEF0123456789ABCDEF01
+.\widgets\WindowsWidgetProvider\build.ps1            # build + pack only
+.\widgets\WindowsWidgetProvider\build.ps1 -Install   # build + sign + install
+.\widgets\WindowsWidgetProvider\build.ps1 -Stage     # stage for the NSIS installer
 ```
 
-Output: `widgets/WindowsWidgetProvider/dist/BiFlow.WidgetProvider.msix`.
+Requires:
 
-## Install and pin the widget
+- Visual Studio Build Tools with the **C++ x64 toolset** (`cl.exe`, `link.exe`)
+- Windows SDK: `cppwinrt.exe`, `makeappx.exe`, `signtool.exe`, `UnionMetadata`
+- The `Microsoft.WindowsAppSDK` package present in the NuGet cache (only its
+  `Microsoft.Windows.Widgets` component is used)
 
-1. Install the desktop app normally (`BiFlow_*_x64-setup.exe`) so
-   `%APPDATA%\biflow\config.toml` exists and Mihomo can run.
-2. Build and install the widget package (`build.ps1 -Install`).
-   An unsigned package needs **Settings → Privacy & security → For
-   developers → Developer mode** enabled, or an enterprise sideload policy.
-3. Launch **BiFlow** and press **Connect** once so the controller answers.
-4. Open the Widgets Board (`Win` + `W`, or the weather widget on the taskbar).
-5. Click **+**, choose **BiFlow Traffic**, and drag it to the board.
+The script generates the C++/WinRT projection from the `.winmd` at build time,
+so there is no checked-in generated code to drift.
 
-The card refreshes on the board's own cadence. It reads the controller on
-every refresh, so it needs neither the BiFlow window to be open nor a
-polling timer inside the desktop.
+### Signing and trust
 
-## What the card shows
+The package is signed with a self-signed development certificate
+(`CN=BiFlow Widget Provider`, created on first run and reused afterwards).
+**The manifest's `Identity/@Publisher` must equal the certificate subject** or
+the MSIX subject interface fails with a bare `SignerSign() failed`.
 
-- **Split active / Idle / Disconnected** — derived from whether the Mihomo
-  controller answers. A successful response _is_ the connected signal, so
-  the card needs no separate stack-phase handshake.
-- **Download / Upload** — lifetime byte counters from `/connections`,
-  formatted with binary units (`KiB`, `MiB`, `GiB`) to match the desktop
-  status bar exactly.
-- **Routing caption** — enabled client count and the default preset, parsed
-  from `config.toml`.
-- On failure the card degrades to **Disconnected** with the reason
-  (timeout, HTTP status, invalid JSON) instead of blanking out, so a
-  silent zero is never ambiguous.
+An _unsigned_ package does not install on current Windows: `Add-AppxPackage
+-AllowUnsigned` rejects it with `0x80073D2C`. For a signed release, pass
+`-CertificateThumbprint`.
 
-## Windows 10 behaviour
+The self-signed certificate must also be trusted as a **root** before the
+package will install, and importing into a root store always shows a
+confirmation dialog. Run this once, interactively or elevated:
 
-The package targets `MinVersion="10.0.17763.0"` (Windows 10 1809) and
-declares only `runFullTrust`.
+```powershell
+Import-Certificate -FilePath widgets\WindowsWidgetProvider\build\signing.cer `
+                   -CertStoreLocation Cert:\LocalMachine\Root
+```
 
-- On **Windows 10** the package installs normally, but Windows 10 has no
-  Widgets Board. The shell never activates the COM class, the provider
-  process never starts, and the package sits inert in
-  _Settings → Apps_. It consumes no resources and does not appear in any
-  notification area.
-- The **BiFlow desktop application is unaffected** either way. It is
-  installed by a completely separate NSIS installer, has no manifest
-  dependency on this package, and does not probe for the widget. If the
-  MSIX is never installed — or is removed — BiFlow behaves identically.
-- No feature detection is needed in the Rust code precisely _because_ the
-  two artifacts share nothing.
+## Pinning the widget
 
-## Troubleshooting
+Install the app (or run `build.ps1 -Install`), then `Win+W` → `+` → **BiFlow** →
+**BiFlow Traffic**. Restart the Widgets Board if a freshly installed package
+does not appear immediately.
 
-| Symptom                             | Cause                                                                                                                                                                         |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| BiFlow missing from the **+** menu  | `Package.appxmanifest` CLSID does not match `WidgetIds.ProviderClsid`, or the package failed to install. Check PowerShell: `Get-AppxPackage IranSplit.BiFlow.WidgetProvider`. |
-| Card stuck on **Disconnected**      | BiFlow is not connected, or `controller_port` / `controller_secret` in `%APPDATA%\biflow\config.toml` do not match a running Mihomo.                                          |
-| Provider process never starts       | Windows 10, or the package is not installed. On Windows 11 check that the Windows App SDK runtime is present.                                                                 |
-| A console window flashes on refresh | The binary was built as a console subsystem app. It must be `WinExe` (set in the `.csproj`) or `<SubSystem>Windows</SubSystem>`.                                              |
+## Bundling it with the BiFlow installer
+
+`build.ps1 -Stage` copies the MSIX to `packaging\staged\windows\widget\`.
+`tauri.conf.json` maps that directory to `$INSTDIR\widget`, and the NSIS hook
+runs `Add-AppxPackage` after install and `Remove-AppxPackage` before uninstall.
+
+The widget step is **best-effort and never aborts the install** — Windows 10,
+an untrusted certificate, and a missing MSIX are all ordinary conditions on a
+perfectly good BiFlow installation. Only the privileged Helper is allowed to
+abort, because a machine without it cannot connect.
+
+## Windows 10
+
+The package has `MinVersion 10.0.17763.0`, so it installs on Windows 10 1809
+and later — and is **inert** there: Windows 10 has no Widgets Board, so the
+shell never activates the COM class and the provider never runs. The desktop is
+a separate NSIS installer and never probes for the widget, so Windows 10 does
+not break. See ADR 0116.

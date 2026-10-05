@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  BiFlow Windows 11 Widgets Board package.
+
+  This manifest is what turns an ordinary executable into a *packaged*
+  third-party widget. Two declarations inside <Application><Extensions> matter:
+
+    1. <com:Extension Category="windows.comServer">
+       Registers the out-of-process COM class the widget host activates to
+       fetch Adaptive Card content.
+
+    2. <uap3:Extension Category="windows.appExtension"> with
+       Name="com.microsoft.windows.widgets"
+       Tells the shell "this package provides widgets", which is what puts
+       BiFlow in the board's "Add a widget" (+) menu. Its uap3:Properties
+       payload is free-form XML defined by the widget host, not by the
+       packaging schema.
+
+  Note the element is uap3:Extension, NOT uap3:AppExtension, and it must sit
+  inside <Application><Extensions>. Both a package-level <Extensions> block and
+  a <uap3:AppExtension> element are rejected by makeappx (C00CE014).
+
+  Windows 10: this package has a MinVersion of 10.0.17763.0, so it installs on
+  Windows 10 1809 and later. It is inert there - Windows 10 has no Widgets
+  Board, so the shell never activates the COM class and the provider never
+  runs. The BiFlow desktop app is an independent NSIS installer and does not
+  depend on this package existing.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 com rescap">
+
+  <!--
+    Publisher must match the signing certificate's subject DN exactly - the
+    MSIX signing subject interface rejects a mismatch with a bare
+    "SignerSign() failed" (0x8007000B). Get-DevelopmentCertificate in
+    build.ps1 creates exactly this subject, so the two cannot drift.
+  -->
+  <Identity
+    Name="IranSplit.BiFlow.WidgetProvider"
+    Publisher="CN=BiFlow Widget Provider"
+    Version="0.0.0.0" />
+
+  <Properties>
+    <DisplayName>BiFlow</DisplayName>
+    <PublisherDisplayName>BiFlow</PublisherDisplayName>
+    <Description>Live BiFlow split-tunnel status and traffic totals on the Windows 11 Widgets Board.</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.17763.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!--
+      A widget provider is a headless extension host, not a launchable app, so
+      the user never sees this in the Start menu. VisualElements is still
+      mandatory on every Application, so this is the minimum that validates.
+    -->
+    <Application Id="BiFlowWidgetProvider"
+                 Executable="BiFlow.WidgetProvider.exe"
+                 EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="BiFlow"
+        Description="BiFlow Windows 11 widget provider"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+
+      <Extensions>
+
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <!--
+              No Arguments attribute: the schema requires minLength 1 and the
+              provider takes no command line. The shell starts the exe, and
+              the exe registers this CLSID itself in wWinMain.
+            -->
+            <com:ExeServer
+              Executable="BiFlow.WidgetProvider.exe"
+              DisplayName="BiFlow Widget Provider">
+              <com:Class Id="7B3C1A62-4F5D-4E2B-9C8A-1D6E5A9F3B47"
+                        DisplayName="BiFlow Widget Provider" />
+            </com:ExeServer>
+          </com:ComServer>
+        </com:Extension>
+
+        <!--
+          The widget registration itself. Everything under uap3:Properties is
+          the widget host's own contract; the packaging schema only requires
+          it to be well-formed XML.
+        -->
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension
+            Name="com.microsoft.windows.widgets"
+            DisplayName="BiFlow"
+            Id="BiFlowWidgets"
+            PublicFolder="Public">
+
+            <uap3:Properties>
+              <WidgetProvider>
+
+                <ProviderIcons>
+                  <Icon Path="Assets\StoreLogo.png" />
+                </ProviderIcons>
+
+                <!--
+                  CreateInstance (not ActivateApplication) is the Win32 route:
+                  the host CoCreateInstance's this CLSID and talks IWidgetProvider.
+                  It must equal the com:Class Id above and ProviderClsid in
+                  src\WidgetIds.h. A mismatch here is a silent no-op.
+                -->
+                <Activation>
+                  <CreateInstance ClassId="7B3C1A62-4F5D-4E2B-9C8A-1D6E5A9F3B47" />
+                </Activation>
+
+                <Definitions>
+                  <Definition
+                    Id="BiFlow_Traffic"
+                    DisplayName="BiFlow Traffic"
+                    Description="Live BiFlow routing state with download and upload totals."
+                    AllowMultiple="true">
+                    <Capabilities>
+                      <Capability>
+                        <Size Name="small" />
+                      </Capability>
+                      <Capability>
+                        <Size Name="medium" />
+                      </Capability>
+                    </Capabilities>
+                    <ThemeResources>
+                      <Icons>
+                        <Icon Path="Assets\Square44x44Logo.png" />
+                      </Icons>
+                    </ThemeResources>
+                  </Definition>
+                </Definitions>
+
+              </WidgetProvider>
+            </uap3:Properties>
+
+          </uap3:AppExtension>
+        </uap3:Extension>
+
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!--
+      Loopback only. The provider reads the local Mihomo REST controller on
+      127.0.0.1 and the user's own %APPDATA%\biflow config. It needs no
+      internetClient and no privateNetworkClientServer; runFullTrust is what an
+      out-of-process COM server already requires.
+    -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+</Package>
