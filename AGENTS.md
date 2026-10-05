@@ -689,6 +689,17 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
 failed` (0x8007000B). Trusting the self-signed root still needs a human:
   importing into a root store always raises a confirmation dialog, so no build
   script can do it silently (ADR 0116).
+- `Add-AppxPackage -Register` is **not** a valid deployment for a widget
+  provider. It reports `Status: Ok` and the package shows up in
+  `Get-AppxPackage`, so every superficial check passes, but a loose
+  registration leaves an entry in
+  `HKCU\...\AppModel\Repository\Packages\<package>` with **no subkeys** while
+  healthy packages carry `App`/`Extensions`-style ones. The app extension is
+  never indexed, so the Widgets Board silently never lists the provider. The
+  real MSIX install needs a chain terminating in `Cert:\LocalMachine\Root`,
+  which needs elevation — so the installer elevates itself and uses
+  `certutil -addstore -f Root`, which suppresses the confirmation dialog that
+  `Import-Certificate` refuses to suppress (ADR 0116).
 - PowerShell variable names are **case-insensitive**, so `$ObjDir` (the build
   root) and `$objDir` (the per-configuration child) were one variable. The
   assignment silently rebound the root, so every later "build root" path —

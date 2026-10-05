@@ -22,6 +22,19 @@ function nsisCode(source) {
     .join("\n");
 }
 
+/**
+ * Strip whole-line `#` comments from a PowerShell script.
+ *
+ * The build scripts explain *why* they avoid a command, and a raw scan then
+ * matches that explanation instead of the command. Same rule as nsisCode.
+ */
+function scriptCode(source) {
+  return source
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+}
+
 function rustSources(directory) {
   const files = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -334,6 +347,33 @@ describe("Tauri frontend contract", () => {
         provider.indexOf("#include <winrt/base.h>"),
       "unknwn.h must be included before any C++/WinRT header",
     );
+
+    // A widget provider must be installed from the packed MSIX. A loose
+    // Add-AppxPackage -Register deployment leaves an AppModel repository entry
+    // with no subkeys, so the app extension is never indexed and the Widgets
+    // Board silently never lists the provider. The build must therefore
+    // delegate to the self-elevating installer and must never use -Register.
+    const build = scriptCode(
+      readFileSync(
+        join(root, "widgets/WindowsWidgetProvider/build.ps1"),
+        "utf8",
+      ),
+    );
+    assert.match(build, /install-widget\.ps1/);
+    assert.doesNotMatch(
+      build,
+      /Add-AppxPackage\s+-Register/,
+      "a loose -Register deployment never indexes the widget app extension",
+    );
+    const installer = readFileSync(
+      join(root, "widgets/WindowsWidgetProvider/install-widget.ps1"),
+      "utf8",
+    );
+    // The trust step is what needs elevation: the package signature chain must
+    // terminate in Cert:\LocalMachine\Root.
+    assert.match(installer, /certutil\.exe -addstore -f Root/);
+    assert.match(installer, /Add-AppxPackage -Path \$msix/);
+    assert.match(installer, /-Verb RunAs/);
   });
 
   it("disables WebKitGTK DMA-BUF rendering before the Linux webview starts", () => {

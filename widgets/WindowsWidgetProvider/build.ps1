@@ -264,37 +264,19 @@ if ($Stage) {
     Write-Host '  Run: pnpm tauri build --bundles nsis' -ForegroundColor Green
     Write-Host '  The installer will register the widget automatically.' -ForegroundColor Green
 } elseif ($Install) {
-    Write-Host "`n[4/4] Installing for the current user" -ForegroundColor Yellow
-    # Register the unpacked layout rather than installing the packed MSIX.
-    #
-    # Add-AppxPackage -Path needs a signature chain the machine trusts, and an
-    # unsigned package is refused outright on current Windows (0x80073D2C).
-    # -Register deploys the same package straight from the dist folder with
-    # developer mode, no certificate and no interactive root-trust prompt, which
-    # is what makes this a single command.
-    $devMode = (Get-ItemProperty `
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' `
-            -ErrorAction SilentlyContinue).AllowDevelopmentWithoutDevLicense
-    if ($devMode -ne 1) {
-        Write-Warning 'Developer mode is off, so -Register will be refused. Enable it in Settings > Privacy & security > For developers.'
+    # Delegate to install-widget.ps1 and stop. A widget provider cannot be
+    # deployed with Add-AppxPackage -Register: a loose registration leaves an
+    # AppModel repository entry with NO subkeys, so the app extension is never
+    # indexed, the Widgets Board never lists the provider, and the whole thing
+    # looks installed while being completely inert. The real MSIX install needs
+    # a trusted signature chain, and Cert:\LocalMachine\Root needs elevation,
+    # so the installer elevates itself and does the trust + install + report.
+    Write-Host "`n[4/4] Installing (elevates itself - press Yes at the UAC prompt)" -ForegroundColor Yellow
+    $installer = Join-Path $ProviderDir 'install-widget.ps1'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $installer
+    if ($LASTEXITCODE -ne 0) {
+        Fail "install-widget.ps1 failed with exit code $LASTEXITCODE"
     }
-
-    try {
-        Add-AppxPackage -Register (Join-Path $DistDir 'AppxManifest.xml') `
-            -DisableDevelopmentMode:$false -ForceApplicationShutdown -ErrorAction Stop
-        Write-Host '  Registered.' -ForegroundColor Green
-    } catch {
-        Write-Host "  Add-AppxPackage failed: $($_.Exception.Message)" -ForegroundColor Red
-        throw
-    }
-
-    $package = Get-AppxPackage -Name 'IranSplit.BiFlow.WidgetProvider' -ErrorAction SilentlyContinue
-    if ($package) {
-        Write-Host "  $($package.Name) $($package.Version) -> $($package.InstallLocation)" -ForegroundColor Green
-    } else {
-        Write-Warning 'The package did not appear in Get-AppxPackage.'
-    }
-    Write-Host '  Open the Widgets Board (Win+W), press + , pick BiFlow, then pin "BiFlow Traffic".' -ForegroundColor Green
 } else {
     Write-Host "`n[4/4] Skipped install (pass -Install or -Stage)" -ForegroundColor Yellow
 }
