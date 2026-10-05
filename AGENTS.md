@@ -689,3 +689,10 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
 failed` (0x8007000B). Trusting the self-signed root still needs a human:
   importing into a root store always raises a confirmation dialog, so no build
   script can do it silently (ADR 0116).
+- PowerShell variable names are **case-insensitive**, so `$ObjDir` (the build
+  root) and `$objDir` (the per-configuration child) were one variable. The
+  assignment silently rebound the root, so every later "build root" path —
+  including the signing certificate the user is told to import — resolved to
+  `build\Release\`. The symptom was a `FileNotFoundException` on a path the
+  build had itself just printed. Use two distinct names, and check a path a
+  build script hands to a human against the file system before quoting it.

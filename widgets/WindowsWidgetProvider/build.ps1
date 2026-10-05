@@ -62,9 +62,9 @@ $ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ProviderDir = $PSScriptRoot
 $SourceDir   = Join-Path $ProviderDir 'src'
 $DistDir     = Join-Path $ProviderDir 'dist'
-$ObjDir      = Join-Path $ProviderDir 'build'
-$GenDir      = Join-Path $ObjDir 'generated'
-$IncDir      = Join-Path $ObjDir 'include'
+$compileDir      = Join-Path $ProviderDir 'build'
+$GenDir      = Join-Path $compileDir 'generated'
+$IncDir      = Join-Path $compileDir 'include'
 $StageDir    = Join-Path $ProjectRoot 'packaging\staged\windows\widget'
 
 $ExeName = 'BiFlow.WidgetProvider.exe'
@@ -194,13 +194,17 @@ $includes = @(
     "/I`"$sdkInc\cppwinrt`"", "/I`"$sdkInc\shared`"", "/I`"$sdkInc\ucrt`"", "/I`"$IncDir`""
 ) -join ' '
 $optFlag = if ($Configuration -eq 'Release') { '/O2' } else { '/Od' }
-$objDir = Join-Path $ObjDir $Configuration
-New-Item -ItemType Directory -Force -Path $objDir | Out-Null
-$exe = Join-Path $objDir $ExeName
+# $compileDir is the build ROOT; $outDir is the per-configuration child. These
+# must be two distinct names: PowerShell variable names are case-insensitive, so
+# an earlier $objDir silently *reassigned* $ObjDir and every later "build root"
+# path resolved to build\<Configuration>\ instead.
+$outDir = Join-Path $compileDir $Configuration
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$exe = Join-Path $outDir $ExeName
 
 $sources = @(Get-ChildItem $SourceDir -Filter '*.cpp' | ForEach-Object { "`"$($_.FullName)`"" })
 $command = "call `"$vcvars`" >nul && cl /nologo /std:c++20 /EHsc $optFlag /W3 /WX /permissive- " +
-    "/DUNICODE /D_UNICODE $includes /Fe:`"$exe`" /Fo`"$objDir\\`" " +
+    "/DUNICODE /D_UNICODE $includes /Fe:`"$exe`" /Fo`"$outDir\\`" " +
     ($sources -join ' ') +
     ' ole32.lib oleaut32.lib user32.lib shell32.lib windowsapp.lib'
 cmd /c $command | Out-Host
@@ -239,8 +243,8 @@ $certificate = if ($CertificateThumbprint) {
 }
 if (-not $certificate) { Fail "Signing certificate $($CertificateThumbprint) was not found in Cert:\CurrentUser\My." }
 
-$pfx = Join-Path $ObjDir 'signing.pfx'
-$cer = Join-Path $ObjDir 'signing.cer'
+$pfx = Join-Path $compileDir 'signing.pfx'
+$cer = Join-Path $compileDir 'signing.cer'
 $pfxPassword = ConvertTo-SecureString -String 'biflow' -Force -AsPlainText
 Export-PfxCertificate -Cert $certificate -FilePath $pfx -Password $pfxPassword | Out-Null
 Export-Certificate -Cert $certificate -FilePath $cer | Out-Null
