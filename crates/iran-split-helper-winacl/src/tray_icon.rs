@@ -41,10 +41,12 @@ const LABEL_RIGHT: u32 = LABEL_LEFT + GLYPH_WIDTH as u32 + 1;
 const BAR_LEFT: u32 = LABEL_RIGHT;
 /// First column past the rate bar (the number column starts here).
 const BAR_RIGHT: u32 = BAR_LEFT + BAR_WIDTH;
-/// Width of the rate bar in pixels.
-const BAR_WIDTH: u32 = 10;
+/// Width of the rate bar in pixels. Slightly narrower than the
+/// original 10 so the 4×6 digit column has room to fit three slots
+/// on a 32-wide canvas.
+const BAR_WIDTH: u32 = 9;
 /// First column the compact numeric readout can paint into.
-const NUMBER_LEFT: u32 = BAR_RIGHT + 1;
+const NUMBER_LEFT: u32 = BAR_RIGHT;
 /// First column past the compact numeric readout (right against the
 /// canvas edge — the icon no longer leaves a 2-px dark border).
 const NUMBER_RIGHT: u32 = ICON_WIDTH;
@@ -152,86 +154,95 @@ fn paint_label(buffer: &mut [u8], letter: char, top: u32, bottom: u32, color: [u
     }
 }
 
-const GLYPH_WIDTH: usize = 9;
+const GLYPH_WIDTH: usize = 8;
 const GLYPH_HEIGHT: usize = 11;
 
-/// 9×11 bitmap glyph for the letter "D".
+/// 8×11 bitmap glyph for the letter "D".
 ///
-/// The left and right verticals (`##` and `##`) are two pixels
-/// thick; the hollow middle (`####`) and right-edge margin (`.`) match
-/// the 7×9 original so the letter still reads as a D and not as a
-/// rounded rectangle.
+/// Two-pixel-thick verticals (`##` and `##`) sandwich a 3-px hollow
+/// column; the rightmost column stays hollow so the letter reads as a
+/// D and not as an O.
 const GLYPH_D: [&[u8; GLYPH_WIDTH]; GLYPH_HEIGHT] = [
-    b"########.", // top bar
-    b"##....##.", // middle
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"########.", // bottom bar
+    b"########", // top bar
+    b"##...##.", // middle
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"########", // bottom bar
 ];
 
-/// 9×11 bitmap glyph for the letter "U".
+/// 8×11 bitmap glyph for the letter "U".
 ///
-/// Vertical strokes (`##....##`) match the D's middle rows; the
-/// bottom three rows form the U's curve so the letter is
-/// distinguishable from a square bracket.
+/// Vertical strokes match the D's middle rows; the bottom three rows
+/// form the U's curve so the letter is distinguishable from a
+/// square bracket.
 const GLYPH_U: [&[u8; GLYPH_WIDTH]; GLYPH_HEIGHT] = [
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b"##....##.",
-    b".######..", // bottom curve
-    b".######..",
-    b".######..",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b"##...##.",
+    b".######.", // bottom curve
+    b".######.",
+    b".######.",
 ];
 
-const DIGIT_WIDTH: usize = 3;
-const DIGIT_HEIGHT: usize = 5;
+const DIGIT_WIDTH: usize = 4;
+const DIGIT_HEIGHT: usize = 6;
 
-/// 3×5 bitmap glyphs for digits `0`..`9`. Indexed by `[digit][row]`
-/// (digit first so a single `GLYPH_DIGITS[digit][row]` lookup returns
-/// the `row`-th scanline of digit `d`). Same `'1'` (on) / `'0'` (off)
-/// encoding as the letter table; a single column gap is added between
-/// digit slots at render time so the number stays readable.
+/// 4×6 bitmap glyphs for digits `0`..`9`. Each digit is one pixel
+/// wider and one row taller than the original 3×5 sketch so the rate
+/// stays readable when Windows downscales the icon for the 16×16 tray
+/// slot. Hollow centres on `0`, `4`, `6`, `8`, `9` keep the
+/// glyphs from collapsing into solid blocks at small sizes.
 const GLYPH_DIGITS: [[&[u8; DIGIT_WIDTH]; DIGIT_HEIGHT]; 10] = [
     [
-        b"###", b"#.#", b"#.#", b"#.#", b"###", // 0
+        b"####", // 0
+        b"#..#", b"#..#", b"#..#", b"#..#", b"####",
     ],
     [
-        b".#.", b"##.", b".#.", b".#.", b"###", // 1
+        b".##.", // 1
+        b"###.", b"..#.", b"..#.", b"..#.", b"..#.",
     ],
     [
-        b"###", b"..#", b"###", b"#..", b"###", // 2
+        b"####", // 2
+        b"...#", b"####", b"#...", b"#...", b"####",
     ],
     [
-        b"###", b"..#", b"###", b"..#", b"###", // 3
+        b"####", // 3
+        b"...#", b"####", b"...#", b"...#", b"####",
     ],
     [
-        b"#.#", b"#.#", b"###", b"..#", b"..#", // 4
+        b"#..#", // 4
+        b"#..#", b"####", b"...#", b"...#", b"...#",
     ],
     [
-        b"###", b"#..", b"###", b"..#", b"###", // 5
+        b"####", // 5
+        b"#...", b"####", b"...#", b"...#", b"####",
     ],
     [
-        b"###", b"#..", b"###", b"#.#", b"###", // 6
+        b"####", // 6
+        b"#...", b"####", b"#..#", b"#..#", b"####",
     ],
     [
-        b"###", b"..#", b"..#", b"..#", b"..#", // 7
+        b"####", // 7
+        b"...#", b"..#.", b"..#.", b"..#.", b"..#.",
     ],
     [
-        b"###", b"#.#", b"###", b"#.#", b"###", // 8
+        b"####", // 8
+        b"#..#", b"####", b"#..#", b"#..#", b"####",
     ],
     [
-        b"###", b"#.#", b"###", b"..#", b"###", // 9
+        b"####", // 9
+        b"#..#", b"####", b"...#", b"...#", b"####",
     ],
 ];
 
@@ -282,10 +293,13 @@ fn paint_compact_value(
     }
     let row_height = bottom - top;
     let vertical_offset = (row_height as i32 - DIGIT_HEIGHT as i32) / 2;
-    let slot_pitch = DIGIT_WIDTH as i32 + 1; // 1 px gap between slots
-                                             // Right-align: digit slots occupy the rightmost columns of the
-                                             // number area. The unit letter takes a 1-px column on the very
-                                             // right when present.
+    // 4×6 digits sit shoulder-to-shoulder (no inter-slot gap) so three
+    // slots fill the 12-wide number column exactly: `ones` at the
+    // right edge, `tens` one slot to the left, `hundreds` two slots
+    // to the left. The gap from the bar column plus the digit's own
+    // hollow cells give enough breathing room that the cluster reads
+    // as three separate digits, not one blob.
+    let slot_pitch = DIGIT_WIDTH as i32;
     let right_edge = (NUMBER_RIGHT - 1) as i32;
     let digits: [Option<u8>; 3] = [compact.hundreds, compact.tens, compact.ones];
     for (index, digit) in digits.iter().enumerate() {
