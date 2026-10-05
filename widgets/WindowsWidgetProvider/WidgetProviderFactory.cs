@@ -17,6 +17,14 @@ namespace BiFlow.WidgetProvider;
 /// or <c>unsafe</c> pointer juggling is required.
 /// </para>
 /// </summary>
+///
+/// <para>
+/// No <c>[Guid]</c> on this class on purpose: the registered CLSID
+/// belongs to <see cref="WidgetProvider"/>, which is the class the
+/// manifest points <c>CreateInstance</c> at. The factory is only the
+/// thing that constructs it.
+/// </para>
+/// </summary>
 [ComVisible(true)]
 internal sealed class WidgetProviderFactory : ComWrappersSupport
 {
@@ -37,7 +45,6 @@ internal sealed class WidgetProviderFactory : ComWrappersSupport
 
 /// <summary>The two methods COM requires of a class factory.</summary>
 [ComVisible(true)]
-[Guid("00000001-0000-0000-C000-000000000046")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IClassFactory
 {
