@@ -287,6 +287,28 @@ describe("Tauri frontend contract", () => {
     assert.match(manifest, /MinVersion="10\.0\.17763\.0"/);
     assert.doesNotMatch(manifest, /uap3:AppExtension Category=/);
 
+    // Screenshots is REQUIRED inside ThemeResources, and it is the element the
+    // widget picker renders. Omit it and the package installs, the COM class
+    // registers, and the widget still never appears - the host has nothing to
+    // show in the Add Widgets dialog and drops the provider silently.
+    assert.match(manifest, /<Screenshots>/);
+    assert.match(manifest, /Path="Assets\\WidgetScreenshot\.png"/);
+    assert.match(manifest, /DisplayAltText="/);
+    // The picker expects 300x304 with transparent rounded corners.
+    const screenshot = readFileSync(
+      join(root, "widgets/WindowsWidgetProvider/Assets/WidgetScreenshot.png"),
+    );
+    assert.equal(
+      screenshot.readUInt32BE(16),
+      300,
+      "screenshot width must be 300",
+    );
+    assert.equal(
+      screenshot.readUInt32BE(20),
+      304,
+      "screenshot height must be 304",
+    );
+
     // The CLSID is duplicated in three places: the com:Class registration,
     // the widget host's CreateInstance activation, and ProviderClsid in the
     // C++ provider. A mismatch is a completely silent no-op - the widget host

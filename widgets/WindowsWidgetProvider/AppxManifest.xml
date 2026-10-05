@@ -144,6 +144,20 @@
                       <Icons>
                         <Icon Path="Assets\Square44x44Logo.png" />
                       </Icons>
+                      <!--
+                        Screenshots is REQUIRED, and it is the element the widget
+                        picker actually renders. Without it the Add Widgets
+                        dialog has nothing to show, the host silently drops the
+                        provider, and the widget simply never appears - even
+                        though the package installs and the COM class registers.
+                        300x304 with transparent rounded corners, per the
+                        "Integrate with the widget picker" guidance.
+                      -->
+                      <Screenshots>
+                        <Screenshot
+                          Path="Assets\WidgetScreenshot.png"
+                          DisplayAltText="BiFlow Traffic widget: split active, 1.24 GiB downloaded and 312.50 MiB uploaded." />
+                      </Screenshots>
                     </ThemeResources>
                   </Definition>
                 </Definitions>
