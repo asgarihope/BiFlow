@@ -23,10 +23,56 @@
 #include "BiFlowData.h"
 #include "WidgetIds.h"
 
+#include <windows.h>
+#include <objbase.h>
+#include <unknwn.h>
+
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Microsoft.Windows.Widgets.h>
 #include <winrt/Microsoft.Windows.Widgets.Providers.h>
+
+namespace
+{
+    // Diagnostics. This process has no user-facing surface, so a swallowed
+    // failure is indistinguishable from a broken widget: the board just keeps
+    // showing its skeleton forever. Every lifecycle callback and every HRESULT
+    // goes to %TEMP%\biflow-widget.log so a silent card can be explained.
+    void trace(std::string const& message)
+    {
+        // std::getenv returns char*, not wchar_t*, so go through
+        // std::filesystem rather than widening the value by hand.
+        std::wstring path = L"biflow-widget.log";
+        try
+        {
+            path = std::filesystem::temp_directory_path() / L"biflow-widget.log";
+        }
+        catch (...)
+        {
+            // No temp directory: fall back to the working directory and keep going.
+        }
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        char stamp[32];
+        sprintf_s(stamp, "%02d:%02d:%02d.%03d", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+        std::ofstream out(path, std::ios::app);
+        if (out)
+        {
+            out << stamp << " [pid " << GetCurrentProcessId() << "] " << message << "\n";
+        }
+    }
+
+    std::string hex(int32_t code)
+    {
+        char buffer[16];
+        sprintf_s(buffer, "0x%08X", static_cast<unsigned>(code));
+        return buffer;
+    }
+}
 
 namespace wp = winrt::Microsoft::Windows::Widgets::Providers;
 namespace ws = winrt::Microsoft::Windows::Widgets;
@@ -53,6 +99,7 @@ namespace BiFlow::Widget
         // The host asks for content when a widget is first pinned.
         void CreateWidget(wp::WidgetContext const& widgetContext)
         {
+            trace("CreateWidget");
             push(widgetContext);
         }
 
@@ -83,6 +130,7 @@ namespace BiFlow::Widget
         // the user wait out the host's cadence.
         void Activate(wp::WidgetContext const& widgetContext)
         {
+            trace("Activate");
             push(widgetContext);
         }
 
@@ -95,35 +143,53 @@ namespace BiFlow::Widget
         {
             if (!widgetContext)
             {
+                trace("push: no context");
                 return;
             }
             auto widgetId = widgetContext.Id();
             if (widgetId.empty())
             {
+                trace("push: empty widget id");
                 return;
             }
 
-            auto snapshot = readSnapshot();
-            // Adaptive Cards scale themselves, but the medium card carries the
-            // two-column totals and the routing caption that would not survive
-            // the small surface, so ask the host which one it has.
-            bool withTotals = widgetContext.Size() != ws::WidgetSize::Small;
-            auto card = buildCard(snapshot, withTotals);
-
             try
             {
+                auto snapshot = readSnapshot();
+                trace("snapshot connected=" + std::string(snapshot.connected ? "1" : "0") +
+                      " down=" + std::to_string(snapshot.downloadedTotal) +
+                      " up=" + std::to_string(snapshot.uploadedTotal) +
+                      " reason=" + winrt::to_string(snapshot.failureReason));
+
+                // Adaptive Cards scale themselves, but the medium card carries the
+                // two-column totals and the routing caption that would not survive
+                // the small surface, so ask the host which one it has.
+                bool withTotals = widgetContext.Size() != ws::WidgetSize::Small;
+                auto card = buildCard(snapshot, withTotals);
+                auto narrow = winrt::to_string(card);
+                trace("card(" + std::to_string(narrow.size()) + "): " + narrow.substr(0, 240));
+
+                auto manager = wp::WidgetManager::GetDefault();
+                trace("WidgetManager::GetDefault ok");
+
                 wp::WidgetUpdateRequestOptions options{widgetId};
                 options.Data(card);
                 options.Template(card);
                 options.IsPlaceholderContent(false);
-                wp::WidgetManager::GetDefault().UpdateWidget(options);
+                manager.UpdateWidget(options);
+                trace("UpdateWidget ok");
             }
-            catch (winrt::hresult_error const&)
+            catch (winrt::hresult_error const& error)
             {
-                // Deliberately silent. This process has no user-facing surface
-                // and no log consumer. A controller failure is reported
-                // through the card itself, which then reads "Disconnected"
-                // with the reason underneath.
+                trace("hresult_error " + hex(error.code().value) + ": " + winrt::to_string(error.message()));
+            }
+            catch (std::exception const& error)
+            {
+                trace(std::string("std::exception: ") + error.what());
+            }
+            catch (...)
+            {
+                trace("unknown exception");
             }
         }
     };
@@ -132,6 +198,7 @@ namespace BiFlow::Widget
     {
         HRESULT __stdcall CreateInstance(::IUnknown* outer, REFIID iid, void** result) noexcept
         {
+            trace("IClassFactory::CreateInstance");
             if (result)
             {
                 *result = nullptr;
@@ -195,8 +262,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     // the registration lifetime and we never re-register in-process.
     if (FAILED(CoRegisterClassObject(clsid, classFactory.get(), CLSCTX_LOCAL_SERVER, 0, &cookie)))
     {
+        trace("CoRegisterClassObject FAILED");
         return 1;
     }
+    trace("CoRegisterClassObject ok, cookie=" + std::to_string(cookie));
 
     // Stay alive until the shell releases the last factory reference.
     MSG message{};
