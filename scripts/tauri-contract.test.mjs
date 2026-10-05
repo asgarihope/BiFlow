@@ -160,15 +160,24 @@ describe("Tauri frontend contract", () => {
     assert.match(rust, /persist_main_window_size/);
   });
 
-  it("seeds the tray builder with the live rate icon", () => {
+  it("uses the static application logo for the tray icon", () => {
     const rust = readFileSync(join(root, "src-tauri/src/lib.rs"), "utf8");
-    // The BiFlow tray icon now redraws itself with a stacked D/U row;
-    // the static default-window-icon would never update.
-    assert.match(rust, /initial_tray_icon\(\)/);
+    // The tray is a standard Windows application icon: the bundled
+    // window icon, a plain title, and nothing generated at runtime. A
+    // regression that re-introduces a painted bitmap (live rates,
+    // status text, a synthesised image) would smuggle data back into
+    // the shell icon, which is exactly what the Windows 11 Widgets
+    // Board now exists to handle instead.
+    assert.match(rust, /app\s*\n?\s*\.default_window_icon\(\)/);
     assert.match(
       rust,
-      /TrayIconBuilder::with_id\("main"\)[\s\S]*?\.icon\(icon\)[\s\S]*?\.menu\(&menu\)/,
+      /TrayIconBuilder::with_id\("main"\)[\s\S]*?\.icon\(logo\)[\s\S]*?\.menu\(&menu\)/,
     );
+    assert.match(rust, /\.tooltip\("BiFlow"\)/);
+    // No renderer, no rate sampler, no live badge in the shell.
+    assert.doesNotMatch(rust, /initial_tray_icon/);
+    assert.doesNotMatch(rust, /render_rate_icon/);
+    assert.doesNotMatch(rust, /set_icon\(/);
     assert.match(rust, /MenuItem::with_id\(\s*app,\s*"dashboard"/);
     assert.match(rust, /app.emit\("app-navigate", "dashboard"\)/);
     assert.match(rust, /apply_tray_menu/);

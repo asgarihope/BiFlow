@@ -11,7 +11,6 @@ mod platform_paths;
 mod profile;
 mod profile_picker;
 mod reachability;
-mod taskbar_traffic;
 mod traffic;
 mod tray;
 mod version;
@@ -76,10 +75,6 @@ struct AppServices {
     paths: AppPaths,
     updates: Arc<UpdateCoordinator>,
     traffic: tokio::sync::Mutex<traffic::SessionAccumulator>,
-    /// Tracks the previous lifetime total so the 2 s traffic loop can
-    /// publish a bytes-per-second reading to the taskbar overlay without
-    /// waking the controller on every tick.
-    rate_sampler: tokio::sync::Mutex<taskbar_traffic::RateSampler>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -756,34 +751,6 @@ async fn session_traffic_sample(
 }
 
 #[tauri::command]
-async fn preview_taskbar_traffic(
-    download_bps: u64,
-    upload_bps: u64,
-    app: AppHandle,
-) -> Result<taskbar_traffic::TaskbarTrafficView, String> {
-    diagnostics::trace_action(
-        "taskbar",
-        "tauri_command",
-        "preview_taskbar_traffic",
-        async move {
-            let services = services(&app)?;
-            let config = services
-                .config_store
-                .load_or_create()
-                .map_err(|error| error.to_string())?;
-            Ok(taskbar_traffic::preview_rates(
-                taskbar_traffic::RateSample {
-                    download_bps,
-                    upload_bps,
-                },
-                &config,
-            ))
-        },
-    )
-    .await
-}
-
-#[tauri::command]
 async fn list_active_connections(app: AppHandle) -> Result<Vec<ActiveConnection>, String> {
     diagnostics::trace_action(
         "connections",
@@ -1239,10 +1206,6 @@ async fn save_settings(
             "saved settings"
         );
         services.backend.update_config(saved.clone()).await;
-        // The tray icon keeps rendering live rates while the toggle is
-        // on; turning it off drops back to the static BiFlow icon on
-        // the next traffic tick.
-        let _ = saved.behavior.taskbar_traffic_enabled;
         Ok(saved.redacted())
     })
     .await
@@ -3484,7 +3447,6 @@ fn create_services(app: &AppHandle) -> Result<AppServices, String> {
         paths,
         updates: Arc::new(UpdateCoordinator::new()),
         traffic: tokio::sync::Mutex::new(traffic::SessionAccumulator::default()),
-        rate_sampler: tokio::sync::Mutex::new(taskbar_traffic::RateSampler::default()),
     })
 }
 
@@ -3722,51 +3684,24 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
             services.engine.snapshot()
         });
     let menu = build_tray_menu(app.handle(), snapshot.phase, snapshot.busy)?;
-    // The BiFlow tray icon is the live D/U rate badge; start with the
-    // idle (0 / 0) form so the very first paint already matches the
-    // operator's mental model. The 2 s traffic loop then drives the
-    // rest of the redraws.
-    let icon = initial_tray_icon();
+    // The tray icon is the application's own bundled logo, exactly like
+    // a standard Windows application: no live rates, no status text, no
+    // generated bitmap. Live data belongs in the Windows 11 Widgets
+    // Board (see `widgets/WindowsWidgetProvider`) and in the main
+    // window, never painted into the shell icon.
+    let logo = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| tauri::Error::AssetNotFound("icons/icon.png".into()))?;
     TrayIconBuilder::with_id("main")
-        .icon(icon)
-        .tooltip(initial_tray_tooltip())
+        .icon(logo)
+        .tooltip("BiFlow")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| handle_tray_icon(tray, &event))
         .on_menu_event(|app, event| handle_tray_menu(app, &event))
         .build(app)?;
     Ok(())
-}
-
-/// Title shown when the operator hovers over the `BiFlow` tray icon
-/// before any traffic sample has landed. The live loop overwrites it
-/// with the formatted rates a few seconds after `Connect`.
-fn initial_tray_tooltip() -> &'static str {
-    "BiFlow — live traffic\r\nD: 0 B\r\nU: 0 B"
-}
-
-#[cfg(target_os = "windows")]
-fn initial_tray_icon() -> tauri::image::Image<'static> {
-    use iran_split_helper_winacl::tray_icon as windows_tray_icon;
-    let idle = iran_split_config::TaskbarCompactRate {
-        hundreds: None,
-        tens: None,
-        ones: Some(0),
-        unit: None,
-    };
-    let bytes = windows_tray_icon::render_rate_icon(0, 0, idle, idle);
-    tauri::image::Image::new_owned(
-        bytes,
-        windows_tray_icon::ICON_WIDTH,
-        windows_tray_icon::ICON_HEIGHT,
-    )
-}
-
-#[cfg(not(target_os = "windows"))]
-fn initial_tray_icon() -> tauri::image::Image<'static> {
-    // No icon yet — the next traffic tick will redraw; macOS / Linux
-    // builders are expected to ship a static placeholder later.
-    tauri::image::Image::new_owned(vec![], 1, 1)
 }
 
 /// Tauri command that re-opens / focuses the BiFlow main window. Wired
@@ -3847,114 +3782,22 @@ fn initialize_diagnostics() {
 }
 
 /// Samples session traffic every 2 s while connected, independent of the
-/// webview (whose timers are throttled when the window is hidden). Also
-/// feeds the rate sampler that powers the optional taskbar overlay so a
-/// hidden main window never starves the bandwidth readout.
+/// webview (whose timers are throttled when the window is hidden).
+///
+/// The totals stay in this process's memory (ADR 0111) and are served to
+/// the webview through `get_traffic_totals`. The Windows 11 Widgets Board
+/// provider in `widgets/WindowsWidgetProvider` deliberately does not read
+/// this process; it talks to the same Mihomo controller this loop samples,
+/// so the desktop needs no widget-facing state file.
 fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             if let Ok(services) = services(&handle) {
-                let running = matches!(
-                    services.engine.snapshot().phase,
-                    StackPhase::Running | StackPhase::Degraded
-                );
-                if running {
-                    sample_traffic_and_publish(services, &handle).await;
-                } else {
-                    // Disconnected / paused / stopped: the rate sampler
-                    // forgets its previous baseline AND the tray icon
-                    // collapses back to the idle form so the operator
-                    // is never shown a stale rate.
-                    let mut sampler = services.rate_sampler.lock().await;
-                    sampler.reset();
-                    publish_idle_tray(&handle, services);
-                }
+                sample_traffic(services).await;
             }
         }
     });
-}
-
-/// Re-publish the tray badge in its idle (0 / 0) state. Used when
-/// the engine is no longer Running / Degraded so the operator never
-/// sees a stale reading from a previous session.
-fn publish_idle_tray<R: Runtime>(handle: &AppHandle<R>, services: &AppServices) {
-    let Ok(config) = services.config_store.load_or_create() else {
-        return;
-    };
-    taskbar_traffic::publish_to_tray(
-        handle,
-        taskbar_traffic::RateSample {
-            download_bps: 0,
-            upload_bps: 0,
-        },
-        &config.behavior,
-    );
-}
-
-async fn sample_traffic_and_publish<R: Runtime>(services: &AppServices, handle: &AppHandle<R>) {
-    let session = sample_traffic(services).await;
-    // Re-read the raw lifetime totals so the rate sampler can compute
-    // bytes-per-second. Pulling them off the same controller sample that
-    // the accumulator just folded means the overlay and the session
-    // totals always agree on the same instant.
-    let raw = match session_traffic_sample(services).await {
-        Ok((sample, _)) => Some((sample.upload_total, sample.download_total)),
-        Err(cause) => {
-            warn!(
-                event = "taskbar.rate_sample_unavailable",
-                section = "taskbar",
-                initiator = "traffic_loop",
-                cause = %cause,
-                trace_route = "traffic_loop->mihomo_controller",
-                "taskbar overlay rate sample could not be read; keeping the previous baseline"
-            );
-            None
-        }
-    };
-    let Some((upload_total, download_total)) = raw else {
-        return;
-    };
-    let now = std::time::Instant::now();
-    let rates = {
-        let mut sampler = services.rate_sampler.lock().await;
-        sampler.observe(upload_total, download_total, now)
-    };
-    let Some(rates) = rates else {
-        // First sample, or a paused clock — wait one more tick so we
-        // never publish a misleading zero.
-        let _ = session;
-        return;
-    };
-    let config = match services.config_store.load_or_create() {
-        Ok(config) => config,
-        Err(cause) => {
-            warn!(
-                event = "taskbar.config_unavailable",
-                section = "taskbar",
-                initiator = "traffic_loop",
-                cause = %cause,
-                trace_route = "traffic_loop->config_store",
-                "taskbar overlay could not read the current settings"
-            );
-            return;
-        }
-    };
-    if !config.behavior.taskbar_traffic_enabled {
-        // Drop the toggle: reset the tray icon to its idle form so the
-        // operator does not see stale rates after disabling the badge.
-        taskbar_traffic::publish_to_tray(
-            handle,
-            taskbar_traffic::RateSample {
-                download_bps: 0,
-                upload_bps: 0,
-            },
-            &config.behavior,
-        );
-        return;
-    }
-    taskbar_traffic::publish_to_tray(handle, rates, &config.behavior);
-    let _ = session;
 }
 
 /// Refreshes health and rejoins late local proxies every 10 seconds.
@@ -4202,10 +4045,6 @@ pub use egress_cli::run_probe_cli;
 /// # Panics
 ///
 /// Panics when the diagnostic log or Tauri event loop cannot initialize.
-#[expect(
-    clippy::too_many_lines,
-    reason = "Tauri entry point wires plugins, capabilities, commands and runtime events"
-)]
 pub fn run() {
     #[cfg(target_os = "linux")]
     apply_linux_webview_workarounds();
@@ -4246,7 +4085,6 @@ pub fn run() {
             get_network_status,
             check_reachability,
             get_traffic_totals,
-            preview_taskbar_traffic,
             show_main_window,
             list_active_connections,
             start_stack,

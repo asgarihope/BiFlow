@@ -51,7 +51,6 @@ iran-split-platform-linux = { path = "../crates/iran-split-platform-linux" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 iran-split-platform-win = { path = "../crates/iran-split-platform-win" }
-iran-split-helper-winacl = { path = "../crates/iran-split-helper-winacl" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 iran-split-platform-macos = { path = "../crates/iran-split-platform-macos" }

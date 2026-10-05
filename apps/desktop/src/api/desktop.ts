@@ -19,7 +19,6 @@ import type {
   NetworkStatus,
   OperationAccepted,
   ReachabilityResult,
-  TaskbarTrafficView,
   TrafficTotals,
   RouteTestResult,
   StackSnapshot,
@@ -48,17 +47,6 @@ export const desktop = {
   },
   getTrafficTotals(): Promise<TrafficTotals> {
     return native ? invoke("get_traffic_totals") : mockApi.getTrafficTotals();
-  },
-  previewTaskbarTraffic(
-    downloadBps: number,
-    uploadBps: number,
-  ): Promise<TaskbarTrafficView> {
-    return native
-      ? invoke("preview_taskbar_traffic", {
-          downloadBps,
-          uploadBps,
-        })
-      : mockApi.previewTaskbarTraffic(downloadBps, uploadBps);
   },
   listActiveConnections(): Promise<ActiveConnection[]> {
     return native

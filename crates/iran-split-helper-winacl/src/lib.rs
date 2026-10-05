@@ -16,12 +16,6 @@ mod windows_impl;
 #[cfg(windows)]
 pub use windows_impl::create_helper_server;
 
-/// In-memory renderer for the BiFlow tray icon. Lives next to the
-/// Windows-only helper code because it owns the bitmap, but the
-/// rendering itself is pure and tests live on every host.
-#[cfg(any(windows, test))]
-pub mod tray_icon;
-
 #[cfg(test)]
 mod tests {
     use super::HELPER_PIPE_SDDL;

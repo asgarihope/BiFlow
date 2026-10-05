@@ -26,8 +26,6 @@ import type {
   OperationStage,
   StackPhase,
   StackSnapshot,
-  TaskbarTrafficUnit,
-  TaskbarTrafficView,
   UpdateProgress,
   TrafficTotals,
   ActiveConnection,
@@ -38,51 +36,6 @@ import type {
 import { validateDirectDns } from "../lib/directDns";
 import { sanitizeDefaultRoute } from "../lib/clients";
 import { MOCK_HIDDIFY_ID, outboundFromKey } from "../lib/outbound";
-
-/// Mirror of the Rust `format_bandwidth_rate` so the Settings UI mock
-/// can preview what the live taskbar overlay will render for a given
-/// rate + display choice. Exposed for unit tests too.
-export interface MockTaskbarTrafficDisplay {
-  unit: TaskbarTrafficUnit;
-  bits: boolean;
-}
-
-export function mockTaskbarTrafficDisplay(): MockTaskbarTrafficDisplay {
-  return { unit: "auto", bits: false };
-}
-
-export function mockFormatRate(
-  bytesPerSecond: number,
-  display: MockTaskbarTrafficDisplay,
-): string {
-  const multiplier = display.bits ? 8 : 1;
-  const raw = Math.max(0, Math.floor(bytesPerSecond * multiplier));
-  let exponent: number;
-  if (display.unit === "auto") {
-    exponent =
-      raw < 1_000 ? 0 : raw < 1_000_000 ? 1 : raw < 1_000_000_000 ? 2 : 3;
-  } else {
-    exponent =
-      display.unit === "bytes"
-        ? 0
-        : display.unit === "kilobytes"
-          ? 1
-          : display.unit === "megabytes"
-            ? 2
-            : 3;
-  }
-  const denominator = Math.pow(10, exponent * 3);
-  const value = denominator === 0 ? raw : raw / denominator;
-  const label = ["", "K", "M", "G"][exponent];
-  const suffix = display.bits ? "b" : "B";
-  if (value < 0.05) {
-    return `0 ${label}${suffix}`;
-  }
-  if (value >= 100) {
-    return `${value.toFixed(0)} ${label}${suffix}`;
-  }
-  return `${value.toFixed(1)} ${label}${suffix}`;
-}
 
 const GOOGLE_SEARCH_COMPANIONS = [
   "gstatic.com",
@@ -209,9 +162,6 @@ function initialSettings(): AppConfig {
       connect_at_launch: false,
       close_to_tray: true,
       fail_closed: true,
-      taskbar_traffic_enabled: true,
-      taskbar_traffic_unit: "auto",
-      taskbar_traffic_bits: false,
     },
   };
 }
@@ -935,18 +885,6 @@ export const mockApi = {
     lastSessionSent = sessionSent;
     lastSessionReceived = sessionReceived;
     return { ...trafficTotals };
-  },
-  async previewTaskbarTraffic(
-    downloadBps: number,
-    uploadBps: number,
-  ): Promise<TaskbarTrafficView> {
-    // Mirrors the Rust formatter used by the live overlay so the
-    // Settings preview and the production widget agree on the
-    // exact string for a given rate + display.
-    const display = mockTaskbarTrafficDisplay();
-    const download = mockFormatRate(downloadBps, display);
-    const upload = mockFormatRate(uploadBps, display);
-    return { download, upload };
   },
   async listActiveConnections(): Promise<ActiveConnection[]> {
     if (snapshot.phase !== "running" && snapshot.phase !== "degraded") {

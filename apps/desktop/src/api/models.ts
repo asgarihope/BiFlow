@@ -182,22 +182,7 @@ export interface AppConfig {
     connect_at_launch: boolean;
     close_to_tray: boolean;
     fail_closed: boolean;
-    taskbar_traffic_enabled: boolean;
-    taskbar_traffic_unit: TaskbarTrafficUnit;
-    taskbar_traffic_bits: boolean;
   };
-}
-
-export type TaskbarTrafficUnit =
-  | "auto"
-  | "bytes"
-  | "kilobytes"
-  | "megabytes"
-  | "gigabytes";
-
-export interface TaskbarTrafficView {
-  download: string;
-  upload: string;
 }
 
 export interface ValidationIssue {

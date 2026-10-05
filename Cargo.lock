@@ -2139,7 +2139,6 @@ dependencies = [
  "iran-split-clients",
  "iran-split-config",
  "iran-split-core",
- "iran-split-helper-winacl",
  "iran-split-ipc",
  "iran-split-mihomo",
  "iran-split-platform-linux",
@@ -2198,7 +2197,6 @@ dependencies = [
 name = "iran-split-helper-winacl"
 version = "6.2.61"
 dependencies = [
- "iran-split-config",
  "tokio",
  "windows",
 ]

@@ -9,7 +9,6 @@ import { desktop } from "../api/desktop";
 import type {
   AppConfig,
   DirectDnsPreset,
-  TaskbarTrafficView,
   ValidationIssue,
 } from "../api/models";
 import {
@@ -25,14 +24,6 @@ import { TabBar, TabPanel } from "./ui/Tabs";
 import { usePageTab } from "./ui/usePageTab";
 
 const SETTINGS_TABS = ["mihomo", "behavior", "about"] as const;
-
-const TASKBAR_UNIT_OPTIONS = [
-  { value: "auto", sample: "9.6 MB" },
-  { value: "bytes", sample: "9,600,000 B" },
-  { value: "kilobytes", sample: "9,600 KB" },
-  { value: "megabytes", sample: "9.6 MB" },
-  { value: "gigabytes", sample: "0.01 GB" },
-] as const;
 
 const formSchema = z
   .object({
@@ -60,15 +51,6 @@ const formSchema = z
     connectAtLaunch: z.boolean(),
     closeToTray: z.boolean(),
     failClosed: z.boolean(),
-    taskbarTrafficEnabled: z.boolean(),
-    taskbarTrafficUnit: z.enum([
-      "auto",
-      "bytes",
-      "kilobytes",
-      "megabytes",
-      "gigabytes",
-    ]),
-    taskbarTrafficBits: z.boolean(),
   })
   .superRefine((values, context) => {
     if (values.directDnsPreset !== "custom") return;
@@ -98,9 +80,6 @@ function toValues(config: AppConfig): FormValues {
     connectAtLaunch: config.behavior.connect_at_launch,
     closeToTray: config.behavior.close_to_tray,
     failClosed: config.behavior.fail_closed,
-    taskbarTrafficEnabled: config.behavior.taskbar_traffic_enabled,
-    taskbarTrafficUnit: config.behavior.taskbar_traffic_unit,
-    taskbarTrafficBits: config.behavior.taskbar_traffic_bits,
   };
 }
 
@@ -126,9 +105,6 @@ function merge(config: AppConfig, values: FormValues): AppConfig {
       connect_at_launch: values.connectAtLaunch,
       close_to_tray: values.closeToTray,
       fail_closed: values.failClosed,
-      taskbar_traffic_enabled: values.taskbarTrafficEnabled,
-      taskbar_traffic_unit: values.taskbarTrafficUnit,
-      taskbar_traffic_bits: values.taskbarTrafficBits,
     },
   };
 }
@@ -149,9 +125,6 @@ export function Settings({ settings }: { settings: AppConfig }) {
     defaultValues: toValues(settings),
   });
   const directDnsPreset = watch("directDnsPreset");
-  const taskbarTrafficEnabled = watch("taskbarTrafficEnabled");
-  const taskbarTrafficUnit = watch("taskbarTrafficUnit");
-  const taskbarTrafficBits = watch("taskbarTrafficBits");
 
   useEffect(() => reset(toValues(settings)), [reset, settings]);
 
@@ -317,42 +290,6 @@ export function Settings({ settings }: { settings: AppConfig }) {
                     registration={register("failClosed")}
                   />
                 </div>
-                <div className="space-y-3 sm:col-span-2">
-                  <Check
-                    label="Show live D / U rates inside the BiFlow tray icon"
-                    registration={register("taskbarTrafficEnabled")}
-                  />
-                  <Field
-                    label="Tray badge unit"
-                    hint={
-                      taskbarTrafficEnabled
-                        ? "Auto scales B → KB → MB → GB. Pinned units stay at that magnitude."
-                        : "Disabled. The BiFlow tray icon stays as its idle D / U form."
-                    }
-                    error={errors.taskbarTrafficUnit?.message}
-                  >
-                    <select
-                      {...register("taskbarTrafficUnit")}
-                      disabled={!taskbarTrafficEnabled}
-                      className="w-full rounded-xl border-ink/15 bg-canvas disabled:opacity-50"
-                    >
-                      {TASKBAR_UNIT_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.value} ({option.sample})
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Check
-                    label="Display in bits (Kb / Mb / Gb) instead of bytes"
-                    registration={register("taskbarTrafficBits")}
-                  />
-                  <TaskbarPreview
-                    enabled={taskbarTrafficEnabled}
-                    unit={taskbarTrafficUnit}
-                    bits={taskbarTrafficBits}
-                  />
-                </div>
               </Fieldset>
             ) : null}
           </div>
@@ -456,63 +393,5 @@ function Check({
       />
       {label}
     </label>
-  );
-}
-
-/// Mirrors the live tray-icon badge so the operator can sanity-check
-/// the chosen unit / bits mode before they save. Reuses the same Rust
-/// formatter via `preview_taskbar_traffic` so this preview and the
-/// production icon never disagree on the rendered text.
-function TaskbarPreview({
-  enabled,
-  unit,
-  bits,
-}: {
-  enabled: boolean;
-  unit: FormValues["taskbarTrafficUnit"];
-  bits: boolean;
-}) {
-  const [view, setView] = useState<TaskbarTrafficView | null>(null);
-  useEffect(() => {
-    if (!enabled) {
-      setView(null);
-      return;
-    }
-    let cancelled = false;
-    const sample = 9_600_000;
-    desktop
-      .previewTaskbarTraffic(sample, sample / 2)
-      .then((value) => {
-        if (!cancelled) setView(value);
-      })
-      .catch(() => {
-        if (!cancelled) setView(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, unit, bits]);
-  return (
-    <div
-      aria-live="polite"
-      className="rounded-xl border border-ink/10 bg-canvas/60 p-3 text-sm"
-    >
-      <p className="mb-1 text-xs uppercase tracking-wide text-muted">Preview</p>
-      {enabled ? (
-        view ? (
-          <p className="font-mono text-sm">
-            <span className="block">D: {view.download}</span>
-            <span className="block">U: {view.upload}</span>
-          </p>
-        ) : (
-          <p className="text-xs text-muted">Computing…</p>
-        )
-      ) : (
-        <p className="text-xs text-muted">
-          Badge is off. Toggle the checkbox above to enable the live D / U
-          readout inside the BiFlow tray icon.
-        </p>
-      )}
-    </div>
   );
 }

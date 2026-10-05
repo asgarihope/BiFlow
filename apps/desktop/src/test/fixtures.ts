@@ -41,9 +41,6 @@ export function baseSettings(overrides: Partial<AppConfig> = {}): AppConfig {
       connect_at_launch: false,
       close_to_tray: true,
       fail_closed: true,
-      taskbar_traffic_enabled: true,
-      taskbar_traffic_unit: "auto",
-      taskbar_traffic_bits: false,
     },
     ...overrides,
   };
