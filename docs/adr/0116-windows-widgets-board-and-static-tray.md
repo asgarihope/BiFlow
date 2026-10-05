@@ -81,6 +81,32 @@ It also keeps ADR 0111 intact: session traffic totals remain an in-memory
 delta accumulator inside the desktop process on purpose, and nothing
 reintroduces a `traffic-totals.json` round-trip.
 
+**4. The MSIX is bundled as an installer resource and registered by the NSIS
+hook, on a best-effort basis.**
+
+`bundle.resources` maps `../packaging/staged/windows/widget/` to `widget/`, so
+the package lands at `$INSTDIR\widget\BiFlow.WidgetProvider.msix`. The
+`NSIS_HOOK_POSTINSTALL` macro runs `Add-AppxPackage` only when that file
+exists, and `NSIS_HOOK_PREUNINSTALL` removes the package by identity
+(`IranSplit.BiFlow.WidgetProvider`) because `Remove-AppxPackage` matches the
+package, not the file, and the file is already gone by then.
+
+Tauri v2's `NsisConfig` has **no** `installerFiles` key, so the extra payload
+has to travel through `bundle.resources`; the contract test asserts the key is
+absent so nobody reaches for it again.
+
+The failure policy is deliberately asymmetric. The privileged Helper must
+succeed or the install `Abort`s — a machine without it cannot connect. The
+widget step must **never** abort: Windows 10, developer mode being off, and an
+unsigned package the user has not trusted are all ordinary conditions on a
+perfectly good BiFlow installation. The hook prints the real reason and points
+at `build.ps1 -Install` instead of failing.
+
+A build without the .NET SDK stages no MSIX, so `IfFileExists` skips the block
+and the installer ships a working desktop with no widget. That is the common
+case for a source build, and it is why staging is a build-time step rather
+than a checked-in artifact.
+
 ## Consequences
 
 - The desktop is a plain NSIS installer again with a static tray logo. No
@@ -100,3 +126,14 @@ reintroduces a `traffic-totals.json` round-trip.
 - Byte formatting uses binary units (`KiB`, `MiB`, `GiB`) to match the
   desktop status bar exactly, so the same number never appears with two
   different suffixes in two places.
+- Automatic registration needs an **unsigned package to be trusted**
+  (developer mode) or a signed one. `Add-AppxPackage` refuses a package signed
+  by a certificate the machine does not trust, and the hook reports exactly
+  that rather than failing the install.
+- Fixing the hook exposed a latent install bug: the Helper line used
+  `"$PROGRAMDATA\iran-split\staging"`, and NSIS has no `$PROGRAMDATA` — the
+  token expanded to empty, leaving `--staging-dir` valueless, which
+  `install_from_args` rejects, so the Windows install aborted after copying
+  every file. `makensis` reported it only as warning 6000 and a contract test
+  asserted the typo itself, so both had to be corrected. The hook is now
+  compiled directly with `makensis` to surface every warning.

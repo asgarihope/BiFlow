@@ -39,7 +39,8 @@
     ],
     "resources": {
       "../resources/rules/": "rules/",
-      "../resources/licenses/": "licenses/"
+      "../resources/licenses/": "licenses/",
+      "../packaging/staged/windows/widget/": "widget/"
     },
     "category": "Utility",
     "shortDescription": "Safe Iran split routing through Hiddify",

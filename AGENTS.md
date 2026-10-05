@@ -651,3 +651,17 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
 - Cargo normalizes hyphens in target names to underscores when creating Windows
   PDB files. Give a package's binary and library distinct target names or Cargo
   emits an output-collision warning during every build (ADR 0107).
+- NSIS has no `$PROGRAMDATA`. An unknown `$...` token expands to empty, so
+  `"$PROGRAMDATA\iran-split\staging"` handed the Helper a valueless
+  `--staging-dir`; `install_from_args` requires it, so the Windows install
+  aborted after copying every file. `makensis` only reports this as warning
+  6000, and a contract test that asserted the _typo itself_ kept it green.
+  Use `$COMMONPROGRAMDATA`, compile `target/release/nsis/x64/installer.nsi`
+  directly with `makensis` to see every warning, and pin the negative form in
+  `scripts/tauri-contract.test.mjs` (ADR 0116).
+- The Tauri NSIS template does not `!include LogicLib`, so a LogicLib
+  conditional in `installer-hooks.nsh` is a compile error while `warn 6000` is
+  not. Use plain labels and `IfFileExists` / `StrCmp`, and re-run `makensis`
+  after editing the hook rather than assuming the bundle step validated it.
+  Scan the hook through `nsisCode()` so its "why we avoid X" comments neither
+  trip a negative contract nor satisfy a positive one (ADR 0116).

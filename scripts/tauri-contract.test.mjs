@@ -6,6 +6,22 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+/**
+ * Strip whole-line `;` comments from an NSIS script.
+ *
+ * The installer hook documents *why* it avoids a construct (a LogicLib
+ * conditional, `$PROGRAMDATA`). Scanning the raw text would then either fail
+ * the negative contract on the explanation, or let the explanation satisfy a
+ * positive one. The rule is the same as the Rust source contracts below: read
+ * the production lines only.
+ */
+function nsisCode(source) {
+  return source
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith(";"))
+    .join("\n");
+}
+
 function rustSources(directory) {
   const files = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -110,9 +126,8 @@ describe("Tauri frontend contract", () => {
   });
 
   it("points NSIS helper staging at ProgramData iran-split staging", () => {
-    const hook = readFileSync(
-      join(root, "packaging/windows/installer-hooks.nsh"),
-      "utf8",
+    const hook = nsisCode(
+      readFileSync(join(root, "packaging/windows/installer-hooks.nsh"), "utf8"),
     );
     const desktop = readFileSync(join(root, "src-tauri/src/lib.rs"), "utf8");
     const install = readFileSync(
@@ -123,7 +138,13 @@ describe("Tauri frontend contract", () => {
       join(root, "crates/iran-split-helper/src/windows.rs"),
       "utf8",
     );
-    assert.match(hook, /\$PROGRAMDATA\\iran-split\\staging/);
+    // NSIS has no `$PROGRAMDATA`. An unknown `$...` token expands to empty, so
+    // the old `$PROGRAMDATA\iran-split\staging` silently dropped the helper's
+    // required --staging-dir value and the install aborted at the very end. The
+    // negative assertion is the real guard: `$COMMONPROGRAMDATA` cannot match
+    // `\$PROGRAMDATA`, so reintroducing the typo fails here instead of silently.
+    assert.match(hook, /\$COMMONPROGRAMDATA\\iran-split\\staging/);
+    assert.doesNotMatch(hook, /\$PROGRAMDATA/);
     assert.doesNotMatch(hook, /\$LOCALAPPDATA\\biflow\\runtime\\generations/);
     assert.ok(install.includes(String.raw`C:\ProgramData\iran-split\staging`));
     assert.match(desktop, /generation_staging_dir/);
@@ -185,6 +206,67 @@ describe("Tauri frontend contract", () => {
     assert.match(tray, /fn labels_for/);
     assert.match(tray, /fn actions_enabled/);
     assert.match(rust, /reserve_lifecycle/);
+  });
+
+  it("bundles and registers the Windows 11 widget package from the NSIS installer", () => {
+    const conf = JSON.parse(
+      readFileSync(join(root, "src-tauri/tauri.conf.json"), "utf8"),
+    );
+    const nsis = conf.bundle.windows.nsis;
+
+    // The MSIX is staged into the installer through `bundle.resources`;
+    // Tauri v2's NsisConfig has no `installerFiles` key, so a
+    // well-meaning "just add the file" edit lands in schema rejection.
+    assert.equal(
+      nsis.installerFiles,
+      undefined,
+      "NsisConfig has no installerFiles; extra files belong in bundle.resources",
+    );
+    assert.match(
+      conf.bundle.resources["../packaging/staged/windows/widget/"],
+      /^widget\//,
+    );
+
+    const hooks = nsisCode(
+      readFileSync(join(root, "packaging/windows/installer-hooks.nsh"), "utf8"),
+    );
+    assert.match(hooks, /!macro NSIS_HOOK_POSTINSTALL/);
+    assert.match(
+      hooks,
+      /IfFileExists "\$INSTDIR\\widget\\BiFlow\.WidgetProvider\.msix"/,
+    );
+    assert.match(hooks, /Add-AppxPackage/);
+    assert.match(hooks, /!macro NSIS_HOOK_PREUNINSTALL/);
+    assert.match(hooks, /Remove-AppxPackage/);
+
+    // The widget is optional: its failure must never abort the install.
+    // Only the Helper is allowed to `Abort`, so count the aborts and pin
+    // that exactly one remains, on the Helper path.
+    const postinstall = hooks.match(
+      /!macro NSIS_HOOK_POSTINSTALL[\s\S]*?!macroend/,
+    )[0];
+    assert.equal(
+      (postinstall.match(/^\s*Abort /gm) || []).length,
+      1,
+      "only the Helper failure may abort the install",
+    );
+    assert.match(postinstall, /Abort "BiFlow Helper installation failed"/);
+    assert.doesNotMatch(postinstall, /Abort[^"]*widget/i);
+
+    // The Tauri NSIS template does not include LogicLib, so the hooks must
+    // use plain jumps. A stray `${If}` compiles on the dev machine only if
+    // someone added the include, and fails in CI otherwise.
+    assert.doesNotMatch(hooks, /\$\{(If|EndIf|StrCmp)\b/);
+
+    // Windows 10 must stay a no-op: the package itself is what the OS
+    // decides to ignore, and the desktop never depends on it.
+    const manifest = readFileSync(
+      join(root, "widgets/WindowsWidgetProvider/Package.appxmanifest"),
+      "utf8",
+    );
+    assert.match(manifest, /Category="windows\.widgets"/);
+    assert.match(manifest, /Category="windows\.comServer"/);
+    assert.match(manifest, /MinVersion="10\.0\.17763\.0"/);
   });
 
   it("disables WebKitGTK DMA-BUF rendering before the Linux webview starts", () => {
@@ -462,9 +544,8 @@ describe("Tauri frontend contract", () => {
   });
 
   it("fails NSIS install and uninstall when the privileged Helper command fails", () => {
-    const hooks = readFileSync(
-      join(root, "packaging/windows/installer-hooks.nsh"),
-      "utf8",
+    const hooks = nsisCode(
+      readFileSync(join(root, "packaging/windows/installer-hooks.nsh"), "utf8"),
     );
     for (const [macro, command] of [
       ["POSTINSTALL", "--install"],

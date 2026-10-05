@@ -11,7 +11,17 @@
 src-tauri/gen/
 src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
-packaging/staged/
+# `packaging/staged/*` and not `packaging/staged/`: git refuses to descend into
+# a fully-ignored directory, so a `!` exception underneath one can never match.
+# The widget staging folder is tracked (README + .gitkeep) so the source tree
+# always has the directory the bundle mapping points at; the built MSIX stays
+# ignored and is dropped in by `build.ps1 -Stage`.
+packaging/staged/*
+!packaging/staged/windows/
+packaging/staged/windows/*
+!packaging/staged/windows/widget/
+!packaging/staged/windows/widget/**
+packaging/staged/windows/widget/*.msix
 resources/rules/cache/
 
 test-results/

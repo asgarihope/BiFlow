@@ -25,6 +25,12 @@
 
 .PARAMETER Install
     Install the produced MSIX for the current user after building.
+
+.PARAMETER Stage
+    Copy the MSIX into packaging\staged\windows\widget\ so the next
+    `pnpm tauri build --bundles nsis` bundles it into the installer and
+    installs it automatically. This is what the release pipeline runs
+    before the NSIS build.
 #>
 [CmdletBinding()]
 param(
@@ -33,7 +39,9 @@ param(
 
     [string]$CertificateThumbprint,
 
-    [switch]$Install
+    [switch]$Install,
+
+    [switch]$Stage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +51,7 @@ $ProjectRoot  = Split-Path -Parent $PSScriptRoot
 $ProviderDir  = Join-Path $ProjectRoot 'widgets\WindowsWidgetProvider'
 $ProviderRoot = $ProviderDir
 $DistDir      = Join-Path $ProviderRoot 'dist'
+$StageDir     = Join-Path $ProjectRoot 'packaging\staged\windows\widget'
 
 # --- 0. Guard rails -------------------------------------------------------
 $osVersion = [System.Environment]::OSVersion.Version
@@ -155,8 +164,19 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Packed: $msixPath" -ForegroundColor Green
 
-# --- 4. Optional install --------------------------------------------------
-if ($Install) {
+# --- 4. Stage for the NSIS installer, and/or install ----------------------
+if ($Stage) {
+    New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+    # Clear any previous build so a stale MSIX is never bundled.
+    Get-ChildItem $StageDir -Filter '*.msix' -ErrorAction SilentlyContinue |
+        Remove-Item -Force
+    Copy-Item $msixPath -Destination $StageDir
+    Write-Host "`n[4/4] Staged for the NSIS installer" -ForegroundColor Yellow
+    Write-Host "  $StageDir\BiFlow.WidgetProvider.msix" -ForegroundColor Green
+    Write-Host '  Run: pnpm tauri build --bundles nsis' -ForegroundColor Green
+    Write-Host '  The installer will register the widget automatically.' -ForegroundColor Green
+}
+elseif ($Install) {
     Write-Host "`n[4/4] Installing for the current user" -ForegroundColor Yellow
     if ($CertificateThumbprint) {
         Add-AppxPackage -Path $msixPath
@@ -167,7 +187,7 @@ if ($Install) {
     Write-Host 'Installed. Open the Widgets Board and pin "BiFlow Traffic" from the + menu.' -ForegroundColor Green
 }
 else {
-    Write-Host "`n[4/4] Skipped install (pass -Install to install it)" -ForegroundColor Yellow
+    Write-Host "`n[4/4] Skipped install (pass -Install or -Stage)" -ForegroundColor Yellow
 }
 
 Write-Host "`nDone." -ForegroundColor Cyan
