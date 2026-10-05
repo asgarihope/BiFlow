@@ -2,16 +2,19 @@
 //! desktop host feeds back to Tauri as the tray icon image.
 //!
 //! The icon is the BiFlow tray icon itself — no separate overlay window.
-//! On every traffic sample we redraw a tiny two-row panel:
+//! On every traffic sample we redraw a tight two-row panel:
 //!
 //! ```text
-//! ┌───────────────────────┐
-//! │ D │ ▓▓▓ │ 1.2 M      │  ← cyan "D" + bar + 3-digit value
-//! │ U │ ▓▓░ │ 850 K      │  ← orange "U" + bar + 3-digit value
-//! └───────────────────────┘
+//! ┌──────────────────────┐
+//! │ DDD │ ▓▓▓ │ 1.2 M    │  ← cyan "D" (9 px) + bar + 3-digit value
+//! │ UUU │ ▓▓░ │ 850 K    │  ← orange "U" (9 px) + bar + 3-digit value
+//! └──────────────────────┘
 //! ```
 //!
-//! Bytes are laid out top-down in RGBA order to match what
+//! The panel fills the full 32×32 surface — no dark border frame, no
+//! outer halo — so the D / U letters and the rate value stay legible
+//! when Windows downscales the icon for the 16×16 tray slot. Bytes
+//! are laid out top-down in RGBA order to match what
 //! `tauri::image::Image::new` expects.
 
 use iran_split_config::TaskbarCompactRate;
@@ -28,8 +31,10 @@ pub const STRIDE_BYTES: usize = (ICON_WIDTH as usize) * 4;
 /// line fills the bar without an unrealistic 256 MB/s peak.
 pub const SATURATION_BPS: u64 = 16 * 1024 * 1024;
 
-/// Column at which the D / U label glyph starts.
-const LABEL_LEFT: u32 = 2;
+/// Column at which the D / U label glyph starts. The full 32×32 panel
+/// is content, so the glyph hugs the left edge with a single-pixel
+/// breathing room.
+const LABEL_LEFT: u32 = 1;
 /// First column to the right of the label glyph (gap column included).
 const LABEL_RIGHT: u32 = LABEL_LEFT + GLYPH_WIDTH as u32 + 1;
 /// First column the rate bar can paint into.
@@ -40,9 +45,9 @@ const BAR_RIGHT: u32 = BAR_LEFT + BAR_WIDTH;
 const BAR_WIDTH: u32 = 10;
 /// First column the compact numeric readout can paint into.
 const NUMBER_LEFT: u32 = BAR_RIGHT + 1;
-/// First column past the compact numeric readout (always inside the
-/// right border so digits stay readable when saturated).
-const NUMBER_RIGHT: u32 = ICON_WIDTH - 2;
+/// First column past the compact numeric readout (right against the
+/// canvas edge — the icon no longer leaves a 2-px dark border).
+const NUMBER_RIGHT: u32 = ICON_WIDTH;
 
 /// Returns a 32×32 RGBA buffer with two stacked rows (`D` over `U`) that
 /// show the live download and upload speed. Bytes are top-down in RGBA
@@ -56,7 +61,6 @@ pub fn render_rate_icon(
 ) -> Vec<u8> {
     let mut buffer = vec![0u8; STRIDE_BYTES * ICON_HEIGHT as usize];
     paint_background(&mut buffer);
-    paint_border(&mut buffer);
     paint_label(&mut buffer, 'D', 0, ICON_HEIGHT / 2, LABEL_COLOR_DOWNLOAD);
     paint_label(
         &mut buffer,
@@ -102,8 +106,7 @@ const BAR_COLOR_DOWNLOAD: [u8; 4] = [80, 220, 255, 255];
 const BAR_COLOR_UPLOAD: [u8; 4] = [255, 168, 64, 255];
 const NUMBER_COLOR_DOWNLOAD: [u8; 4] = [200, 240, 255, 255];
 const NUMBER_COLOR_UPLOAD: [u8; 4] = [255, 220, 170, 255];
-const PANEL_COLOR: [u8; 4] = [18, 26, 46, 235];
-const BORDER_COLOR: [u8; 4] = [6, 10, 20, 255];
+const PANEL_COLOR: [u8; 4] = [18, 26, 46, 245];
 
 fn paint_background(buffer: &mut [u8]) {
     for chunk in buffer.chunks_exact_mut(4) {
@@ -111,20 +114,10 @@ fn paint_background(buffer: &mut [u8]) {
     }
 }
 
-fn paint_border(buffer: &mut [u8]) {
-    for x in 0..ICON_WIDTH {
-        write_pixel(buffer, x, 0, BORDER_COLOR);
-        write_pixel(buffer, x, ICON_HEIGHT - 1, BORDER_COLOR);
-    }
-    for y in 0..ICON_HEIGHT {
-        write_pixel(buffer, 0, y, BORDER_COLOR);
-        write_pixel(buffer, ICON_WIDTH - 1, y, BORDER_COLOR);
-    }
-}
-
-/// Draw a 7×9 bitmap glyph for the given letter into the panel row
-/// spanning `top..bottom`. The glyph sits in the leftmost 8 pixels so
-/// the right-hand side stays free for the rate bar.
+/// Draw a 9×11 bitmap glyph for the given letter into the panel row
+/// spanning `top..bottom`. The bigger glyph fills more of the 32×32
+/// panel than the original 7×9 sketch so the D / U letters stay
+/// readable after Windows downscales the icon for the 16×16 tray slot.
 fn paint_label(buffer: &mut [u8], letter: char, top: u32, bottom: u32, color: [u8; 4]) {
     let row_height = bottom - top;
     let glyph = match letter {
@@ -159,19 +152,46 @@ fn paint_label(buffer: &mut [u8], letter: char, top: u32, bottom: u32, color: [u
     }
 }
 
-const GLYPH_WIDTH: usize = 7;
-const GLYPH_HEIGHT: usize = 9;
+const GLYPH_WIDTH: usize = 9;
+const GLYPH_HEIGHT: usize = 11;
 
-/// 7×9 bitmap glyph for the letter "D".
+/// 9×11 bitmap glyph for the letter "D".
+///
+/// The left and right verticals (`##` and `##`) are two pixels
+/// thick; the hollow middle (`####`) and right-edge margin (`.`) match
+/// the 7×9 original so the letter still reads as a D and not as a
+/// rounded rectangle.
 const GLYPH_D: [&[u8; GLYPH_WIDTH]; GLYPH_HEIGHT] = [
-    b"1111110", b"1111110", b"1100110", b"1100110", b"1100110", b"1100110", b"1100110", b"1111110",
-    b"1111110",
+    b"########.", // top bar
+    b"##....##.", // middle
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"########.", // bottom bar
 ];
 
-/// 7×9 bitmap glyph for the letter "U".
+/// 9×11 bitmap glyph for the letter "U".
+///
+/// Vertical strokes (`##....##`) match the D's middle rows; the
+/// bottom three rows form the U's curve so the letter is
+/// distinguishable from a square bracket.
 const GLYPH_U: [&[u8; GLYPH_WIDTH]; GLYPH_HEIGHT] = [
-    b"1100110", b"1100110", b"1100110", b"1100110", b"1100110", b"1100110", b"1100110", b"1111110",
-    b"0111100",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b"##....##.",
+    b".######..", // bottom curve
+    b".######..",
+    b".######..",
 ];
 
 const DIGIT_WIDTH: usize = 3;
@@ -230,8 +250,11 @@ fn paint_bar(buffer: &mut [u8], top: u32, bottom: u32, rate_bps: u64, color: [u8
     let saturation_u64 = u64::from(SATURATION_BPS as u32);
     let width = (usable_width * saturation + saturation_u64 / 2) / saturation_u64;
     let width_u32 = u32::try_from(width).unwrap_or(u32::MAX);
-    let bar_top = top + 4;
-    let bar_bottom = bottom - 4;
+    // Bars sit flush with the panel top/bottom so the icon reads as
+    // a full-height split even at the 16×16 tray size; the 1-px gap
+    // on each side keeps the bar from kissing the canvas edge.
+    let bar_top = top + 1;
+    let bar_bottom = bottom - 1;
     for y in bar_top..bar_bottom {
         for x in BAR_LEFT..BAR_LEFT + width_u32 {
             if x >= BAR_RIGHT {
