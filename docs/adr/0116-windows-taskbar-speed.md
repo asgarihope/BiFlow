@@ -41,6 +41,13 @@ element. Read-only cached UI Automation leaf bounds identify occupied regions.
 Reserve the tray and a conservative 220-DIP weather/widgets region, then select
 a 156-DIP gap with margins. Never move or resize Explorer controls, reserve
 unsupported shell space, inject code, elevate, or fall back to a floating window.
+The child uses `WS_EX_LAYERED` and constant alpha 255 so the compositor presents
+its GDI surface above Explorer's XAML. The shared desktop/smoke manifest declares
+Windows 10/11 compatibility (retaining common-controls v6), which Windows requires
+for [layered child windows](https://learn.microsoft.com/en-us/windows/win32/winmsg/using-windows).
+The owner timer invalidates and synchronously paints at most twice per second;
+accessibility messages cannot cause a repaint loop. The first paint records
+address-free clip geometry in `taskbar.paint_surface`.
 The two GDI rows have fixed arrow/value areas and a monospace value font. Verify
 worker-thread ownership before writing to a stored HWND, because Explorer can
 destroy the child and Windows can recycle its handle during a shell restart. Theme
@@ -57,7 +64,8 @@ have one-second COM timeouts and the element traversal has a two-second budget.
 Transient or unknown layout data fails closed. Lifecycle events record stable
 causes without window titles, addresses, traffic targets, or user content.
 `environment.snapshot`/`environment.json` include taskbar status and an
-enabled-but-unavailable finding.
+enabled-but-unavailable finding. The snapshot also reports `taskbar_renderer`
+and flags unlayered/clipped surfaces even when the HWND reports attached.
 
 ## Reference and license
 
@@ -90,7 +98,14 @@ README screenshots when changing Settings. Native smoke verification is opt-in:
 cargo test -p iran-split-taskbar --test windows_smoke -- --ignored --nocapture
 ```
 
-The native smoke test exercised actual attachment at 96 DPI, rate updates,
+The native smoke test initially proved only HWND attachment. A real 6.2.62 report
+showed that the child was visible by Win32 flags and painted into its DC but
+absent from the composed desktop. Version 6.2.63 adds layered composition and
+Windows compatibility manifests; the regression samples only the test-owned
+child rectangle with one `CAPTUREBLT` snapshot and checks visible glyph contrast
+across periodic layout/rate updates, allowing bounded startup layout recovery.
+It can run beside an installed BiFlow without touching that process's child.
+The updated smoke test exercised actual composed glyphs at 96 DPI, rate updates,
 disable/re-enable, periodic layout validation, and shutdown. It does not prove
 visual correctness or full interactive Tauri routing. Before release, complete
 these manual Windows 11 checks:

@@ -78,6 +78,25 @@ describe("release artifact names", () => {
     assert.notEqual(libraryName, packageName.replaceAll("-", "_"));
   });
 
+  it("shares Windows compatibility between the desktop and layered-child smoke test", () => {
+    const manifest = readFileSync(
+      join(root, "crates/iran-split-taskbar/windows.manifest"),
+      "utf8",
+    );
+    const desktopBuild = readFileSync(join(root, "src-tauri/build.rs"), "utf8");
+    const smokeBuild = readFileSync(
+      join(root, "crates/iran-split-taskbar/build.rs"),
+      "utf8",
+    );
+    assert.match(manifest, /8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a/);
+    assert.match(manifest, /Microsoft\.Windows\.Common-Controls/);
+    assert.doesNotMatch(manifest, /requireAdministrator/);
+    assert.match(desktopBuild, /app_manifest\(include_str!\(/);
+    assert.match(desktopBuild, /iran-split-taskbar\/windows\.manifest/);
+    assert.match(smokeBuild, /rustc-link-arg-tests=\/MANIFESTINPUT:/);
+    assert.match(smokeBuild, /join\("windows\.manifest"\)/);
+  });
+
   it("rejects a --from stage that does not exist on that packaging target", () => {
     if (isWindows) return;
     const result = spawnSync(

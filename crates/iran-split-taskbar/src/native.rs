@@ -3,7 +3,7 @@ use crate::{find_gap, format_rate};
 use std::{
     cell::{Cell, RefCell},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc::{self, Receiver, Sender},
         Arc, Mutex, Weak,
     },
@@ -16,10 +16,10 @@ use windows::{
         Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::{
             BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect,
-            GetSysColor, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
-            CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_BTNTEXT, DEFAULT_CHARSET, DEFAULT_PITCH,
-            DEFAULT_QUALITY, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HDC,
-            HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+            GetClipBox, GetSysColor, InvalidateRect, SelectObject, SetBkMode, SetTextColor,
+            UpdateWindow, CLIP_DEFAULT_PRECIS, COLOR_BTNFACE, COLOR_BTNTEXT, DEFAULT_CHARSET,
+            DEFAULT_PITCH, DEFAULT_QUALITY, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+            DT_VCENTER, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
         },
         System::{
             Com::{
@@ -44,15 +44,16 @@ use windows::{
             HiDpi::GetDpiForWindow,
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW,
-                FindWindowW, GetAncestor, GetClientRect, GetMessageW, GetParent, GetWindowRect,
-                GetWindowThreadProcessId, IsWindow, KillTimer, PostMessageW, RegisterClassW,
-                RegisterWindowMessageW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
-                UnregisterClassW, EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE,
-                EVENT_OBJECT_LOCATIONCHANGE, GA_ROOT, HTCLIENT, HWND_TOP, MSG, SWP_NOACTIVATE,
-                SWP_SHOWWINDOW, SW_HIDE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE,
-                WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCHITTEST, WM_PAINT,
-                WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_CHILD,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+                FindWindowW, GetAncestor, GetClientRect, GetMessageW, GetParent, GetWindowLongPtrW,
+                GetWindowRect, GetWindowThreadProcessId, IsWindow, KillTimer, PostMessageW,
+                RegisterClassW, RegisterWindowMessageW, SetLayeredWindowAttributes, SetTimer,
+                SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW, EVENT_OBJECT_CREATE,
+                EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, GA_ROOT, GWL_EXSTYLE, HTCLIENT,
+                HWND_TOP, LWA_ALPHA, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+                WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND,
+                WM_LBUTTONUP, WM_NCHITTEST, WM_PAINT, WM_POWERBROADCAST, WM_SETTINGCHANGE,
+                WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_POPUP,
             },
         },
     },
@@ -77,6 +78,7 @@ struct Input {
 }
 
 static DIAGNOSTICS: Mutex<Option<Weak<Mutex<Input>>>> = Mutex::new(None);
+static RENDER_SURFACE: AtomicU8 = AtomicU8::new(0);
 static THEME_FALLBACK_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[must_use]
@@ -92,6 +94,17 @@ pub fn diagnostic_status() -> Status {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .status
         })
+}
+
+/// Address-free renderer state for environment snapshots.
+#[must_use]
+pub fn diagnostic_renderer() -> &'static str {
+    match RENDER_SURFACE.load(Ordering::Relaxed) {
+        1 => "layered_gdi",
+        2 => "unlayered_gdi",
+        3 => "clipped",
+        _ => "awaiting_paint",
+    }
 }
 
 /// Thread-safe mailbox. No native handle crosses this interface.
@@ -197,6 +210,7 @@ struct PaintState {
     click: Arc<dyn Fn() + Send + Sync>,
 }
 thread_local! {
+    static PAINT_DIAGNOSED: Cell<bool> = const { Cell::new(false) };
     static PAINT: RefCell<Option<PaintState>> = const { RefCell::new(None) };
     static WINDOWS: Cell<(HWND, HWND, HWND)> = const {
         Cell::new((HWND(std::ptr::null_mut()), HWND(std::ptr::null_mut()), HWND(std::ptr::null_mut())))
@@ -231,16 +245,30 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
 // Out-of-context hooks are dispatched by the registering worker's message pump.
 unsafe extern "system" fn layout_event(
     _hook: HWINEVENTHOOK,
-    _event: u32,
+    event: u32,
     hwnd: HWND,
-    _object: i32,
+    object: i32,
     _child: i32,
     _thread: u32,
     _time: u32,
 ) {
     WINDOWS.with(|state| {
         let (host, parent, display) = state.get();
+        if hwnd == display || owns_window(hwnd) {
+            return;
+        }
         if !parent.is_invalid() && GetAncestor(hwnd, GA_ROOT) == parent {
+            tracing::debug!(
+                event = "taskbar.layout_invalidated",
+                section = "taskbar",
+                initiator = "shell_hook",
+                cause = "shell_event",
+                trace_route = "explorer->taskbar",
+                shell_event = event,
+                shell_object = object,
+                parent_event = hwnd == parent,
+                "taskbar layout invalidated"
+            );
             if owns_window(display) {
                 // ShowWindow's BOOL reports previous visibility, not failure.
                 let _was_visible = ShowWindow(display, SW_HIDE);
@@ -274,6 +302,8 @@ unsafe fn owns_window(hwnd: HWND) -> bool {
 
 impl Worker {
     unsafe fn destroy(&mut self) {
+        RENDER_SURFACE.store(0, Ordering::Relaxed);
+        PAINT_DIAGNOSED.with(|state| state.set(false));
         for hook in self.hooks.drain(..) {
             if !UnhookWinEvent(hook).as_bool() {
                 audit("taskbar.cleanup_failed", "unhook_failed");
@@ -379,7 +409,7 @@ impl Worker {
         {
             self.destroy();
             self.display = CreateWindowExW(
-                WS_EX_NOACTIVATE,
+                WS_EX_NOACTIVATE | WS_EX_LAYERED,
                 w!("BiFlowTaskbarSpeed"),
                 w!("BiFlow network speed"),
                 WS_CHILD,
@@ -393,6 +423,11 @@ impl Worker {
                 None,
             )
             .map_err(|_| "embedding_failed")?;
+            // Explorer's XAML surface can cover an ordinary GDI child despite
+            // IsWindowVisible reporting true. An opaque layered child gives
+            // DWM a separate composition surface without creating an overlay.
+            SetLayeredWindowAttributes(self.display, COLORREF(0), 255, LWA_ALPHA)
+                .map_err(|_| "layered_composition_failed")?;
             self.parent = parent;
             WINDOWS.with(|state| {
                 let (host, _, _) = state.get();
@@ -883,6 +918,7 @@ unsafe fn pump_host(
                     | WM_POWERBROADCAST
             );
         if broadcast || msg.message == WM_LAYOUT || latest.enabled != previous_enabled {
+            layout_requested(msg.message);
             worker.epoch = worker.epoch.wrapping_add(1);
             if owns_window(worker.display) {
                 let _was_visible = ShowWindow(worker.display, SW_HIDE);
@@ -911,10 +947,8 @@ unsafe fn pump_host(
         } else {
             Status::Attached
         };
-        if owns_window(worker.display)
-            && !InvalidateRect(Some(worker.display), None, false).as_bool()
-        {
-            audit("taskbar.paint_failed", "invalidate_failed");
+        if msg.message == WM_TIMER {
+            repaint(worker.display);
         }
         let _translated = TranslateMessage(&raw const msg);
         DispatchMessageW(&raw const msg);
@@ -931,6 +965,27 @@ unsafe fn pump_host(
         Err(windows::core::Error::empty())
     } else {
         Ok(())
+    }
+}
+
+fn layout_requested(message: u32) {
+    tracing::debug!(
+        event = "taskbar.layout_requested",
+        section = "taskbar",
+        initiator = "message_pump",
+        cause = "layout_event",
+        trace_route = "win32->taskbar",
+        message_id = message,
+        "taskbar layout check requested"
+    );
+}
+
+unsafe fn repaint(hwnd: HWND) {
+    if !owns_window(hwnd) {
+        return;
+    }
+    if !InvalidateRect(Some(hwnd), None, false).as_bool() || !UpdateWindow(hwnd).as_bool() {
+        audit("taskbar.paint_failed", "repaint_failed");
     }
 }
 
@@ -963,6 +1018,7 @@ unsafe fn paint(hwnd: HWND, input: Input) {
         return;
     }
     let mut rect = RECT::default();
+    inspect_surface(hwnd, dc);
     if GetClientRect(hwnd, &raw mut rect).is_err() {
         audit("taskbar.paint_failed", "client_bounds_failed");
     } else if let Err(cause) = paint_content(dc, rect, GetDpiForWindow(hwnd).max(96), input) {
@@ -971,6 +1027,40 @@ unsafe fn paint(hwnd: HWND, input: Input) {
     if !EndPaint(hwnd, &raw const ps).as_bool() {
         audit("taskbar.paint_failed", "end_paint_failed");
     }
+}
+
+unsafe fn inspect_surface(hwnd: HWND, dc: HDC) {
+    let mut clip = RECT::default();
+    let region = GetClipBox(dc, &raw mut clip);
+    let layered =
+        GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & isize::try_from(WS_EX_LAYERED.0).unwrap_or(0) != 0;
+    let surface = if clip.right <= clip.left || clip.bottom <= clip.top {
+        3
+    } else if layered {
+        1
+    } else {
+        2
+    };
+    let previous = RENDER_SURFACE.swap(surface, Ordering::Relaxed);
+    if surface != 1 && previous != surface {
+        audit("taskbar.surface_unavailable", "composition_or_clip_invalid");
+    }
+    PAINT_DIAGNOSED.with(|diagnosed| {
+        if !diagnosed.replace(true) {
+            tracing::info!(
+                event = "taskbar.paint_surface",
+                section = "taskbar",
+                initiator = "native_renderer",
+                cause = "first_paint",
+                trace_route = "taskbar->gdi",
+                layered,
+                clip_kind = region.0,
+                clip_width = clip.right - clip.left,
+                clip_height = clip.bottom - clip.top,
+                "native paint surface inspected"
+            );
+        }
+    });
 }
 
 unsafe fn theme_colors() -> (COLORREF, COLORREF) {

@@ -136,6 +136,8 @@ const KNOWN_VPN_PROCESSES: &[&str] = &[
 pub struct EnvironmentReport {
     /// Native taskbar lifecycle only; never includes window titles or coordinates.
     pub taskbar_speed: Option<&'static str>,
+    /// Address-free native composition/clip state, separate from HWND attachment.
+    pub taskbar_renderer: Option<&'static str>,
     pub collected_at: String,
     pub collection_ms: u64,
     pub system: SystemInfo,
@@ -536,6 +538,7 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
     report.services = known_services(platform.services);
     #[cfg(windows)]
     {
+        report.taskbar_renderer = Some(iran_split_taskbar::diagnostic_renderer());
         report.taskbar_speed = Some(match iran_split_taskbar::diagnostic_status() {
             iran_split_taskbar::Status::Disabled => "disabled",
             iran_split_taskbar::Status::Attached => "attached",
@@ -1195,6 +1198,11 @@ fn findings(report: &EnvironmentReport, config: Option<&AppConfig>) -> Vec<Strin
         {
             findings.push("taskbar_speed_unavailable:see_taskbar_lifecycle_events".into());
         }
+        if config.behavior.show_taskbar_speed
+            && matches!(report.taskbar_renderer, Some("clipped" | "unlayered_gdi"))
+        {
+            findings.push("taskbar_surface_unavailable:see_taskbar_paint_surface".into());
+        }
     }
     port_findings(report, config, &biflow_ports, &mut findings);
     network_findings(report, config, &mut findings);
@@ -1655,6 +1663,26 @@ mod tests {
         assert!(!super::findings(&report, Some(&config))
             .iter()
             .any(|finding| finding.starts_with("taskbar_speed_unavailable:")));
+    }
+    #[test]
+    fn attachment_does_not_hide_a_broken_taskbar_surface() {
+        let mut report = super::EnvironmentReport {
+            taskbar_speed: Some("attached"),
+            taskbar_renderer: Some("unlayered_gdi"),
+            ..Default::default()
+        };
+        let mut config = iran_split_config::AppConfig::default();
+        config.behavior.show_taskbar_speed = true;
+        for renderer in ["unlayered_gdi", "clipped"] {
+            report.taskbar_renderer = Some(renderer);
+            assert!(super::findings(&report, Some(&config))
+                .iter()
+                .any(|finding| finding.starts_with("taskbar_surface_unavailable:")));
+        }
+        report.taskbar_renderer = Some("layered_gdi");
+        assert!(!super::findings(&report, Some(&config))
+            .iter()
+            .any(|finding| finding.starts_with("taskbar_surface_unavailable:")));
     }
     use super::*;
 

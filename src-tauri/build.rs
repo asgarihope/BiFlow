@@ -15,5 +15,11 @@ fn main() {
     println!("cargo:rerun-if-changed=../version");
     ensure_staged_helper("../packaging/staged/iran-split-helper");
     ensure_staged_helper("../packaging/staged/iran-split-helper.exe");
-    tauri_build::build();
+    println!("cargo:rerun-if-changed=../crates/iran-split-taskbar/windows.manifest");
+    let attributes = tauri_build::Attributes::new().windows_attributes(
+        tauri_build::WindowsAttributes::new().app_manifest(include_str!(
+            "../crates/iran-split-taskbar/windows.manifest"
+        )),
+    );
+    tauri_build::try_build(attributes).expect("Tauri build configuration failed");
 }

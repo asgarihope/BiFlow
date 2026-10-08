@@ -3,7 +3,7 @@
 #[cfg(windows)]
 mod native;
 #[cfg(windows)]
-pub use native::{diagnostic_status, Display, Status};
+pub use native::{diagnostic_renderer, diagnostic_status, Display, Status};
 
 /// Selects a gap with margins, preferring the weather side of the taskbar.
 /// All coordinates are taskbar-client physical pixels. Unknown layouts fail closed.
