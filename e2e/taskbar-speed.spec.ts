@@ -63,6 +63,10 @@ test("Windows taskbar preference saves and toggles without a stack restart", asy
   await expect(
     page.getByRole("heading", { name: "Connected", exact: true }),
   ).toBeVisible();
+  await page.locator("[data-connection-action='disconnect']").click();
+  await expect(
+    page.getByRole("heading", { name: "Not connected", exact: true }),
+  ).toBeVisible();
   await settings.click();
   await page.getByRole("tab", { name: "Behavior", exact: true }).click();
   await expect(toggle).toBeChecked();

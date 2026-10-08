@@ -3769,23 +3769,13 @@ fn initialize_diagnostics() {
 /// webview (whose timers are throttled when the window is hidden).
 fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        #[cfg(windows)]
-        let mut rates = traffic::RateTracker::default();
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             if let Ok(services) = services(&handle) {
-                if cfg!(windows)
-                    || matches!(
-                        services.engine.snapshot().phase,
-                        StackPhase::Running | StackPhase::Degraded
-                    )
-                {
-                    #[cfg(windows)]
-                    {
-                        let totals = sample_traffic(services).await;
-                        taskbar::publish(&handle, &mut rates, totals).await;
-                    }
-                    #[cfg(not(windows))]
+                if matches!(
+                    services.engine.snapshot().phase,
+                    StackPhase::Running | StackPhase::Degraded
+                ) {
                     sample_traffic(services).await;
                 }
             }

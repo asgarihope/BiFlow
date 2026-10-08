@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+ADR [0117](./0117-physical-interface-taskbar.md) supersedes the statistics,
+row order, width, gap preference and opaque background choices below in 6.2.64.
+The native ownership, compatibility and lifecycle decisions remain in force.
+
 ## Decision
 
 Persist `behavior.show_taskbar_speed`, default false, with backward-compatible

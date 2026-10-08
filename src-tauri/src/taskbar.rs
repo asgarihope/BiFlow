@@ -1,10 +1,18 @@
 //! Tauri lifecycle bridge. Native handles remain inside the boundary crate.
-use crate::{services, show_main, traffic};
+use crate::{services, show_main};
 use iran_split_taskbar::Display;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use tauri::{AppHandle, Manager, Runtime};
 
-pub struct Taskbar(Mutex<Option<Display>>);
+pub struct Taskbar(Mutex<Option<Display>>, AtomicBool);
+static ADAPTER_STATE: Mutex<&'static str> = Mutex::new("disabled");
+
+pub fn adapter_state() -> &'static str {
+    *ADAPTER_STATE.lock().expect("adapter state")
+}
 
 pub fn setup<R: Runtime>(app: &AppHandle<R>) {
     let handle = app.clone();
@@ -42,7 +50,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) {
         );
         None
     };
-    app.manage(Taskbar(Mutex::new(display)));
+    app.manage(Taskbar(Mutex::new(display), AtomicBool::new(false)));
     if let Ok(config) = services(app).and_then(|services| {
         services
             .config_store
@@ -60,10 +68,12 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) {
             "taskbar preference could not be read"
         );
     }
+    spawn_interface_sampler(app.clone());
 }
 
 pub fn set_enabled<R: Runtime>(app: &AppHandle<R>, enabled: bool) {
     if let Some(state) = app.try_state::<Taskbar>() {
+        state.1.store(enabled, Ordering::Release);
         if let Some(display) = state.0.lock().expect("taskbar state").as_ref() {
             display.set_enabled(enabled);
             tracing::info!(
@@ -79,29 +89,84 @@ pub fn set_enabled<R: Runtime>(app: &AppHandle<R>, enabled: bool) {
     }
 }
 
-pub async fn publish<R: Runtime>(
-    app: &AppHandle<R>,
-    tracker: &mut traffic::RateTracker,
-    totals: traffic::TrafficTotals,
-) {
-    let available = if let Ok(services) = services(app) {
-        services.traffic.lock().await.sample_available()
+fn spawn_interface_sampler<R: Runtime>(app: AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        let mut tracker = iran_split_netstats::RateTracker::default();
+        let mut previous = "disabled";
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            timer.tick().await;
+            let Some(state) = app.try_state::<Taskbar>() else {
+                break;
+            };
+            if state.0.lock().expect("taskbar state").is_none() {
+                break;
+            }
+            let enabled = state.1.load(Ordering::Acquire);
+            let result = if enabled {
+                tauri::async_runtime::spawn_blocking(iran_split_netstats::sample)
+                    .await
+                    .unwrap_or(Err("interface_sampler_join_failed"))
+            } else {
+                Ok(None)
+            };
+            let (sample, status) = match result {
+                Ok(Some(sample)) => (Some(sample), sample.class),
+                Ok(None) => (
+                    None,
+                    if enabled {
+                        "no_active_physical_adapter"
+                    } else {
+                        "disabled"
+                    },
+                ),
+                Err(cause) => (None, cause),
+            };
+            if status != previous {
+                adapter_transition(status);
+                previous = status;
+            }
+            *ADAPTER_STATE.lock().expect("adapter state") = status;
+            let rates = tracker.update(sample, std::time::Instant::now());
+            if let Some(display) = state.0.lock().expect("taskbar state").as_ref() {
+                display.update(
+                    rates.map(|rates| rates.upload),
+                    rates.map(|rates| rates.download),
+                );
+            };
+        }
+        tracing::info!(
+            event = "traffic.interface_sampler_stopped",
+            section = "traffic",
+            initiator = "application_shutdown",
+            cause = "taskbar_shutdown",
+            trace_route = "shutdown->interface_stats",
+            "physical interface sampler stopped"
+        );
+    });
+}
+
+fn adapter_transition(status: &'static str) {
+    if matches!(status, "wifi" | "ethernet" | "disabled") {
+        tracing::info!(
+            event = "traffic.interface_source_changed",
+            section = "traffic",
+            initiator = "interface_sampler",
+            cause = status,
+            trace_route = "ip_helper->shared_stats->taskbar",
+            source = "physical_interface",
+            "physical interface source changed"
+        );
     } else {
         tracing::warn!(
-            event = "taskbar.sample_unavailable",
-            section = "taskbar",
-            initiator = "traffic_sampler",
-            cause = "services_unavailable",
-            trace_route = "traffic->taskbar",
-            "taskbar sample unavailable"
+            event = "traffic.interface_sample_unavailable",
+            section = "traffic",
+            initiator = "interface_sampler",
+            cause = status,
+            trace_route = "ip_helper->shared_stats->taskbar",
+            "physical interface statistics unavailable"
         );
-        false
-    };
-    let (upload, download) = tracker.sample(totals, available, std::time::Instant::now());
-    if let Some(state) = app.try_state::<Taskbar>() {
-        if let Some(display) = state.0.lock().expect("taskbar state").as_ref() {
-            display.update(upload, download);
-        }
     }
 }
 

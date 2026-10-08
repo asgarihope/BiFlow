@@ -120,3 +120,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0114](./0114-macos-helper-security-and-dns-recovery.md)       | Authorize Unix helper peers and preserve macOS DNS recovery         | Accepted   |
 | [0115](./0115-resolved-runtime-profile.md)                     | One resolved runtime profile owns profile-dependent resources       | Accepted   |
 | [0116](./0116-windows-taskbar-speed.md)                        | Native Windows 11 taskbar rates from corrected session counters     | Accepted   |
+| [0117](./0117-physical-interface-taskbar.md)                   | Complete physical adapter throughput in a compact tray-side widget  | Accepted   |

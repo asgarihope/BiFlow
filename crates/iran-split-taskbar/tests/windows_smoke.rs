@@ -5,13 +5,15 @@ use std::time::{Duration, Instant};
 use windows::{
     core::w,
     Win32::{
-        Foundation::{HWND, RECT},
+        Foundation::{COLORREF, HWND, RECT},
         Graphics::Gdi::{
             BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
             GetPixel, ReleaseDC, SelectObject, CAPTUREBLT, SRCCOPY,
         },
+        UI::HiDpi::GetDpiForWindow,
         UI::WindowsAndMessaging::{
-            FindWindowExW, FindWindowW, GetWindowRect, GetWindowThreadProcessId,
+            FindWindowExW, FindWindowW, GetLayeredWindowAttributes, GetWindowRect,
+            GetWindowThreadProcessId, LWA_COLORKEY,
         },
     },
 };
@@ -35,6 +37,46 @@ fn owned_child() -> Option<HWND> {
 
 fn child_present() -> bool {
     owned_child().is_some()
+}
+
+fn verify_compact_tray_layout_and_transparency(hwnd: HWND) {
+    // SAFETY: read-only geometry and compositor state of our own child.
+    unsafe {
+        let parent = FindWindowW(w!("Shell_TrayWnd"), None).expect("primary taskbar");
+        let tray = FindWindowExW(Some(parent), None, w!("TrayNotifyWnd"), None).expect("tray");
+        let mut child_bounds = RECT::default();
+        let mut tray_bounds = RECT::default();
+        GetWindowRect(hwnd, &raw mut child_bounds).expect("child bounds");
+        GetWindowRect(tray, &raw mut tray_bounds).expect("tray bounds");
+        let dpi = i32::try_from(GetDpiForWindow(parent).max(96)).expect("dpi");
+        assert_eq!(child_bounds.right - child_bounds.left, 108 * dpi / 96);
+        let gap = tray_bounds.left - child_bounds.right;
+        assert!(
+            (0..=8 * dpi / 96).contains(&gap),
+            "widget is not next to tray: {gap}"
+        );
+        let mut key = COLORREF::default();
+        let mut flags = LWA_COLORKEY;
+        GetLayeredWindowAttributes(hwnd, Some(&raw mut key), None, Some(&raw mut flags))
+            .expect("layered attributes");
+        assert_eq!(flags, LWA_COLORKEY);
+        // One read at each neighboring background point proves the desktop
+        // shows through instead of displaying the near-black key fill.
+        let dc = GetDC(None);
+        assert!(!dc.is_invalid());
+        let inside = GetPixel(dc, child_bounds.left + 2, child_bounds.top + 2).0;
+        let beside = GetPixel(dc, child_bounds.left - 2, child_bounds.top + 2).0;
+        assert_eq!(ReleaseDC(None, dc), 1);
+        assert_ne!(inside, key.0, "opaque color-key background");
+        assert_ne!(inside, u32::MAX);
+        assert_ne!(beside, u32::MAX);
+        assert!(
+            [0, 8, 16]
+                .into_iter()
+                .all(|shift| { ((inside >> shift) & 255).abs_diff((beside >> shift) & 255) <= 6 }),
+            "widget background differs from adjacent taskbar"
+        );
+    }
 }
 
 fn visible_ink_pixels(hwnd: HWND) -> usize {
@@ -126,6 +168,7 @@ fn native_enable_update_disable_reenable_and_shutdown() {
         visible_ink_pixels(owned_child().expect("owned child")) >= 20,
         "HWND attached but speed glyphs are absent from the composed desktop"
     );
+    verify_compact_tray_layout_and_transparency(owned_child().expect("owned child"));
     for _ in 0..24 {
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(

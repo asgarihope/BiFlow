@@ -1,5 +1,5 @@
 //! HWND/GDI ownership stays on the message pump; UIA runs on a windowless MTA.
-use crate::{find_gap, format_rate};
+use crate::{find_gap, format_rate, rows};
 use std::{
     cell::{Cell, RefCell},
     sync::{
@@ -49,7 +49,7 @@ use windows::{
                 RegisterClassW, RegisterWindowMessageW, SetLayeredWindowAttributes, SetTimer,
                 SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW, EVENT_OBJECT_CREATE,
                 EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, GA_ROOT, GWL_EXSTYLE, HTCLIENT,
-                HWND_TOP, LWA_ALPHA, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+                HWND_TOP, LWA_COLORKEY, MSG, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
                 WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND,
                 WM_LBUTTONUP, WM_NCHITTEST, WM_PAINT, WM_POWERBROADCAST, WM_SETTINGCHANGE,
                 WM_THEMECHANGED, WM_TIMER, WNDCLASSW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
@@ -216,6 +216,8 @@ thread_local! {
         Cell::new((HWND(std::ptr::null_mut()), HWND(std::ptr::null_mut()), HWND(std::ptr::null_mut())))
     };
 }
+// Only this background key is transparent; glyphs remain clickable.
+const BACKGROUND_KEY: COLORREF = COLORREF(0x0003_0201);
 const WM_LAYOUT: u32 = WM_APP + 1;
 
 unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -424,9 +426,9 @@ impl Worker {
             )
             .map_err(|_| "embedding_failed")?;
             // Explorer's XAML surface can cover an ordinary GDI child despite
-            // IsWindowVisible reporting true. An opaque layered child gives
+            // IsWindowVisible reporting true. A color-keyed layered child gives
             // DWM a separate composition surface without creating an overlay.
-            SetLayeredWindowAttributes(self.display, COLORREF(0), 255, LWA_ALPHA)
+            SetLayeredWindowAttributes(self.display, BACKGROUND_KEY, 0, LWA_COLORKEY)
                 .map_err(|_| "layered_composition_failed")?;
             self.parent = parent;
             WINDOWS.with(|state| {
@@ -617,8 +619,8 @@ unsafe fn discover(automation: &IUIAutomation, display: usize) -> Result<Layout,
         &bar,
         &mut occupied,
     )?;
-    let requested = scale(156);
-    let x = find_gap(width, &occupied, requested, scale(8)).ok_or("insufficient_taskbar_space")?;
+    let requested = scale(108);
+    let x = find_gap(width, &occupied, requested, scale(4)).ok_or("insufficient_taskbar_space")?;
     Ok(Layout {
         parent: parent.0.addr(),
         bar,
@@ -1101,8 +1103,8 @@ unsafe fn theme_colors() -> (COLORREF, COLORREF) {
 }
 
 unsafe fn paint_content(dc: HDC, rect: RECT, dpi: u32, input: Input) -> Result<(), &'static str> {
-    let (background, foreground) = theme_colors();
-    let brush = CreateSolidBrush(background);
+    let (_background, foreground) = theme_colors();
+    let brush = CreateSolidBrush(BACKGROUND_KEY);
     if brush.is_invalid() {
         return Err("create_brush_failed");
     }
@@ -1147,12 +1149,12 @@ unsafe fn paint_content(dc: HDC, rect: RECT, dpi: u32, input: Input) -> Result<(
 
 unsafe fn paint_rows(dc: HDC, rect: RECT, dpi: u32, input: Input) -> Result<(), &'static str> {
     let middle = rect.bottom / 2;
-    let row_height = i32::try_from(16 * dpi / 96).unwrap_or(16);
-    let label_width = i32::try_from(24 * dpi / 96).unwrap_or(24);
-    for (arrow, rate, top) in [
-        ("↓", input.download, middle - row_height),
-        ("↑", input.upload, middle),
-    ] {
+    let row_height = i32::try_from(15 * dpi / 96).unwrap_or(16);
+    let label_width = i32::try_from(15 * dpi / 96).unwrap_or(24);
+    for ((arrow, rate), top) in rows(input.upload, input.download)
+        .into_iter()
+        .zip([middle - row_height, middle])
+    {
         // Each arrow and value has its own fixed area, independent of digits/units.
         let mut label = RECT {
             left: 4,

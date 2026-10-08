@@ -693,9 +693,18 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
 
 - A taskbar child can pass HWND existence/visibility checks and paint into
   its DC while Explorer's XAML hides it from the composed desktop. Use an
-  opaque layered child, declare Windows 10/11 compatibility in the shared
+  layered child, declare Windows 10/11 compatibility in the shared
   application/test manifest, and force bounded GDI repaints on the owner timer.
   Regression-test actual composed glyph pixels with a single CAPTUREBLT copy;
   per-pixel desktop GetPixel calls stall on GPU readbacks. Scope smoke cleanup
   to the test PID so an installed BiFlow child is never mistaken for a leak
   (ADR 0116).
+
+- Corrected proxy session counters still omit other applications and physical
+  link overhead. A Task Manager adapter-throughput display must use that physical
+  adapter's OS OutOctets/InOctets independently of the routing engine. Require
+  HardwareInterface and operational-up status, choose one physical route, and
+  reset the rate baseline on adapter changes; summing TUN + NIC double-counts
+  traffic. An opaque layered fill also hides Explorer's taskbar tint: retain
+  layered composition but color-key only the background, and test composed
+  background continuity and rightmost placement (ADR 0117).

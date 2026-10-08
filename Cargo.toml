@@ -13,12 +13,13 @@ members = [
   "crates/iran-split-helper",
   "crates/iran-split-helper-winacl",
   "crates/iran-split-taskbar",
+  "crates/iran-split-netstats",
   "crates/iran-split-cli",
   "src-tauri",
 ]
 
 [workspace.package]
-version = "6.2.63"
+version = "6.2.64"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.88"

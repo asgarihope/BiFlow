@@ -106,6 +106,12 @@ border-ink/10 pt-3`, with small buttons
 
 ## Chrome
 
+- The Windows taskbar widget uses upload above download, a 108-DIP width,
+  and the rightmost verified gap with four-DIP clearance beside the tray.
+  Its background reveals the real taskbar surface; theme controls text contrast.
+  It measures the active physical adapter across all apps, independently of
+  BiFlow's routed session totals, using decimal bits per second (ADR 0117).
+
 - The settings-apply banner is `sticky top-0 z-40` inside the scroll
   container with `backdrop-blur` so it stays visible while scrolled.
 - Scrollbars are themed globally (thin, `rgb(var(--ink) / 0.22)` thumb,

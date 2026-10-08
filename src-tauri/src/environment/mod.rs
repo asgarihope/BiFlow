@@ -138,6 +138,8 @@ pub struct EnvironmentReport {
     pub taskbar_speed: Option<&'static str>,
     /// Address-free native composition/clip state, separate from HWND attachment.
     pub taskbar_renderer: Option<&'static str>,
+    /// Physical interface class or safe error classification; no adapter identity.
+    pub taskbar_adapter: Option<&'static str>,
     pub collected_at: String,
     pub collection_ms: u64,
     pub system: SystemInfo,
@@ -539,6 +541,7 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
     #[cfg(windows)]
     {
         report.taskbar_renderer = Some(iran_split_taskbar::diagnostic_renderer());
+        report.taskbar_adapter = Some(crate::taskbar::adapter_state());
         report.taskbar_speed = Some(match iran_split_taskbar::diagnostic_status() {
             iran_split_taskbar::Status::Disabled => "disabled",
             iran_split_taskbar::Status::Attached => "attached",
@@ -1203,6 +1206,13 @@ fn findings(report: &EnvironmentReport, config: Option<&AppConfig>) -> Vec<Strin
         {
             findings.push("taskbar_surface_unavailable:see_taskbar_paint_surface".into());
         }
+        if config.behavior.show_taskbar_speed
+            && report
+                .taskbar_adapter
+                .is_some_and(|state| !matches!(state, "wifi" | "ethernet" | "disabled"))
+        {
+            findings.push("taskbar_adapter_unavailable:see_interface_stats_events".into());
+        }
     }
     port_findings(report, config, &biflow_ports, &mut findings);
     network_findings(report, config, &mut findings);
@@ -1648,6 +1658,31 @@ async fn collect_platform(_report: &mut EnvironmentReport, _tun_name: &str) -> P
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn physical_adapter_failures_are_findings_only_when_enabled() {
+        let mut report = super::EnvironmentReport {
+            taskbar_adapter: Some("interface_table_failed"),
+            ..Default::default()
+        };
+        let mut config = iran_split_config::AppConfig::default();
+        config.behavior.show_taskbar_speed = true;
+        let unavailable = |report: &super::EnvironmentReport,
+                           config: &iran_split_config::AppConfig| {
+            super::findings(report, Some(config))
+                .iter()
+                .any(|finding| finding.starts_with("taskbar_adapter_unavailable:"))
+        };
+        assert!(unavailable(&report, &config));
+        report.taskbar_adapter = Some("no_active_physical_adapter");
+        assert!(unavailable(&report, &config));
+        for state in ["wifi", "ethernet", "disabled"] {
+            report.taskbar_adapter = Some(state);
+            assert!(!unavailable(&report, &config));
+        }
+        config.behavior.show_taskbar_speed = false;
+        report.taskbar_adapter = Some("interface_table_failed");
+        assert!(!unavailable(&report, &config));
+    }
     #[test]
     fn enabled_but_unavailable_taskbar_is_a_safe_environment_finding() {
         let report = super::EnvironmentReport {

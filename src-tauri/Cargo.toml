@@ -52,6 +52,7 @@ iran-split-platform-linux = { path = "../crates/iran-split-platform-linux" }
 [target.'cfg(target_os = "windows")'.dependencies]
 iran-split-platform-win = { path = "../crates/iran-split-platform-win" }
 iran-split-taskbar = { path = "../crates/iran-split-taskbar" }
+iran-split-netstats = { path = "../crates/iran-split-netstats" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 iran-split-platform-macos = { path = "../crates/iran-split-platform-macos" }
