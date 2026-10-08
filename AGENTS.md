@@ -71,6 +71,38 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- UI Automation can return S_OK with a null child on a leaf. The generated
+  windows-rs wrapper converts that null interface to `Error::empty()`, so
+  matching an assumed E_POINTER hid a usable taskbar. Inspect the HRESULT
+  and optional pointer at the narrow COM boundary; preserve actual errors.
+  Cache the layout and properties together instead of querying Current values
+  while Explorer replaces XAML nodes (ADR 0116).
+- Python on a Windows host can default to cp1256. A `write_text()` containing
+  arrows can truncate the destination before encoding fails. Use explicit
+  UTF-8 and stage/replace files atomically, or use `apply_patch` for source edits.
+- Bounding only Vitest maximum workers can conflict with its automatic
+  minimum. Set both `VITEST_MIN_FORKS`/`VITEST_MAX_FORKS` and
+  `VITEST_MIN_THREADS`/`VITEST_MAX_THREADS` when bounding workers.
+- The mock transport stores settings in memory; page reload resets them.
+  Assert settings retention across navigation in mock e2e tests and test disk
+  persistence at `ConfigStore`, rather than expecting browser reload to prove it.
+- A screenshot installer loop can count the final Install button before an
+  earlier asynchronous install removes it, then wait forever clicking a vanished
+  locator. Await the reduced button count after each install before looping.
+- Windows can recycle an HWND after Explorer destroys a taskbar child. Check
+  its owning thread before any write, hide, or destroy operation, and verify its
+  parent before positioning it; `IsWindow` alone does not prove ownership.
+- Mixed-case windows-rs SDK constants can trigger `non_upper_case_globals`
+  when used in Rust patterns. Compare their values with an array's `contains`
+  rather than suppressing the warning (ADR 0116).
+- Windows dev-profile gate invocations must use native backslashes. A synthetic
+  `E:/...` profile produced mixed separators in the existing diagnostics path
+  contract test; rerun with `E:\...` rather than calling that gate a pass.
+- Explorer's accessibility provider can transiently fail a taskbar snapshot.
+  Hide on the failed layout, retry a bounded burst before backing off, and test
+  eventual recovery rather than requiring uninterrupted attachment. Keep the
+  safe snapshot-stage HRESULT in diagnostics (ADR 0116).
+
 - A WSL target cache on a nearly full Windows system drive can expand the
   distro VHD and, together with WSL swap, exhaust C: during GTK compilation.
   Concurrent Vitest workers then fail allocation and WSL can return I/O errors.
@@ -651,3 +683,10 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
 - Cargo normalizes hyphens in target names to underscores when creating Windows
   PDB files. Give a package's binary and library distinct target names or Cargo
   emits an output-collision warning during every build (ADR 0107).
+
+- UI Automation discovery on a thread owning the taskbar child timed out
+  after initial attachment, even with an own-HWND exclusion condition. Use a
+  separate windowless MTA for UIA, keep the HWND owner pumping messages, and
+  transfer only copied geometry asynchronously. Reject stale results after
+  shell events. The native smoke test must span several periodic discovery
+  passes, not only initial attachment (ADR 0116).

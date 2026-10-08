@@ -160,6 +160,7 @@ function initialSettings(): AppConfig {
     behavior: {
       launch_at_login: false,
       connect_at_launch: false,
+      show_taskbar_speed: false,
       close_to_tray: true,
       fail_closed: true,
     },
@@ -851,7 +852,11 @@ export const mockApi = {
   async bootstrap(): Promise<BootstrapResult> {
     return {
       app_version: APP_VERSION,
-      platform: navigator.platform,
+      platform: /win/i.test(navigator.platform)
+        ? "windows"
+        : /mac/i.test(navigator.platform)
+          ? "macos"
+          : "linux",
       mock_mode: true,
       snapshot: structuredClone(snapshot),
       settings: structuredClone(settings),

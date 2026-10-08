@@ -9,6 +9,7 @@ const resources = {
       dashboard: "Dashboard",
       rules: "List Management",
       diagnostics: "Diagnostics",
+      taskbarSpeed: "Show network speed on taskbar",
       settings: "Settings",
       ui: {
         moreInfo: "More info",
@@ -416,6 +417,7 @@ const resources = {
       dashboard: "داشبورد",
       rules: "مدیریت لیست‌ها",
       diagnostics: "عیب‌یابی",
+      taskbarSpeed: "نمایش سرعت شبکه در نوار وظیفه",
       settings: "تنظیمات",
       ui: {
         moreInfo: "توضیح بیشتر",

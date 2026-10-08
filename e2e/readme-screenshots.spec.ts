@@ -26,8 +26,11 @@ function nav(page: Page, name: string) {
 async function connectStack(page: Page) {
   await page.getByRole("button", { name: /^Health/ }).click();
   const install = page.getByRole("button", { name: "Install", exact: true });
-  while ((await install.count()) > 0) {
+  let remaining = await install.count();
+  while (remaining > 0) {
     await install.first().click();
+    remaining -= 1;
+    await expect(install).toHaveCount(remaining);
   }
   await page.getByRole("button", { name: /^Health/ }).click();
   await page.locator("[data-connection-action='connect']").click();

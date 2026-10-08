@@ -10,7 +10,11 @@ describe("settingsAffectLiveMihomo", () => {
     const before = baseSettings();
     const after = {
       ...before,
-      behavior: { ...before.behavior, close_to_tray: false },
+      behavior: {
+        ...before.behavior,
+        close_to_tray: false,
+        show_taskbar_speed: true,
+      },
     };
     expect(settingsAffectLiveMihomo(before, after)).toBe(false);
   });

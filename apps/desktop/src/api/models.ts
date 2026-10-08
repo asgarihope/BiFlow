@@ -180,6 +180,7 @@ export interface AppConfig {
   behavior: {
     launch_at_login: boolean;
     connect_at_launch: boolean;
+    show_taskbar_speed: boolean;
     close_to_tray: boolean;
     fail_closed: boolean;
   };

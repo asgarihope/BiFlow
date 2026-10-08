@@ -119,3 +119,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0113](./0113-five-sections-with-tabs.md)                      | Five sections with tabs, and site routing on Home                   | Accepted   |
 | [0114](./0114-macos-helper-security-and-dns-recovery.md)       | Authorize Unix helper peers and preserve macOS DNS recovery         | Accepted   |
 | [0115](./0115-resolved-runtime-profile.md)                     | One resolved runtime profile owns profile-dependent resources       | Accepted   |
+| [0116](./0116-windows-taskbar-speed.md)                        | Native Windows 11 taskbar rates from corrected session counters     | Accepted   |

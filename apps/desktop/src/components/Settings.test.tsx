@@ -16,7 +16,33 @@ const settings: AppConfig = baseSettings();
 
 describe("Settings", () => {
   beforeEach(() => {
-    useAppStore.setState({ actionPending: false, pageTabs: {} });
+    useAppStore.setState({ actionPending: false, pageTabs: {}, boot: null });
+  });
+
+  it("preserves a taskbar preference on platforms without a native taskbar", async () => {
+    const saveSettings = vi
+      .fn<(draft: AppConfig) => Promise<boolean>>()
+      .mockResolvedValue(true);
+    useAppStore.setState({ saveSettings });
+    render(
+      <Settings
+        settings={{
+          ...settings,
+          behavior: { ...settings.behavior, show_taskbar_speed: true },
+        }}
+      />,
+    );
+    await userEvent.click(screen.getByRole("tab", { name: "Behavior" }));
+    expect(
+      screen.queryByLabelText("Show network speed on taskbar"),
+    ).not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("Close window to tray"));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save settings" }),
+    );
+    expect(saveSettings.mock.calls[0]?.[0].behavior.show_taskbar_speed).toBe(
+      true,
+    );
   });
 
   it("lets the operator pick a DIRECT DNS preset including Mokhaberat", async () => {

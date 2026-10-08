@@ -374,6 +374,8 @@ impl Default for RulesConfig {
     reason = "each field is an independent user-facing behavior toggle"
 )]
 pub struct BehaviorConfig {
+    /// Native Windows taskbar display; ignored by other platforms.
+    pub show_taskbar_speed: bool,
     pub launch_at_login: bool,
     pub connect_at_launch: bool,
     pub close_to_tray: bool,
@@ -385,6 +387,7 @@ pub struct BehaviorConfig {
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
+            show_taskbar_speed: false,
             launch_at_login: false,
             connect_at_launch: false,
             close_to_tray: true,
@@ -892,6 +895,30 @@ fn sync_directory(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn taskbar_preference_defaults_off_and_round_trips_without_schema_migration() {
+        let old: super::BehaviorConfig =
+            toml::from_str("close_to_tray = true").expect("legacy behavior");
+        assert!(!old.show_taskbar_speed);
+        let directory = tempfile::tempdir().expect("temporary config");
+        let config_store = super::ConfigStore::new(
+            directory.path().join("config.toml"),
+            super::RuntimeProfile::Production,
+        );
+        let mut config = config_store.load_or_create().expect("create");
+        let revision = config.revision;
+        config.behavior.show_taskbar_speed = true;
+        config_store
+            .save(config, revision)
+            .expect("save preference");
+        assert!(
+            config_store
+                .load_or_create()
+                .expect("reload")
+                .behavior
+                .show_taskbar_speed
+        );
+    }
     use super::*;
 
     /// Production store for tests that are not about profile isolation. The

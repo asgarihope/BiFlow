@@ -11,6 +11,7 @@ pub struct TrafficTotals {
 /// In-memory session counters. Lifetime is the desktop process, not a file.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionAccumulator {
+    sample_available: bool,
     sent: u64,
     received: u64,
     /// Mihomo lifetime totals at the previous sample of this generation.
@@ -20,6 +21,10 @@ pub struct SessionAccumulator {
 }
 
 impl SessionAccumulator {
+    #[cfg(any(windows, test))]
+    pub fn sample_available(&self) -> bool {
+        self.sample_available
+    }
     #[must_use]
     pub fn totals(&self) -> TrafficTotals {
         TrafficTotals {
@@ -48,6 +53,12 @@ pub fn accumulate(
     bypass_names: &BTreeSet<String>,
     connected: bool,
 ) -> TrafficTotals {
+    store.sample_available = connected
+        && sample.is_some_and(|sample| {
+            store.last_total.is_some_and(|(sent, received)| {
+                sample.upload_total >= sent && sample.download_total >= received
+            })
+        });
     if !connected {
         store.last_total = None;
         store.overhead_seen.clear();
@@ -100,10 +111,98 @@ pub fn accumulate(
     store.totals()
 }
 
+/// Rates derive from the same corrected, process-scoped totals as the UI.
+/// An unavailable sample, reset, reconnect or long sleep invalidates the baseline.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+pub struct RateTracker {
+    previous: Option<(TrafficTotals, std::time::Instant)>,
+}
+
+#[cfg(any(windows, test))]
+impl RateTracker {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "byte deltas are approximate display rates"
+    )]
+    pub fn sample(
+        &mut self,
+        totals: TrafficTotals,
+        available: bool,
+        now: std::time::Instant,
+    ) -> (Option<f64>, Option<f64>) {
+        if !available {
+            self.previous = None;
+            return (None, None);
+        }
+        let previous = self.previous.replace((totals, now));
+        let Some((before, time)) = previous else {
+            return (None, None);
+        };
+        let elapsed = now.duration_since(time).as_secs_f64();
+        if elapsed <= 0.0
+            || elapsed > 6.0
+            || totals.sent < before.sent
+            || totals.received < before.received
+        {
+            return (None, None);
+        }
+        (
+            Some((totals.sent - before.sent) as f64 / elapsed),
+            Some((totals.received - before.received) as f64 / elapsed),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use iran_split_mihomo::ConnectionBytes;
+
+    #[test]
+    fn rates_reset_after_unavailable_samples_resets_and_sleep() {
+        let mut tracker = RateTracker::default();
+        let start = std::time::Instant::now();
+        let bytes = |sent| TrafficTotals {
+            sent,
+            received: sent * 2,
+        };
+        assert_eq!(tracker.sample(bytes(100), true, start), (None, None));
+        assert_eq!(
+            tracker.sample(bytes(300), true, start + std::time::Duration::from_secs(2)),
+            (Some(100.0), Some(200.0))
+        );
+        assert_eq!(
+            tracker.sample(bytes(300), false, start + std::time::Duration::from_secs(4)),
+            (None, None)
+        );
+        assert_eq!(
+            tracker.sample(bytes(400), true, start + std::time::Duration::from_secs(6)),
+            (None, None)
+        );
+        assert_eq!(
+            tracker.sample(bytes(10), true, start + std::time::Duration::from_secs(8)),
+            (None, None)
+        );
+        assert_eq!(
+            tracker.sample(bytes(500), true, start + std::time::Duration::from_secs(60)),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn a_generation_reset_keeps_totals_but_invalidates_the_rate_sample() {
+        let mut store = SessionAccumulator::default();
+        accumulate(&mut store, Some(&sample(100, 200, vec![])), &names(), true);
+        assert!(!store.sample_available());
+        accumulate(&mut store, Some(&sample(200, 400, vec![])), &names(), true);
+        assert!(store.sample_available());
+        let reset = accumulate(&mut store, Some(&sample(10, 20, vec![])), &names(), true);
+        assert_eq!(reset.sent, 210);
+        assert!(!store.sample_available());
+        accumulate(&mut store, None, &names(), false);
+        assert!(!store.sample_available());
+    }
 
     fn names() -> BTreeSet<String> {
         BTreeSet::from(["hiddify".to_owned()])

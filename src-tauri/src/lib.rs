@@ -11,6 +11,8 @@ mod platform_paths;
 mod profile;
 mod profile_picker;
 mod reachability;
+#[cfg(windows)]
+mod taskbar;
 mod traffic;
 mod tray;
 mod version;
@@ -1206,6 +1208,8 @@ async fn save_settings(
             "saved settings"
         );
         services.backend.update_config(saved.clone()).await;
+        #[cfg(windows)]
+        taskbar::set_enabled(&app, saved.behavior.show_taskbar_speed);
         Ok(saved.redacted())
     })
     .await
@@ -3765,13 +3769,23 @@ fn initialize_diagnostics() {
 /// webview (whose timers are throttled when the window is hidden).
 fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
+        #[cfg(windows)]
+        let mut rates = traffic::RateTracker::default();
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             if let Ok(services) = services(&handle) {
-                if matches!(
-                    services.engine.snapshot().phase,
-                    StackPhase::Running | StackPhase::Degraded
-                ) {
+                if cfg!(windows)
+                    || matches!(
+                        services.engine.snapshot().phase,
+                        StackPhase::Running | StackPhase::Degraded
+                    )
+                {
+                    #[cfg(windows)]
+                    {
+                        let totals = sample_traffic(services).await;
+                        taskbar::publish(&handle, &mut rates, totals).await;
+                    }
+                    #[cfg(not(windows))]
                     sample_traffic(services).await;
                 }
             }
@@ -3870,6 +3884,8 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         }
     });
     spawn_health_loop(health_engine);
+    #[cfg(windows)]
+    taskbar::setup(app.handle());
     spawn_traffic_loop(app.handle().clone());
     if let Some(window) = app.get_webview_window("main") {
         restore_main_window_size(&window, &data_dir);
@@ -4120,11 +4136,23 @@ pub fn run() {
     let app = builder
         .build(tauri::generate_context!())
         .expect("BiFlow failed to build");
-    app.run(|_, event| match event {
-        tauri::RunEvent::ExitRequested { code, .. } => diagnostics::exit_requested(code),
-        tauri::RunEvent::Exit => diagnostics::close_session(),
+    app.run(|handle, event| handle_run_event(handle, &event));
+}
+
+fn handle_run_event(
+    #[cfg(windows)] handle: &AppHandle,
+    #[cfg(not(windows))] _: &AppHandle,
+    event: &tauri::RunEvent,
+) {
+    match event {
+        tauri::RunEvent::ExitRequested { code, .. } => diagnostics::exit_requested(*code),
+        tauri::RunEvent::Exit => {
+            #[cfg(windows)]
+            taskbar::shutdown(handle);
+            diagnostics::close_session();
+        }
         _ => {}
-    });
+    }
 }
 
 #[cfg(test)]

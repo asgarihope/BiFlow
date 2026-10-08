@@ -134,6 +134,8 @@ const KNOWN_VPN_PROCESSES: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct EnvironmentReport {
+    /// Native taskbar lifecycle only; never includes window titles or coordinates.
+    pub taskbar_speed: Option<&'static str>,
     pub collected_at: String,
     pub collection_ms: u64,
     pub system: SystemInfo,
@@ -532,6 +534,15 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
     let ports = interesting_ports(context.config.as_ref());
     report.listeners = relevant_listeners(platform.listeners, &ports);
     report.services = known_services(platform.services);
+    #[cfg(windows)]
+    {
+        report.taskbar_speed = Some(match iran_split_taskbar::diagnostic_status() {
+            iran_split_taskbar::Status::Disabled => "disabled",
+            iran_split_taskbar::Status::Attached => "attached",
+            iran_split_taskbar::Status::Unavailable => "unavailable",
+            iran_split_taskbar::Status::Failed => "failed",
+        });
+    }
     report.findings = findings(&report, context.config.as_ref());
     report.collection_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     report
@@ -1179,6 +1190,11 @@ fn findings(report: &EnvironmentReport, config: Option<&AppConfig>) -> Vec<Strin
     let mut findings = Vec::new();
     if let Some(config) = config {
         client_findings(report, config, &mut findings);
+        if config.behavior.show_taskbar_speed
+            && matches!(report.taskbar_speed, Some("unavailable" | "failed"))
+        {
+            findings.push("taskbar_speed_unavailable:see_taskbar_lifecycle_events".into());
+        }
     }
     port_findings(report, config, &biflow_ports, &mut findings);
     network_findings(report, config, &mut findings);
@@ -1624,6 +1640,22 @@ async fn collect_platform(_report: &mut EnvironmentReport, _tun_name: &str) -> P
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enabled_but_unavailable_taskbar_is_a_safe_environment_finding() {
+        let report = super::EnvironmentReport {
+            taskbar_speed: Some("unavailable"),
+            ..Default::default()
+        };
+        let mut config = iran_split_config::AppConfig::default();
+        config.behavior.show_taskbar_speed = true;
+        assert!(super::findings(&report, Some(&config))
+            .iter()
+            .any(|finding| finding.starts_with("taskbar_speed_unavailable:")));
+        config.behavior.show_taskbar_speed = false;
+        assert!(!super::findings(&report, Some(&config))
+            .iter()
+            .any(|finding| finding.starts_with("taskbar_speed_unavailable:")));
+    }
     use super::*;
 
     #[test]

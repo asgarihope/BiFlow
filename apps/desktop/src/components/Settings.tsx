@@ -50,6 +50,7 @@ const formSchema = z
     launchAtLogin: z.boolean(),
     connectAtLaunch: z.boolean(),
     closeToTray: z.boolean(),
+    showTaskbarSpeed: z.boolean(),
     failClosed: z.boolean(),
   })
   .superRefine((values, context) => {
@@ -79,6 +80,7 @@ function toValues(config: AppConfig): FormValues {
     launchAtLogin: config.behavior.launch_at_login,
     connectAtLaunch: config.behavior.connect_at_launch,
     closeToTray: config.behavior.close_to_tray,
+    showTaskbarSpeed: config.behavior.show_taskbar_speed,
     failClosed: config.behavior.fail_closed,
   };
 }
@@ -104,6 +106,7 @@ function merge(config: AppConfig, values: FormValues): AppConfig {
       launch_at_login: values.launchAtLogin,
       connect_at_launch: values.connectAtLaunch,
       close_to_tray: values.closeToTray,
+      show_taskbar_speed: values.showTaskbarSpeed,
       fail_closed: values.failClosed,
     },
   };
@@ -111,7 +114,7 @@ function merge(config: AppConfig, values: FormValues): AppConfig {
 
 export function Settings({ settings }: { settings: AppConfig }) {
   const { t } = useTranslation();
-  const { saveSettings, actionPending } = useAppStore();
+  const { saveSettings, actionPending, boot } = useAppStore();
   const [tab, setTab] = usePageTab("settings", SETTINGS_TABS);
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const {
@@ -281,6 +284,12 @@ export function Settings({ settings }: { settings: AppConfig }) {
                     label="Connect at launch"
                     registration={register("connectAtLaunch")}
                   />
+                  {boot?.platform === "windows" ? (
+                    <Check
+                      label={t("taskbarSpeed")}
+                      registration={register("showTaskbarSpeed")}
+                    />
+                  ) : null}
                   <Check
                     label="Close window to tray"
                     registration={register("closeToTray")}

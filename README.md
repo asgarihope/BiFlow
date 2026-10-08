@@ -51,6 +51,7 @@
 - **Status bar** — Internet reachability, public IP, approximate country, and lifetime sent/received totals.
 - **In-app install** — Connect can install the privileged helper, the bundled Mihomo build, and Hiddify when they are missing. Hiddify is only fetched while an enabled Hiddify client exists.
 - **English and Persian** — Built-in UI languages, with a tray menu for Connect/Disconnect, Pause/Resume, and Quit.
+- **Windows 11 taskbar speed** — Settings → Behavior can show two native upload/download rows without restarting. Rates use the same corrected Mihomo routed-traffic counters as the status bar, in binary bytes per second; they are not total device bandwidth. Off by default. Unofficial taskbar embedding needs a verified free gap on the primary taskbar and hides safely when Explorer's layout is unsupported or crowded. See [compatibility and manual checks](docs/adr/0116-windows-taskbar-speed.md).
 - **Linux and Windows** — Debian package, AppImage, portable `.exe`, and NSIS setup. Signed AppImage and NSIS builds can update in-app.
 - **Fits the window** — Desktop sidebar, phone-sized bottom navigation, and a resizable window down to 390×640.
 
