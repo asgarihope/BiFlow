@@ -32,6 +32,10 @@
 </p>
 
 <p align="center">
+  <img src="docs/screenshots/settings-speed.png" alt="Settings Speed display tab with the enable toggle and speed unit selector" width="800" />
+</p>
+
+<p align="center">
   <img src="docs/screenshots/mobile.png" alt="BiFlow on a phone-sized window with bottom navigation" width="280" />
 </p>
 
@@ -51,7 +55,7 @@
 - **Status bar** — Internet reachability, public IP, approximate country, and lifetime sent/received totals.
 - **In-app install** — Connect can install the privileged helper, the bundled Mihomo build, and Hiddify when they are missing. Hiddify is only fetched while an enabled Hiddify client exists.
 - **English and Persian** — Built-in UI languages, with a tray menu for Connect/Disconnect, Pause/Resume, and Quit.
-- **Windows 11 taskbar speed** — Settings → Behavior shows a compact native display beside the tray: upload above download, with the taskbar's own background. Rates measure the active physical Wi-Fi/Ethernet adapter's complete traffic across all applications, even while BiFlow is disconnected, in Task Manager-style Kbps/Mbps. Off by default. Unofficial embedding needs a verified free gap on the primary taskbar and hides safely when Explorer's layout is unsupported or crowded. See [adapter semantics and manual checks](docs/adr/0117-physical-interface-taskbar.md) and [native compatibility](docs/adr/0116-windows-taskbar-speed.md).
+- **Taskbar and panel speed** — Settings → Speed display enables the Windows 11 taskbar widget or Ubuntu panel label and chooses bits/bytes per second, including kilo/mega/giga units. Rates measure the active physical Wi-Fi/Ethernet adapter's complete traffic across all applications, even while BiFlow is disconnected. Off by default. Windows places upload above download in a verified free gap beside the tray and hides safely when Explorer's layout is unsupported or crowded. Ubuntu uses the existing tray icon's label. See [display settings](docs/adr/0119-speed-display-settings.md), [adapter semantics](docs/adr/0117-physical-interface-taskbar.md) and [native compatibility](docs/adr/0116-windows-taskbar-speed.md).
 - **Linux and Windows** — Debian package, AppImage, portable `.exe`, and NSIS setup. Signed AppImage and NSIS builds can update in-app.
 - **Fits the window** — Desktop sidebar, phone-sized bottom navigation, and a resizable window down to 390×640.
 

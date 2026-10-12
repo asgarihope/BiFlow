@@ -71,6 +71,17 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- Copy native display preferences out of their mutex before `TrayIcon::set_title`.
+  That operation can synchronously wait for the main thread; keeping the settings
+  lock in an argument temporary can block a concurrent settings/shutdown action
+  on that same thread (ADR 0119).
+
+- Tauri's Linux tray `set_title` maps to AppIndicator's visible label, not just
+  a tooltip. Reuse the existing icon for Ubuntu panel speeds and initialize the
+  sampler after tray creation. A successful label submission does not prove a
+  panel host rendered it; keep that distinction in diagnostics (ADR 0118).
+  Backtick `AppIndicator` in Rust doc comments to satisfy Clippy's `doc_markdown`.
+
 - UI Automation can return S_OK with a null child on a leaf. The generated
   windows-rs wrapper converts that null interface to `Error::empty()`, so
   matching an assumed E_POINTER hid a usable taskbar. Inspect the HRESULT

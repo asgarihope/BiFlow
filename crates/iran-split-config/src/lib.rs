@@ -23,6 +23,22 @@ pub use profile::{
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeedUnit {
+    #[default]
+    AutoBits,
+    AutoBytes,
+    Bits,
+    Kilobits,
+    Megabits,
+    Gigabits,
+    Bytes,
+    Kilobytes,
+    Megabytes,
+    Gigabytes,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -374,8 +390,9 @@ impl Default for RulesConfig {
     reason = "each field is an independent user-facing behavior toggle"
 )]
 pub struct BehaviorConfig {
-    /// Native Windows taskbar display; ignored by other platforms.
+    /// Windows taskbar or Linux `AppIndicator` panel display; ignored on macOS.
     pub show_taskbar_speed: bool,
+    pub taskbar_speed_unit: SpeedUnit,
     pub launch_at_login: bool,
     pub connect_at_launch: bool,
     pub close_to_tray: bool,
@@ -388,6 +405,7 @@ impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
             show_taskbar_speed: false,
+            taskbar_speed_unit: SpeedUnit::default(),
             launch_at_login: false,
             connect_at_launch: false,
             close_to_tray: true,
@@ -900,6 +918,7 @@ mod tests {
         let old: super::BehaviorConfig =
             toml::from_str("close_to_tray = true").expect("legacy behavior");
         assert!(!old.show_taskbar_speed);
+        assert_eq!(old.taskbar_speed_unit, super::SpeedUnit::AutoBits);
         let directory = tempfile::tempdir().expect("temporary config");
         let config_store = super::ConfigStore::new(
             directory.path().join("config.toml"),
@@ -908,16 +927,17 @@ mod tests {
         let mut config = config_store.load_or_create().expect("create");
         let revision = config.revision;
         config.behavior.show_taskbar_speed = true;
+        config.behavior.taskbar_speed_unit = super::SpeedUnit::Megabytes;
         config_store
             .save(config, revision)
             .expect("save preference");
-        assert!(
-            config_store
-                .load_or_create()
-                .expect("reload")
-                .behavior
-                .show_taskbar_speed
+        let reloaded = config_store.load_or_create().expect("reload");
+        assert!(reloaded.behavior.show_taskbar_speed);
+        assert_eq!(
+            reloaded.behavior.taskbar_speed_unit,
+            super::SpeedUnit::Megabytes
         );
+        assert!(toml::from_str::<super::BehaviorConfig>("taskbar_speed_unit = 'unknown'").is_err());
     }
     use super::*;
 

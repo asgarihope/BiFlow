@@ -40,6 +40,7 @@ export function baseSettings(overrides: Partial<AppConfig> = {}): AppConfig {
       launch_at_login: false,
       connect_at_launch: false,
       show_taskbar_speed: false,
+      taskbar_speed_unit: "auto_bits",
       close_to_tray: true,
       fail_closed: true,
     },

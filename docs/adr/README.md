@@ -121,3 +121,5 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0115](./0115-resolved-runtime-profile.md)                     | One resolved runtime profile owns profile-dependent resources       | Accepted   |
 | [0116](./0116-windows-taskbar-speed.md)                        | Native Windows 11 taskbar rates from corrected session counters     | Accepted   |
 | [0117](./0117-physical-interface-taskbar.md)                   | Complete physical adapter throughput in a compact tray-side widget  | Accepted   |
+| [0118](./0118-ubuntu-panel-speed.md)                           | Physical adapter speeds beside the Ubuntu tray icon                 | Accepted   |
+| [0119](./0119-speed-display-settings.md)                       | Dedicated speed display settings and units                          | Accepted   |

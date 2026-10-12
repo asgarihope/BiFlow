@@ -1,5 +1,6 @@
 //! HWND/GDI ownership stays on the message pump; UIA runs on a windowless MTA.
-use crate::{find_gap, format_rate, rows};
+use crate::{find_gap, format_rate_in, rows};
+use iran_split_config::SpeedUnit;
 use std::{
     cell::{Cell, RefCell},
     sync::{
@@ -72,6 +73,7 @@ pub enum Status {
 struct Input {
     status: Status,
     enabled: bool,
+    unit: SpeedUnit,
     upload: Option<f64>,
     download: Option<f64>,
     sampled: Instant,
@@ -123,6 +125,7 @@ impl Display {
         let input = Arc::new(Mutex::new(Input {
             status: Status::Disabled,
             enabled: false,
+            unit: SpeedUnit::default(),
             upload: None,
             download: None,
             sampled: Instant::now(),
@@ -160,6 +163,13 @@ impl Display {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .enabled = enabled;
+    }
+
+    pub fn set_unit(&self, unit: SpeedUnit) {
+        self.input
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unit = unit;
     }
 
     #[must_use]
@@ -1169,7 +1179,7 @@ unsafe fn paint_rows(dc: HDC, rect: RECT, dpi: u32, input: Input) -> Result<(), 
             bottom: top + row_height,
         };
         let mut arrow: Vec<u16> = arrow.encode_utf16().collect();
-        let mut text: Vec<u16> = format_rate(rate).encode_utf16().collect();
+        let mut text: Vec<u16> = format_rate_in(rate, input.unit).encode_utf16().collect();
         let flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
         if DrawTextW(dc, &mut arrow, &raw mut label, flags | DT_LEFT) == 0
             || DrawTextW(dc, &mut text, &raw mut value, flags | DT_RIGHT) == 0

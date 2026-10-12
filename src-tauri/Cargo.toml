@@ -48,6 +48,8 @@ zip.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 iran-split-platform-linux = { path = "../crates/iran-split-platform-linux" }
+iran-split-taskbar = { path = "../crates/iran-split-taskbar" }
+iran-split-netstats = { path = "../crates/iran-split-netstats" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 iran-split-platform-win = { path = "../crates/iran-split-platform-win" }

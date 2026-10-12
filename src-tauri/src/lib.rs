@@ -11,7 +11,7 @@ mod platform_paths;
 mod profile;
 mod profile_picker;
 mod reachability;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod taskbar;
 mod traffic;
 mod tray;
@@ -1208,8 +1208,12 @@ async fn save_settings(
             "saved settings"
         );
         services.backend.update_config(saved.clone()).await;
-        #[cfg(windows)]
-        taskbar::set_enabled(&app, saved.behavior.show_taskbar_speed);
+        #[cfg(any(windows, target_os = "linux"))]
+        taskbar::apply_preferences(
+            &app,
+            saved.behavior.show_taskbar_speed,
+            saved.behavior.taskbar_speed_unit,
+        );
         Ok(saved.redacted())
     })
     .await
@@ -3874,8 +3878,6 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         }
     });
     spawn_health_loop(health_engine);
-    #[cfg(windows)]
-    taskbar::setup(app.handle());
     spawn_traffic_loop(app.handle().clone());
     if let Some(window) = app.get_webview_window("main") {
         restore_main_window_size(&window, &data_dir);
@@ -3891,6 +3893,8 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         );
         cause
     })?;
+    #[cfg(any(windows, target_os = "linux"))]
+    taskbar::setup(app.handle());
     info!(
         event = "startup.completed",
         section = "startup",
@@ -4130,14 +4134,14 @@ pub fn run() {
 }
 
 fn handle_run_event(
-    #[cfg(windows)] handle: &AppHandle,
-    #[cfg(not(windows))] _: &AppHandle,
+    #[cfg(any(windows, target_os = "linux"))] handle: &AppHandle,
+    #[cfg(not(any(windows, target_os = "linux")))] _: &AppHandle,
     event: &tauri::RunEvent,
 ) {
     match event {
         tauri::RunEvent::ExitRequested { code, .. } => diagnostics::exit_requested(*code),
         tauri::RunEvent::Exit => {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             taskbar::shutdown(handle);
             diagnostics::close_session();
         }

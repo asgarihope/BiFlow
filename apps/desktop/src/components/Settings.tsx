@@ -23,7 +23,19 @@ import { PageHeader } from "./ui/PageHeader";
 import { TabBar, TabPanel } from "./ui/Tabs";
 import { usePageTab } from "./ui/usePageTab";
 
-const SETTINGS_TABS = ["mihomo", "behavior", "about"] as const;
+const SETTINGS_TABS = ["mihomo", "behavior", "speed", "about"] as const;
+const SPEED_UNITS = [
+  "auto_bits",
+  "auto_bytes",
+  "bits",
+  "kilobits",
+  "megabits",
+  "gigabits",
+  "bytes",
+  "kilobytes",
+  "megabytes",
+  "gigabytes",
+] as const;
 
 const formSchema = z
   .object({
@@ -51,6 +63,7 @@ const formSchema = z
     connectAtLaunch: z.boolean(),
     closeToTray: z.boolean(),
     showTaskbarSpeed: z.boolean(),
+    taskbarSpeedUnit: z.enum(SPEED_UNITS),
     failClosed: z.boolean(),
   })
   .superRefine((values, context) => {
@@ -81,6 +94,7 @@ function toValues(config: AppConfig): FormValues {
     connectAtLaunch: config.behavior.connect_at_launch,
     closeToTray: config.behavior.close_to_tray,
     showTaskbarSpeed: config.behavior.show_taskbar_speed,
+    taskbarSpeedUnit: config.behavior.taskbar_speed_unit,
     failClosed: config.behavior.fail_closed,
   };
 }
@@ -107,6 +121,7 @@ function merge(config: AppConfig, values: FormValues): AppConfig {
       connect_at_launch: values.connectAtLaunch,
       close_to_tray: values.closeToTray,
       show_taskbar_speed: values.showTaskbarSpeed,
+      taskbar_speed_unit: values.taskbarSpeedUnit,
       fail_closed: values.failClosed,
     },
   };
@@ -115,7 +130,12 @@ function merge(config: AppConfig, values: FormValues): AppConfig {
 export function Settings({ settings }: { settings: AppConfig }) {
   const { t } = useTranslation();
   const { saveSettings, actionPending, boot } = useAppStore();
-  const [tab, setTab] = usePageTab("settings", SETTINGS_TABS);
+  const speedSupported =
+    boot?.platform === "windows" || boot?.platform === "linux";
+  const [tab, setTab] = usePageTab(
+    "settings",
+    SETTINGS_TABS.filter((id) => id !== "speed" || speedSupported),
+  );
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
   const {
     register,
@@ -152,6 +172,9 @@ export function Settings({ settings }: { settings: AppConfig }) {
         tabs={[
           { id: "mihomo", label: t("ui.tabs.network") },
           { id: "behavior", label: t("ui.tabs.behavior") },
+          ...(speedSupported
+            ? [{ id: "speed", label: t("ui.tabs.speed") }]
+            : []),
           { id: "about", label: t("ui.tabs.about") },
         ]}
       />
@@ -284,12 +307,6 @@ export function Settings({ settings }: { settings: AppConfig }) {
                     label="Connect at launch"
                     registration={register("connectAtLaunch")}
                   />
-                  {boot?.platform === "windows" ? (
-                    <Check
-                      label={t("taskbarSpeed")}
-                      registration={register("showTaskbarSpeed")}
-                    />
-                  ) : null}
                   <Check
                     label="Close window to tray"
                     registration={register("closeToTray")}
@@ -299,6 +316,39 @@ export function Settings({ settings }: { settings: AppConfig }) {
                     registration={register("failClosed")}
                   />
                 </div>
+              </Fieldset>
+            ) : null}
+            {tab === "speed" ? (
+              <Fieldset
+                id="settings-panel-speed"
+                labelledBy="settings-tab-speed"
+                legend={t("ui.tabs.speed")}
+              >
+                <div className="sm:col-span-2">
+                  <Check
+                    label={t(
+                      boot?.platform === "linux"
+                        ? "panelSpeed"
+                        : "taskbarSpeed",
+                    )}
+                    registration={register("showTaskbarSpeed")}
+                  />
+                </div>
+                <Field
+                  label={t("speedUnits.label")}
+                  error={errors.taskbarSpeedUnit?.message}
+                >
+                  <select
+                    {...register("taskbarSpeedUnit")}
+                    className="w-full rounded-xl border-ink/15 bg-canvas"
+                  >
+                    {SPEED_UNITS.map((unit) => (
+                      <option key={unit} value={unit}>
+                        {t(`speedUnits.${unit}`)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
               </Fieldset>
             ) : null}
           </div>

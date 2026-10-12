@@ -5,6 +5,8 @@ Status: Accepted
 ADR [0117](./0117-physical-interface-taskbar.md) supersedes the statistics,
 row order, width, gap preference and opaque background choices below in 6.2.64.
 The native ownership, compatibility and lifecycle decisions remain in force.
+ADR [0118](./0118-ubuntu-panel-speed.md) enables the same saved preference on
+Linux through the existing AppIndicator label and a physical-adapter provider.
 
 ## Decision
 

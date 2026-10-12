@@ -1,4 +1,5 @@
 //! Native Windows taskbar boundary. No statistics collection or `WebView`.
+use iran_split_config::SpeedUnit;
 
 #[cfg(windows)]
 mod native;
@@ -40,23 +41,50 @@ pub fn find_gap(width: i32, occupied: &[(i32, i32)], requested: i32, margin: i32
 /// The shared provider supplies byte rates; this is the sole bit conversion.
 #[must_use]
 pub fn format_rate(rate: Option<f64>) -> String {
+    format_rate_in(rate, SpeedUnit::AutoBits)
+}
+
+/// Rates arrive in bytes/second; display units use decimal factors of 1000.
+#[must_use]
+pub fn format_rate_in(rate: Option<f64>, unit: SpeedUnit) -> String {
+    let (bits, mut index, automatic) = match unit {
+        SpeedUnit::AutoBits => (true, 0, true),
+        SpeedUnit::AutoBytes => (false, 0, true),
+        SpeedUnit::Bits => (true, 0, false),
+        SpeedUnit::Kilobits => (true, 1, false),
+        SpeedUnit::Megabits => (true, 2, false),
+        SpeedUnit::Gigabits => (true, 3, false),
+        SpeedUnit::Bytes => (false, 0, false),
+        SpeedUnit::Kilobytes => (false, 1, false),
+        SpeedUnit::Megabytes => (false, 2, false),
+        SpeedUnit::Gigabytes => (false, 3, false),
+    };
+    let units = if bits {
+        ["bps", "Kbps", "Mbps", "Gbps", "Tbps", "Pbps"]
+    } else {
+        ["B/s", "KB/s", "MB/s", "GB/s", "TB/s", "PB/s"]
+    };
     let Some(mut value) = rate
         .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|bytes| bytes * 8.0)
-        .filter(|bits| bits.is_finite())
+        .map(|bytes| bytes * if bits { 8.0 } else { 1.0 })
+        .filter(|value| value.is_finite())
     else {
-        return "— bps".into();
+        return format!("— {}", units[index]);
     };
-    let units = ["bps", "Kbps", "Mbps", "Gbps", "Tbps", "Pbps"];
-    let mut unit = 0;
-    while value >= 1000.0 && unit < units.len() - 1 {
-        value /= 1000.0;
-        unit += 1;
-    }
-    if unit <= 1 || value >= 100.0 {
-        format!("{value:.0} {}", units[unit])
+    if automatic {
+        while value >= 1000.0 && index < units.len() - 1 {
+            value /= 1000.0;
+            index += 1;
+        }
     } else {
-        format!("{value:.1} {}", units[unit])
+        for _ in 0..index {
+            value /= 1000.0;
+        }
+    }
+    if index <= 1 || value >= 100.0 {
+        format!("{value:.0} {}", units[index])
+    } else {
+        format!("{value:.1} {}", units[index])
     }
 }
 
@@ -84,6 +112,32 @@ mod tests {
         assert_eq!(format_rate(Some(450_000.0)), "3.6 Mbps");
         assert_eq!(format_rate(None), "— bps");
         assert_eq!(format_rate(Some(f64::NAN)), "— bps");
+    }
+
+    #[test]
+    fn selected_units_distinguish_bits_bytes_and_fixed_scales() {
+        let rate = Some(1_000_000.0);
+        for (unit, expected) in [
+            (SpeedUnit::AutoBits, "8.0 Mbps"),
+            (SpeedUnit::AutoBytes, "1.0 MB/s"),
+            (SpeedUnit::Bits, "8000000 bps"),
+            (SpeedUnit::Kilobits, "8000 Kbps"),
+            (SpeedUnit::Megabits, "8.0 Mbps"),
+            (SpeedUnit::Gigabits, "0.0 Gbps"),
+            (SpeedUnit::Bytes, "1000000 B/s"),
+            (SpeedUnit::Kilobytes, "1000 KB/s"),
+            (SpeedUnit::Megabytes, "1.0 MB/s"),
+            (SpeedUnit::Gigabytes, "0.0 GB/s"),
+        ] {
+            assert_eq!(format_rate_in(rate, unit), expected);
+        }
+        assert_eq!(
+            format_rate_in(Some(2_000_000_000.0), SpeedUnit::Gigabytes),
+            "2.0 GB/s"
+        );
+        for invalid in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            assert_eq!(format_rate_in(invalid, SpeedUnit::Megabytes), "— MB/s");
+        }
     }
 
     #[test]

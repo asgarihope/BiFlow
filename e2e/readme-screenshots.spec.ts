@@ -70,6 +70,19 @@ test.describe("readme screenshots", () => {
       animations: "disabled",
     });
 
+    await nav(page, "Settings").click();
+    await page.getByRole("tab", { name: "Speed display", exact: true }).click();
+    await page.getByLabel(/Show network speed/).check();
+    await page.getByLabel("Speed unit").selectOption("megabytes");
+    await page.getByRole("button", { name: "Save settings" }).click();
+    await expect(
+      page.getByRole("button", { name: "Save settings" }),
+    ).toBeDisabled();
+    await page.screenshot({
+      path: join(screenshotDir, "settings-speed.png"),
+      animations: "disabled",
+    });
+
     await nav(page, "Home").click();
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(page.getByTestId("bottom-nav")).toBeVisible();

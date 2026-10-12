@@ -14,6 +14,7 @@ describe("settingsAffectLiveMihomo", () => {
         ...before.behavior,
         close_to_tray: false,
         show_taskbar_speed: true,
+        taskbar_speed_unit: "megabytes" as const,
       },
     };
     expect(settingsAffectLiveMihomo(before, after)).toBe(false);

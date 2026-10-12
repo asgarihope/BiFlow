@@ -549,6 +549,12 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
             iran_split_taskbar::Status::Failed => "failed",
         });
     }
+    #[cfg(target_os = "linux")]
+    {
+        report.taskbar_renderer = Some("appindicator_label");
+        report.taskbar_adapter = Some(crate::taskbar::adapter_state());
+        report.taskbar_speed = Some(crate::taskbar::panel_state());
+    }
     report.findings = findings(&report, context.config.as_ref());
     report.collection_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     report

@@ -181,6 +181,17 @@ export interface AppConfig {
     launch_at_login: boolean;
     connect_at_launch: boolean;
     show_taskbar_speed: boolean;
+    taskbar_speed_unit:
+      | "auto_bits"
+      | "auto_bytes"
+      | "bits"
+      | "kilobits"
+      | "megabits"
+      | "gigabits"
+      | "bytes"
+      | "kilobytes"
+      | "megabytes"
+      | "gigabytes";
     close_to_tray: boolean;
     fail_closed: boolean;
   };

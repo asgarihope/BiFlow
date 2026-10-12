@@ -15,7 +15,7 @@ rule has to change, update this file in the same commit.
   (`pageTabs`, `setPage(page, tab)`):
   - Routing: Sites / Lists / Apps / Iran rules
   - Troubleshoot: Live / Test / Tools / Logs
-  - Settings: Network / Behavior / About
+  - Settings: Network / Behavior / Speed display (Windows/Linux) / About
 - Every page starts with `PageHeader`: one-line title, optional info tip,
   and primary action on the same row.
 
@@ -111,6 +111,14 @@ border-ink/10 pt-3`, with small buttons
   Its background reveals the real taskbar surface; theme controls text contrast.
   It measures the active physical adapter across all apps, independently of
   BiFlow's routed session totals, using decimal bits per second (ADR 0117).
+- On Ubuntu, the same preference and physical-adapter sampler show upload then
+  download beside the existing BiFlow tray icon in the top panel. Use the native
+  AppIndicator label, inherit the panel theme, and clear the label when disabled
+  (ADR 0118). Linux settings call it the panel rather than the Windows taskbar.
+- Settings → Speed display contains only the enable toggle and unit selector.
+  The saved unit applies immediately to both native renderers. Bits/bytes and
+  their kilo/mega/giga scales are decimal (1000); legacy settings default to
+  automatic bits per second (ADR 0119).
 
 - The settings-apply banner is `sticky top-0 z-40` inside the scroll
   container with `backdrop-blur` so it stays visible while scrolled.

@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 mod windows;
 #[cfg(windows)]
 pub use windows::sample;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::sample;
 
 /// One adapter's complete hardware-interface counters. Never sum TUN + NIC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,7 +59,7 @@ impl RateTracker {
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 #[derive(Clone, Copy)]
 struct Candidate {
     sample: Sample,
@@ -64,7 +68,7 @@ struct Candidate {
     default_metric: Option<u64>,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn select(candidates: &[Candidate]) -> Option<Sample> {
     let eligible: Vec<_> = candidates
         .iter()
