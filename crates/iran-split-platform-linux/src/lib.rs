@@ -1734,10 +1734,16 @@ impl PlatformBackend for LinuxBackend {
     async fn clear_hiddify_system_proxy(&self) -> Result<bool, CoreError> {
         let config = self.config.read().await.clone();
         let persist = system_proxy::snapshot_path(&self.paths.user_data_dir);
-        let (host, port) = config.hiddify_endpoint();
-        system_proxy::clear_if_hiddify(&host, port, &persist)
-            .await
-            .map(|cleared| cleared.is_some())
+        let mut cleared = false;
+        for (host, port) in config.local_proxy_endpoints() {
+            if system_proxy::clear_if_hiddify(&host, port, &persist)
+                .await?
+                .is_some()
+            {
+                cleared = true;
+            }
+        }
+        Ok(cleared)
     }
 
     async fn restore_hiddify_system_proxy(&self) -> Result<(), CoreError> {

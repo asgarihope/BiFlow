@@ -719,3 +719,19 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   traffic. An opaque layered fill also hides Explorer's taskbar tint: retain
   layered composition but color-key only the background, and test composed
   background continuity and rightmost placement (ADR 0117).
+
+- Quit used to leave the helper-owned Mihomo TUN up while the desktop-owned
+  local proxy died with the process, and macOS DNS stayed on `127.0.0.1`.
+  Treat `localhost` / `127.0.0.1` / `::1` as one loopback proxy, clear every
+  configured local-proxy port, and still delete the TUN when that clear
+  fails. Stop Mihomo with `SIGTERM` before `SIGKILL` so it can remove its
+  own routes, flush the OS DNS cache, and release the capture if the desktop
+  has been gone for 90 seconds (ADR 0120). An update exit stays on Pause.
+- A successful macOS DNS restore can still leave every service on
+  `127.0.0.1` when `system-dns.toml` captured the tunnel resolver, or when
+  `networksetup` returns success while `scutil --dns` does not change. Names
+  then fail and a raw IP can still connect. Never store or write loopback as
+  the original DNS. If the live resolver is still loopback, set the private
+  default gateway, and delete `netstat` routes that still name the TUN. Kill
+  a scoped Mihomo orphan on stop when the child handle is already empty
+  (ADR 0121).

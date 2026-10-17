@@ -18,7 +18,7 @@ pub fn points_at_hiddify(snapshot: &Snapshot, host: &str, port: u16) -> bool {
     if snapshot.proxy_enable == 0 {
         return false;
     }
-    snapshot.proxy_server.contains(&format!("{host}:{port}"))
+    iran_split_core::proxy_server_matches(&snapshot.proxy_server, host, port)
 }
 
 pub fn snapshot_path(user_data_dir: &Path) -> PathBuf {
@@ -160,6 +160,14 @@ mod tests {
         };
         assert!(points_at_hiddify(&snapshot, "127.0.0.1", 12334));
         assert!(!points_at_hiddify(&snapshot, "10.0.0.1", 8080));
+        assert!(points_at_hiddify(
+            &Snapshot {
+                proxy_enable: 1,
+                proxy_server: "localhost:10808".into(),
+            },
+            "127.0.0.1",
+            10808
+        ));
     }
 
     #[test]

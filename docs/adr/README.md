@@ -123,3 +123,5 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0117](./0117-physical-interface-taskbar.md)                   | Complete physical adapter throughput in a compact tray-side widget  | Accepted   |
 | [0118](./0118-ubuntu-panel-speed.md)                           | Physical adapter speeds beside the Ubuntu tray icon                 | Accepted   |
 | [0119](./0119-speed-display-settings.md)                       | Dedicated speed display settings and units                          | Accepted   |
+| [0120](./0120-release-network-on-quit.md)                      | Release the tunnel, DNS, and system proxy when BiFlow is not in use | Accepted   |
+| [0121](./0121-restore-dns-without-loopback.md)                 | Restore macOS DNS without writing the tunnel resolver back          | Accepted   |
