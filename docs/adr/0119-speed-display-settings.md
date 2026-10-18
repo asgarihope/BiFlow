@@ -4,7 +4,8 @@ Status: Accepted (6.2.66)
 
 Move the existing taskbar/panel toggle from Behavior into Settings → Speed display
 on Windows and Linux. This tab contains only the enable toggle and unit selector.
-Other platforms preserve both preferences without exposing an unsupported tab.
+macOS uses the same tab (ADR 0122). Platforms without a native speed surface
+preserve both preferences without exposing the tab.
 Reuse the shared tab/form/save flow and English/Persian localization.
 
 Persist `behavior.taskbar_speed_unit` as a typed `SpeedUnit` with serde defaults.

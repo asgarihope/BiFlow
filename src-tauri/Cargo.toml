@@ -58,6 +58,8 @@ iran-split-netstats = { path = "../crates/iran-split-netstats" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 iran-split-platform-macos = { path = "../crates/iran-split-platform-macos" }
+iran-split-taskbar = { path = "../crates/iran-split-taskbar" }
+iran-split-netstats = { path = "../crates/iran-split-netstats" }
 
 [lints]
 workspace = true

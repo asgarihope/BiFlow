@@ -11,6 +11,11 @@ for (const { platform, label, persian } of [
     label: "Show network speed in panel",
     persian: "نمایش سرعت شبکه در پنل",
   },
+  {
+    platform: "MacIntel",
+    label: "Show network speed in menu bar",
+    persian: "نمایش سرعت شبکه در نوار منو",
+  },
 ]) {
   test(`${platform} speed preference has a Persian label`, async ({ page }) => {
     await page.addInitScript((platform) => {

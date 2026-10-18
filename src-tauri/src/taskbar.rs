@@ -19,7 +19,7 @@ pub struct Taskbar {
     unit: Mutex<SpeedUnit>,
 }
 static ADAPTER_STATE: Mutex<&'static str> = Mutex::new("disabled");
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 static PANEL_STATE: Mutex<&'static str> = Mutex::new("disabled");
 
 pub fn adapter_state() -> &'static str {
@@ -105,7 +105,7 @@ pub fn apply_preferences<R: Runtime>(app: &AppHandle<R>, enabled: bool, unit: Sp
             display.set_unit(unit);
             display.set_enabled(enabled);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         update_panel(app, enabled, None, unit);
         tracing::info!(
             event = "taskbar.preference_applied",
@@ -171,7 +171,7 @@ fn spawn_interface_sampler<R: Runtime>(app: AppHandle<R>) {
                     rates.map(|rates| rates.download),
                 );
             };
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 let unit = *state.unit.lock().expect("speed unit");
                 update_panel(&app, state.enabled.load(Ordering::Acquire), rates, unit);
@@ -217,7 +217,7 @@ pub fn shutdown<R: Runtime>(app: &AppHandle<R>) {
         state.enabled.store(false, Ordering::Release);
         #[cfg(windows)]
         drop(state.display.lock().expect("taskbar state").take());
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let unit = *state.unit.lock().expect("speed unit");
             update_panel(app, false, None, unit);
@@ -225,10 +225,15 @@ pub fn shutdown<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn panel_state() -> &'static str {
     *PANEL_STATE.lock().expect("panel state")
 }
+
+#[cfg(target_os = "linux")]
+const TRAY_LABEL_ROUTE: &str = "shared_stats->tray_label->appindicator";
+#[cfg(target_os = "macos")]
+const TRAY_LABEL_ROUTE: &str = "shared_stats->tray_label->menu_bar";
 
 #[cfg(target_os = "linux")]
 fn panel_label(
@@ -241,6 +246,21 @@ fn panel_label(
             "↑ {}  ↓ {}",
             iran_split_taskbar::format_rate_in(rates.map(|rates| rates.upload), unit),
             iran_split_taskbar::format_rate_in(rates.map(|rates| rates.download), unit),
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn panel_label(
+    enabled: bool,
+    rates: Option<iran_split_netstats::Rates>,
+    unit: SpeedUnit,
+) -> Option<String> {
+    enabled.then(|| {
+        iran_split_taskbar::menu_bar_label(
+            rates.map(|rates| rates.upload),
+            rates.map(|rates| rates.download),
+            unit,
         )
     })
 }
@@ -265,15 +285,105 @@ fn update_panel<R: Runtime>(
         },
         None => "unavailable",
     };
+    record_panel_state(status);
+}
+
+#[cfg(target_os = "macos")]
+fn update_panel<R: Runtime>(
+    app: &AppHandle<R>,
+    enabled: bool,
+    rates: Option<iran_split_netstats::Rates>,
+    unit: SpeedUnit,
+) {
+    let label = panel_label(enabled, rates, unit);
+    let status = if iran_split_taskbar::menu_bar_is_main_thread() {
+        menu_bar_submission(label.as_deref())
+    } else {
+        submit_menu_bar(app, label.clone())
+    };
+    let status = if status == "unavailable" {
+        plain_menu_bar_title(app, label)
+    } else {
+        status
+    };
+    record_panel_state(status);
+}
+
+#[cfg(target_os = "macos")]
+fn plain_menu_bar_title<R: Runtime>(app: &AppHandle<R>, label: Option<String>) -> &'static str {
+    let enabled = label.is_some();
+    match app.tray_by_id("main") {
+        Some(tray) => match tray.set_title(label) {
+            Ok(()) => {
+                if enabled {
+                    "plain_title"
+                } else {
+                    "disabled"
+                }
+            }
+            Err(_) => "failed",
+        },
+        None => "unavailable",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_submission(label: Option<&str>) -> &'static str {
+    if iran_split_taskbar::apply_menu_bar_label(label) {
+        if label.is_some() {
+            "label_set"
+        } else {
+            "disabled"
+        }
+    } else {
+        "unavailable"
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn submit_menu_bar<R: Runtime>(app: &AppHandle<R>, label: Option<String>) -> &'static str {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let queued = app.run_on_main_thread(move || {
+        let status = menu_bar_submission(label.as_deref());
+        if sender.send(status).is_err() {
+            tracing::warn!(
+                event = "taskbar.panel_unavailable",
+                section = "taskbar",
+                initiator = "interface_sampler",
+                cause = "waiter_dropped",
+                trace_route = TRAY_LABEL_ROUTE,
+                "menu bar label result had no waiter"
+            );
+        }
+    });
+    if queued.is_err() {
+        return "failed";
+    }
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or("failed")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn record_panel_state(status: &'static str) {
     let mut previous = PANEL_STATE.lock().expect("panel state");
     if status != *previous {
-        if matches!(status, "failed" | "unavailable") {
+        if status == "plain_title" {
             tracing::warn!(
                 event = "taskbar.panel_unavailable",
                 section = "taskbar",
                 initiator = "interface_sampler",
                 cause = status,
-                trace_route = "shared_stats->tray_label->appindicator",
+                trace_route = TRAY_LABEL_ROUTE,
+                "menu bar title fell back to a plain label"
+            );
+        } else if matches!(status, "failed" | "unavailable") {
+            tracing::warn!(
+                event = "taskbar.panel_unavailable",
+                section = "taskbar",
+                initiator = "interface_sampler",
+                cause = status,
+                trace_route = TRAY_LABEL_ROUTE,
                 "panel speed label could not be updated"
             );
         } else {
@@ -282,7 +392,7 @@ fn update_panel<R: Runtime>(
                 section = "taskbar",
                 initiator = "interface_sampler",
                 cause = status,
-                trace_route = "shared_stats->tray_label->appindicator",
+                trace_route = TRAY_LABEL_ROUTE,
                 "panel speed label state changed"
             );
         }
@@ -316,6 +426,32 @@ mod tests {
             panel_label(true, None, SpeedUnit::Megabytes).as_deref(),
             Some("↑ — MB/s  ↓ — MB/s")
         );
+        assert_eq!(panel_label(false, rates, SpeedUnit::Megabytes), None);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_label_stacks_equal_width_lines_and_clears_when_disabled() {
+        let idle = panel_label(true, None, SpeedUnit::AutoBits).expect("idle label");
+        let idle_lines: Vec<_> = idle.lines().collect();
+        assert_eq!(idle_lines.len(), 2);
+        assert_eq!(idle_lines[0].chars().count(), idle_lines[1].chars().count());
+        assert!(idle_lines[0].ends_with("— bps ↑"));
+        assert!(idle_lines[1].ends_with("— bps ↓"));
+        let rates = Some(iran_split_netstats::Rates {
+            upload: 14_000.0,
+            download: 450_000.0,
+        });
+        let live = panel_label(true, rates, SpeedUnit::AutoBits).expect("live label");
+        let live_lines: Vec<_> = live.lines().collect();
+        assert_eq!(live_lines[0].chars().count(), idle_lines[0].chars().count());
+        assert_eq!(live_lines[1].chars().count(), idle_lines[0].chars().count());
+        assert!(live_lines[0].ends_with("112 Kbps ↑"));
+        assert!(live_lines[1].ends_with("3.6 Mbps ↓"));
         assert_eq!(panel_label(false, rates, SpeedUnit::Megabytes), None);
     }
 }

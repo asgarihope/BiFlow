@@ -411,7 +411,7 @@ impl Default for RulesConfig {
     reason = "each field is an independent user-facing behavior toggle"
 )]
 pub struct BehaviorConfig {
-    /// Windows taskbar or Linux `AppIndicator` panel display; ignored on macOS.
+    /// Windows taskbar, Linux `AppIndicator` panel, or macOS menu bar display.
     pub show_taskbar_speed: bool,
     pub taskbar_speed_unit: SpeedUnit,
     pub launch_at_login: bool,

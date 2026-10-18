@@ -115,6 +115,11 @@ border-ink/10 pt-3`, with small buttons
   download beside the existing BiFlow tray icon in the top panel. Use the native
   AppIndicator label, inherit the panel theme, and clear the label when disabled
   (ADR 0118). Linux settings call it the panel rather than the Windows taskbar.
+- On macOS, the same preference and sampler show upload above download, with
+  the arrow on the right of each rate, in a fixed 11-column monospaced title.
+  Hide the menu bar icon while speeds are shown and restore it when disabled.
+  Inherit the menu bar theme, and clear the title when disabled (ADR 0122).
+  macOS settings call it the menu bar.
 - Settings → Speed display contains only the enable toggle and unit selector.
   The saved unit applies immediately to both native renderers. Bits/bytes and
   their kilo/mega/giga scales are decimal (1000); legacy settings default to

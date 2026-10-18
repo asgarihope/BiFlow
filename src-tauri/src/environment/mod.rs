@@ -555,6 +555,12 @@ async fn collect(context: CollectContext) -> EnvironmentReport {
         report.taskbar_adapter = Some(crate::taskbar::adapter_state());
         report.taskbar_speed = Some(crate::taskbar::panel_state());
     }
+    #[cfg(target_os = "macos")]
+    {
+        report.taskbar_renderer = Some("menu_bar_label");
+        report.taskbar_adapter = Some(crate::taskbar::adapter_state());
+        report.taskbar_speed = Some(crate::taskbar::panel_state());
+    }
     report.findings = findings(&report, context.config.as_ref());
     report.collection_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     report

@@ -11,7 +11,7 @@ mod platform_paths;
 mod profile;
 mod profile_picker;
 mod reachability;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod taskbar;
 mod traffic;
 mod tray;
@@ -1208,7 +1208,7 @@ async fn save_settings(
             "saved settings"
         );
         services.backend.update_config(saved.clone()).await;
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         taskbar::apply_preferences(
             &app,
             saved.behavior.show_taskbar_speed,
@@ -3897,7 +3897,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         );
         cause
     })?;
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     taskbar::setup(app.handle());
     info!(
         event = "startup.completed",
@@ -4165,7 +4165,7 @@ fn handle_run_event(handle: &AppHandle, event: &tauri::RunEvent) {
             });
         }
         tauri::RunEvent::Exit => {
-            #[cfg(any(windows, target_os = "linux"))]
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             taskbar::shutdown(handle);
             diagnostics::close_session();
         }
