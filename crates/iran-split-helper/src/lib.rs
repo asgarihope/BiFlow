@@ -710,10 +710,22 @@ fn request_graceful_stop(child: &Child) {
     let Ok(pid) = i32::try_from(pid) else {
         return;
     };
-    let _ = nix::sys::signal::kill(
+    if let Err(cause) = nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(pid),
         nix::sys::signal::Signal::SIGTERM,
-    );
+    ) {
+        // The child can exit between try_wait and kill; no signal is then needed.
+        if cause != nix::errno::Errno::ESRCH {
+            tracing::warn!(
+                event = "helper.graceful_stop_failed",
+                section = "helper_process",
+                initiator = "helper_process",
+                cause = %cause,
+                trace_route = "helper_process->stop->sigterm",
+                "graceful stop failed; the bounded force-stop fallback remains active"
+            );
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -723,13 +735,26 @@ fn request_graceful_stop(child: &Child) {
     let Some(pid) = child.id() else {
         return;
     };
-    let _ = std::process::Command::new("taskkill")
+    let result = std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string()])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+    let cause = match result {
+        Ok(status) if status.success() => return,
+        Ok(_) => "taskkill_failed",
+        Err(_) => "taskkill_spawn_failed",
+    };
+    tracing::warn!(
+        event = "helper.graceful_stop_failed",
+        section = "helper_process",
+        initiator = "helper_process",
+        cause,
+        trace_route = "helper_process->stop->taskkill",
+        "graceful stop failed; the bounded force-stop fallback remains active"
+    );
 }
 
 /// Drops cached fake-ip answers (`198.18.0.0/16`) so lookups work again after
@@ -1243,6 +1268,7 @@ async fn delete_owned_interface(name: &str) -> Result<(), HelperServiceError> {
 }
 
 /// A route row from `netstat -rn` whose interface column is the helper TUN.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, PartialEq, Eq)]
 struct OwnedRoute {
     destination: String,
@@ -1252,6 +1278,7 @@ struct OwnedRoute {
 
 /// `netstat` puts the interface in the fourth column. An optional expire
 /// value comes after it, so the interface is not always the last field.
+#[cfg(any(target_os = "macos", test))]
 fn owned_routes(table: &str, interface: &str) -> Vec<OwnedRoute> {
     table
         .lines()
@@ -1273,6 +1300,7 @@ fn owned_routes(table: &str, interface: &str) -> Vec<OwnedRoute> {
         .collect()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn route_delete_args(route: &OwnedRoute) -> Vec<String> {
     if route.destination == "default" {
         return vec![

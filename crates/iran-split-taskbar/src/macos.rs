@@ -54,10 +54,10 @@ pub fn apply_menu_bar_label(label: Option<&str>) -> bool {
     true
 }
 
-fn attributes<'a>(
-    font: &'a NSFont,
-    style: &'a NSMutableParagraphStyle,
-    color: &'a NSColor,
+fn attributes(
+    font: &NSFont,
+    style: &NSMutableParagraphStyle,
+    color: &NSColor,
 ) -> objc2::rc::Retained<NSDictionary<NSString, AnyObject>> {
     // SAFETY: Apple's attribute-name constants are non-null for the process lifetime.
     let keys: [&NSString; 3] = unsafe {

@@ -71,6 +71,13 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- macOS route parsers used only by native cleanup still compile in Linux and
+  Windows library builds unless gated with `cfg(any(target_os = "macos", test))`.
+  Keep their pure route-deletion tests running on every host. Update vulnerable
+  lockfile dependencies instead of ignoring RustSec advisories. The updater is
+  used only for signed downloads; keep its unused archive installer disabled so
+  it cannot reintroduce a second, vulnerable ZIP dependency (ADR 0124).
+
 - Copy native display preferences out of their mutex before `TrayIcon::set_title`.
   That operation can synchronously wait for the main thread; keeping the settings
   lock in an argument temporary can block a concurrent settings/shutdown action
