@@ -764,3 +764,11 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   status icon while that title is shown and restore the retained image when
   it is cleared. Widen both lines together when a fixed unit is longer
   (ADR 0122).
+
+- Apple Silicon in-app update asks the Tauri updater for platform
+  `macos-aarch64`. A `latest.json` that only lists Linux and Windows fails
+  with "the platform macos-aarch64 was not found in the response platforms
+  object" even when the GitHub Release already has
+  `BiFlow_*_aarch64.dmg`. Sign that disk image in the release job and publish
+  it as the `macos-aarch64` entry. The platform key must stay identical to
+  `signed_target` for `InstallKind::Dmg` on `aarch64` (ADR 0126).

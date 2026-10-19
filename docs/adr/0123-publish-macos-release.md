@@ -14,8 +14,9 @@ version file still publishes, including a re-run. The macOS job runs
 fallback, and the publish job uploads `BiFlow_<version>_aarch64.dmg` next to
 the signed Linux and Windows packages.
 
-The disk image is a manual download. It is not an updater target: `latest.json`
-still lists only the signed Debian package, AppImage, and NSIS installer.
+Apple Silicon in-app updates install this disk image.
+[0126](./0126-macos-updater-platform.md) signs it and publishes the
+`macos-aarch64` platform in `latest.json`.
 
 The publish job creates the missing tag itself. A tag pushed with the
 workflow token does not start another workflow, so the tag cannot be relied on
