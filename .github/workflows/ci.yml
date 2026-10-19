@@ -59,6 +59,13 @@ jobs:
         shell: bash
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: runner.os != 'Linux'
+        with:
+          node-version: 24
+      - name: Test native build scripts
+        if: runner.os != 'Linux'
+        run: node --test scripts/build-plan.test.mjs
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy

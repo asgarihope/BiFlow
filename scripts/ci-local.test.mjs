@@ -21,6 +21,24 @@ function jobBlock(workflow, job) {
 }
 
 describe("ci-local", () => {
+  it("mirrors native build-script verification on macOS and Windows", () => {
+    for (const [platform, runner] of [
+      ["darwin", "macos-15"],
+      ["win32", "windows-2025"],
+    ]) {
+      const step = planSteps(platform).steps.find(
+        (item) => item.id === "native-build-scripts",
+      );
+      assert.ok(step);
+      assert.equal(step.runner, runner);
+      assert.deepEqual(step.command, [
+        "node",
+        "--test",
+        "scripts/build-plan.test.mjs",
+      ]);
+    }
+  });
+
   it("mirrors every verification command in ci.yml", () => {
     const mirrored = new Set(
       planSteps("linux").steps.map((step) => step.ciCommand),

@@ -43,7 +43,12 @@ export const SETUP_ONLY = [
  * @returns {{ steps: Step[], gaps: string[] }}
  */
 export function planSteps(platform) {
-  const hostRunner = platform === "win32" ? "windows-2025" : "ubuntu-24.04";
+  const hostRunner =
+    platform === "win32"
+      ? "windows-2025"
+      : platform === "darwin"
+        ? "macos-15"
+        : "ubuntu-24.04";
   const clippy = "cargo clippy --workspace --all-targets -- -D warnings";
   /** @type {Step[]} */
   const steps = [
@@ -60,6 +65,14 @@ export function planSteps(platform) {
       runner: "ubuntu-24.04",
       ciCommand: "pnpm check",
       command: ["pnpm", "check"],
+    },
+    {
+      id: "native-build-scripts",
+      job: "rust",
+      runner: hostRunner,
+      ciCommand: "node --test scripts/build-plan.test.mjs",
+      command: ["node", "--test", "scripts/build-plan.test.mjs"],
+      note: "system Bash 3.2 and PowerShell cases require their native hosts",
     },
     {
       id: "browsers",

@@ -121,7 +121,10 @@ describe("release artifact names", () => {
     assert.match(source, /linux_stage_done/);
     assert.match(source, /windows_stage_done/);
     assert.match(source, /write_stamp/);
-    assert.match(source, /pnpm tauri build "\$@" "\$\{configs\[@\]\}"/);
+    assert.match(
+      source,
+      /pnpm tauri build "\$@" \$\{configs\[@\]\+"\$\{configs\[@\]\}"\}/,
+    );
     assert.match(source, /--no-bundle/);
     assert.match(source, /beforeBuildCommand":""/);
     assert.match(source, /main "\$@"/);
@@ -652,6 +655,131 @@ describe("release artifact names", () => {
     assert.match(ci, /python3 --version/);
     assert.match(release, /python3 --version/);
   });
+
+  it(
+    "forwards signed and unsigned build arguments without empty arguments",
+    { skip: isWindows },
+    () => {
+      const source = readFileSync(join(root, "build.sh"), "utf8");
+      const functions = ["tauri_signing_config_args", "run_tauri_build"].map(
+        (name) => {
+          const match = source.match(
+            new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, "m"),
+          );
+          assert.ok(match, `${name} is missing`);
+          return match[0];
+        },
+      );
+      const directory = mkdtempSync(join(tmpdir(), "biflow build arguments "));
+      for (const signed of [false, true]) {
+        for (const skipFrontend of [false, true]) {
+          const script = [
+            "set -euo pipefail",
+            'PROJECT_DIR="$1"',
+            "TAURI_SIGNING_CONFIG_ARGS=()",
+            `TAURI_SIGNING_PRIVATE_KEY=${signed ? "fixture" : "''"}`,
+            "log() { :; }",
+            "frontend_dist_ready() { return 0; }",
+            "pnpm() { printf '%s\\0' \"$@\"; }",
+            ...functions,
+            "tauri_signing_config_args",
+            `run_tauri_build ${skipFrontend ? "skip-frontend" : "run-frontend"} --no-bundle --config 'config path.json'`,
+          ].join("\n");
+          const result = spawnSync(
+            process.platform === "darwin" ? "/bin/bash" : "bash",
+            ["-c", script, "build-test", directory],
+            { encoding: "utf8" },
+          );
+          assert.equal(result.status, 0, result.stderr);
+          const expected = [
+            "tauri",
+            "build",
+            "--no-bundle",
+            "--config",
+            "config path.json",
+          ];
+          if (!signed)
+            expected.push(
+              "--config",
+              '{"bundle":{"createUpdaterArtifacts":false}}',
+            );
+          if (skipFrontend)
+            expected.push("--config", '{"build":{"beforeBuildCommand":""}}');
+          assert.deepEqual(result.stdout.split("\0").slice(0, -1), expected);
+        }
+      }
+    },
+  );
+
+  it("bounds NSIS retries and keeps release and dry-run setup aligned", () => {
+    const steps = ["release.yml", "package-dry-run.yml"].map((file) => {
+      const workflow = readFileSync(
+        join(root, ".github/workflows", file),
+        "utf8",
+      );
+      const match = workflow.match(
+        /- name: Install NSIS[\s\S]*?run: \|\r?\n([\s\S]*?)(?=^ {6}- )/m,
+      );
+      assert.ok(match);
+      return match[1].replace(/^ {10}/gm, "");
+    });
+    assert.equal(steps[0], steps[1]);
+    assert.match(steps[0], /\$attempt -le 3/);
+    assert.match(steps[0], /makensis \/VERSION/);
+    assert.match(steps[0], /\$LASTEXITCODE -eq 0/);
+    assert.match(steps[0], /\$attempt -eq 3.*throw/);
+    assert.match(steps[0], /Start-Sleep -Seconds \(10 \* \$attempt\)/);
+  });
+
+  it(
+    "retries a missing NSIS compiler and fails after the last attempt",
+    { skip: !isWindows },
+    () => {
+      const workflow = readFileSync(
+        join(root, ".github/workflows/release.yml"),
+        "utf8",
+      );
+      const step = workflow
+        .match(
+          /- name: Install NSIS[\s\S]*?run: \|\r?\n([\s\S]*?)(?=^ {6}- )/m,
+        )?.[1]
+        .replace(/^ {10}/gm, "");
+      assert.ok(step);
+      for (const failures of [2, 3]) {
+        const fixture = `
+$global:installCalls = 0
+$global:delays = @()
+function choco { $global:installCalls++; $global:LASTEXITCODE = 0 }
+function Test-Path { param($Path) return $false }
+function Get-Command {
+  param($Name, $ErrorAction)
+  if ($global:installCalls -gt ${failures}) { return @{ Name = "makensis" } }
+  if ($ErrorAction -eq "Stop") { throw "makensis unavailable" }
+}
+function makensis { $global:LASTEXITCODE = 0 }
+function Start-Sleep { param($Seconds) $global:delays += $Seconds }
+$failed = $false
+try {
+& {
+${step}
+} | Out-Null
+} catch { $failed = $true }
+@{ calls = $global:installCalls; delays = $global:delays } | ConvertTo-Json -Compress
+if ($failed) { exit 1 }
+`;
+        const result = spawnSync(
+          "pwsh",
+          ["-NoProfile", "-NonInteractive", "-Command", fixture],
+          { encoding: "utf8" },
+        );
+        assert.equal(result.status, failures === 2 ? 0 : 1, result.stderr);
+        assert.deepEqual(
+          JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)),
+          { calls: 3, delays: [10, 20] },
+        );
+      }
+    },
+  );
 
   it("skips updater signatures when TAURI_SIGNING_PRIVATE_KEY is unset", () => {
     const source = readFileSync(join(root, "build.sh"), "utf8");

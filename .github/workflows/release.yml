@@ -156,16 +156,25 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install nsis -y --no-progress
           $nsisDirs = @(
             "${env:ProgramFiles(x86)}\NSIS",
             "${env:ProgramFiles}\NSIS"
           )
-          foreach ($nsis in $nsisDirs) {
-            if (Test-Path $nsis) {
-              Add-Content -Path $env:GITHUB_PATH -Value $nsis
-              $env:Path = "$nsis;$env:Path"
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            choco install nsis -y --no-progress
+            foreach ($nsis in $nsisDirs) {
+              if (Test-Path $nsis) {
+                Add-Content -Path $env:GITHUB_PATH -Value $nsis
+                $env:Path = "$nsis;$env:Path"
+              }
             }
+            if (Get-Command makensis -ErrorAction SilentlyContinue) {
+              makensis /VERSION
+              if ($LASTEXITCODE -eq 0) { break }
+            }
+            if ($attempt -eq 3) { throw "NSIS is unavailable after 3 installation attempts" }
+            Write-Host "NSIS is unavailable; retrying installation ($attempt/3)"
+            Start-Sleep -Seconds (10 * $attempt)
           }
           Get-Command makensis -ErrorAction Stop
       - run: pnpm install --frozen-lockfile

@@ -71,6 +71,16 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- macOS ships Bash 3.2, where expanding an empty array under `set -u` fails
+  even after `array=()`. Guard optional build arguments with
+  `${array[@]+"${array[@]}"}` and test signed/unsigned argument forwarding
+  with `/bin/bash` on macOS. Chocolatey can return 503 without providing
+  NSIS; retry a bounded number of times and verify `makensis /VERSION`
+  before packaging. Wait for a release attempt to finish before retrying
+  individual jobs, because retrying can cancel other active matrix jobs
+  (ADR 0125). New verification commands in CI must also have a matching step
+  in `scripts/ci-local.mjs`; they are not setup-only exemptions.
+
 - macOS route parsers used only by native cleanup still compile in Linux and
   Windows library builds unless gated with `cfg(any(target_os = "macos", test))`.
   Keep their pure route-deletion tests running on every host. Update vulnerable

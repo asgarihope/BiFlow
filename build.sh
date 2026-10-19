@@ -585,13 +585,14 @@ should_run_macos_stage() {
 run_tauri_build() {
   local frontend_mode="$1"
   shift
-  local configs=("${TAURI_SIGNING_CONFIG_ARGS[@]}")
+  # macOS Bash 3.2 treats an empty array as unset under nounset.
+  local configs=(${TAURI_SIGNING_CONFIG_ARGS[@]+"${TAURI_SIGNING_CONFIG_ARGS[@]}"})
   if [[ "${frontend_mode}" == "skip-frontend" ]]; then
     frontend_dist_ready || \
       die "cannot skip the frontend build: apps/desktop/dist/index.html is missing"
     configs+=(--config '{"build":{"beforeBuildCommand":""}}')
   fi
-  (cd -- "${PROJECT_DIR}" && pnpm tauri build "$@" "${configs[@]}")
+  (cd -- "${PROJECT_DIR}" && pnpm tauri build "$@" ${configs[@]+"${configs[@]}"})
 }
 
 run_windows_cross_tauri_build() {
