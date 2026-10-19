@@ -27,4 +27,5 @@ the labels did not follow the live stack phase.
 
 - Open and About remain available from the window; left-click still shows the
   main window.
-- Quit exits the UI without disconnecting, matching the previous Quit UI item.
+- Quit releases the owned tunnel, system DNS, and loopback system proxy before
+  the process exits, so the machine keeps a working network (ADR 0120).

@@ -89,6 +89,27 @@ impl AppConfig {
         self.clients.iter().find(|client| client.id == id)
     }
 
+    /// Every local-proxy address, including disabled clients.
+    ///
+    /// A client that is no longer running can still own the OS proxy. Disconnect
+    /// and Quit clear each of these endpoints, not only the Hiddify default.
+    #[must_use]
+    pub fn local_proxy_endpoints(&self) -> Vec<(String, u16)> {
+        let mut endpoints = Vec::new();
+        for client in &self.clients {
+            if let ClientConfig::LocalProxy { host, port, .. } = &client.config {
+                let endpoint = (host.clone(), *port);
+                if !endpoints.contains(&endpoint) {
+                    endpoints.push(endpoint);
+                }
+            }
+        }
+        if endpoints.is_empty() {
+            endpoints.push(self.hiddify_endpoint());
+        }
+        endpoints
+    }
+
     /// Loopback SOCKS endpoint of the Hiddify instance, or the catalog default.
     #[must_use]
     pub fn hiddify_endpoint(&self) -> (String, u16) {
@@ -390,7 +411,7 @@ impl Default for RulesConfig {
     reason = "each field is an independent user-facing behavior toggle"
 )]
 pub struct BehaviorConfig {
-    /// Windows taskbar or Linux `AppIndicator` panel display; ignored on macOS.
+    /// Windows taskbar, Linux `AppIndicator` panel, or macOS menu bar display.
     pub show_taskbar_speed: bool,
     pub taskbar_speed_unit: SpeedUnit,
     pub launch_at_login: bool,
@@ -1006,7 +1027,15 @@ mod tests {
         let reloaded = store.load().expect("reload as development");
         assert_eq!(reloaded.mihomo.controller_port, DEV_PROFILE_CONTROLLER_PORT);
         assert_eq!(reloaded.mihomo.mixed_port, DEV_PROFILE_MIXED_PORT);
-        assert_eq!(reloaded.mihomo.tun_name, DEV_PROFILE_TUN_NAME);
+        // macOS rewrites any non-`utunN` name on load. The dev name must not
+        // fall back to the installed app's TUN.
+        let expected_tun = if cfg!(target_os = "macos") {
+            MACOS_TUN_NAME
+        } else {
+            DEV_PROFILE_TUN_NAME
+        };
+        assert_eq!(reloaded.mihomo.tun_name, expected_tun);
+        assert_ne!(reloaded.mihomo.tun_name, PRODUCTION_TUN_NAME);
         let persisted = toml::from_str::<toml::Value>(&fs::read_to_string(&path).expect("read"))
             .expect("parse")
             .get("mihomo")
@@ -1112,6 +1141,10 @@ mod tests {
         assert!(config.hiddify_client().is_none());
         assert_eq!(config.enabled_clients().len(), 1);
         assert_eq!(config.hiddify_endpoint(), ("127.0.0.1".into(), 12_334));
+        let ClientConfig::LocalProxy { host, port, .. } = &config.clients[0].config else {
+            panic!("Happ is a local proxy");
+        };
+        assert_eq!(config.local_proxy_endpoints(), vec![(host.clone(), *port)]);
     }
 
     #[test]

@@ -29,6 +29,8 @@ pub(crate) async fn execute_audited(
         command = request.payload.audit_name(),
         "authorized helper command"
     );
+    let _in_flight = supervisor.begin_command();
+    supervisor.note_desktop_contact().await;
     let request_id = request.request_id;
     let protocol_version = request.protocol_version;
     let reply = execute(supervisor, request.payload).await;

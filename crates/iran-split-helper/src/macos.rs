@@ -46,6 +46,7 @@ pub async fn run_macos(config_path: &Path) -> Result<(), HelperServiceError> {
     let listener = UnixListener::bind(&socket_path)?;
     apply_socket_permissions(&socket_path, settings.authorized_gid)?;
     let supervisor = Arc::new(Supervisor::new(settings));
+    super::spawn_absence_watch(Arc::clone(&supervisor));
     info!(
         event = "helper.listening",
         section = "helper_ipc",

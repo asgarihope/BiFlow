@@ -11,7 +11,7 @@ mod platform_paths;
 mod profile;
 mod profile_picker;
 mod reachability;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod taskbar;
 mod traffic;
 mod tray;
@@ -26,8 +26,8 @@ use iran_split_config::{
     ValidationIssue,
 };
 use iran_split_core::{
-    ComponentPhase, Engine, LifecycleBusy, OperationAccepted, PlatformBackend, StackPhase,
-    StackSnapshot,
+    ComponentPhase, CoreError, Engine, LifecycleBusy, OperationAccepted, PlatformBackend,
+    StackPhase, StackSnapshot,
 };
 use iran_split_mihomo::{ActiveConnection, ControllerClient};
 use iran_split_rules::{
@@ -1208,7 +1208,7 @@ async fn save_settings(
             "saved settings"
         );
         services.backend.update_config(saved.clone()).await;
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         taskbar::apply_preferences(
             &app,
             saved.behavior.show_taskbar_speed,
@@ -2823,6 +2823,10 @@ async fn restore_stack_after_failed_install(services: &AppServices) {
 }
 
 fn schedule_update_exit(app: &AppHandle, operation_id: Uuid) -> OperationAccepted {
+    // The installer already paused the tunnel. Quitting for an update must not
+    // run the full disconnect, which would stop Hiddify before the package
+    // replaces the app (ADR 0025, ADR 0120).
+    UPDATE_EXIT_KEEPS_NETWORK.store(true, Ordering::SeqCst);
     diagnostics::flush();
     let exit_app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -3600,8 +3604,8 @@ fn handle_tray_menu<R: Runtime>(app: &AppHandle<R>, event: &MenuEvent) {
                 section = "lifecycle",
                 initiator = "tray_menu",
                 cause = "quit_selected",
-                trace_route = "tray_menu->application_exit",
-                "quit requested without disconnect"
+                trace_route = "tray_menu->application_exit->stop_stack",
+                "quit requested; the owned tunnel, DNS, and system proxy will be released"
             );
             app.exit(0);
         }
@@ -3893,7 +3897,7 @@ fn setup_application(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Err
         );
         cause
     })?;
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     taskbar::setup(app.handle());
     info!(
         event = "startup.completed",
@@ -4133,20 +4137,97 @@ pub fn run() {
     app.run(|handle, event| handle_run_event(handle, &event));
 }
 
-fn handle_run_event(
-    #[cfg(any(windows, target_os = "linux"))] handle: &AppHandle,
-    #[cfg(not(any(windows, target_os = "linux")))] _: &AppHandle,
-    event: &tauri::RunEvent,
-) {
+static UPDATE_EXIT_KEEPS_NETWORK: AtomicBool = AtomicBool::new(false);
+static NETWORK_RELEASE_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// User quit gives the machine its previous network back. An in-app update
+/// already paused the tunnel and must keep that paused stack (ADR 0120).
+#[must_use]
+fn exit_releases_owned_network(update_exit: bool) -> bool {
+    !update_exit
+}
+
+fn handle_run_event(handle: &AppHandle, event: &tauri::RunEvent) {
     match event {
-        tauri::RunEvent::ExitRequested { code, .. } => diagnostics::exit_requested(*code),
+        tauri::RunEvent::ExitRequested { api, code, .. } => {
+            diagnostics::exit_requested(*code);
+            if !exit_releases_owned_network(UPDATE_EXIT_KEEPS_NETWORK.load(Ordering::SeqCst)) {
+                return;
+            }
+            if NETWORK_RELEASE_STARTED.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            api.prevent_exit();
+            let app = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                release_owned_network(&app).await;
+                app.exit(0);
+            });
+        }
         tauri::RunEvent::Exit => {
-            #[cfg(any(windows, target_os = "linux"))]
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             taskbar::shutdown(handle);
             diagnostics::close_session();
         }
         _ => {}
     }
+}
+
+async fn release_owned_network<R: Runtime>(app: &AppHandle<R>) {
+    let Ok(services) = services(app) else {
+        return;
+    };
+    info!(
+        event = "session.network_release_started",
+        section = "lifecycle",
+        initiator = "application_exit",
+        cause = "quit",
+        trace_route = "application_exit->stop_stack",
+        "releasing the tunnel, system DNS, and system proxy before exit"
+    );
+    let engine = &services.engine;
+    if let Some(operation_id) = engine.snapshot().operation_id {
+        engine.cancel_operation(operation_id).await;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(50);
+    loop {
+        match engine.stop_stack().await {
+            Ok(accepted) => {
+                if !accepted.already_complete {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if let Err(cause) = engine
+                        .wait_for_phase(StackPhase::Stopped, remaining.max(Duration::from_secs(1)))
+                        .await
+                    {
+                        warn!(
+                            event = "session.network_release_failed",
+                            section = "lifecycle",
+                            initiator = "application_exit",
+                            cause = %cause,
+                            trace_route = "application_exit->stop_stack",
+                            "quit continued after the network release did not finish"
+                        );
+                    }
+                }
+                break;
+            }
+            Err(CoreError::OperationInProgress) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(cause) => {
+                warn!(
+                    event = "session.network_release_failed",
+                    section = "lifecycle",
+                    initiator = "application_exit",
+                    cause = %cause,
+                    trace_route = "application_exit->stop_stack",
+                    "quit continued without a completed disconnect"
+                );
+                break;
+            }
+        }
+    }
+    diagnostics::flush();
 }
 
 #[cfg(test)]
@@ -4156,6 +4237,12 @@ mod tests {
         BaseDirs, ProfileEnv, ResolvedProfile, DEV_HELPER_ENDPOINT_VAR, DEV_MIHOMO_BINARY_VAR,
         DEV_PROFILE_VAR, DEV_SYSTEM_RUNTIME_VAR,
     };
+
+    #[test]
+    fn quit_releases_the_network_and_an_update_exit_does_not() {
+        assert!(exit_releases_owned_network(false));
+        assert!(!exit_releases_owned_network(true));
+    }
 
     /// Regression (ADR 0115): the application's data roots and the
     /// diagnostics log came from two independent reconstructions of

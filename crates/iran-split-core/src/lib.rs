@@ -14,6 +14,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+mod proxy_match;
+pub use proxy_match::{proxy_endpoint_matches, proxy_server_matches};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StackPhase {
@@ -1945,8 +1948,31 @@ impl<B: PlatformBackend> Engine<B> {
             }
         }
         self.announce_stage(OperationStage::StoppingProxy).await;
-        self.backend.stop_user_proxy().await?;
-        self.backend.clear_hiddify_system_proxy().await?;
+        // A proxy-tool failure must not skip TUN and DNS cleanup. Leaving the
+        // capture in place is what makes the network unusable until the next
+        // Connect (ADR 0120).
+        if let Err(cause) = self.backend.stop_user_proxy().await {
+            warn!(
+                event = "operation.stop_proxy_failed",
+                section = "engine",
+                initiator = "run_stop",
+                cause = %cause,
+                trace_id = %operation_id,
+                trace_route = "engine_operation->platform_backend->stop_user_proxy",
+                "stop continued after the local proxy client could not be stopped"
+            );
+        }
+        if let Err(cause) = self.backend.clear_hiddify_system_proxy().await {
+            warn!(
+                event = "operation.stop_clear_proxy_failed",
+                section = "engine",
+                initiator = "run_stop",
+                cause = %cause,
+                trace_id = %operation_id,
+                trace_route = "engine_operation->platform_backend->clear_hiddify_system_proxy",
+                "stop continued after the system proxy could not be cleared"
+            );
+        }
         self.announce_stage(OperationStage::CleaningUp).await;
         let report = self.backend.cleanup_owned_state().await?;
         let tun = self.backend.tun_status().await?;
@@ -2351,6 +2377,7 @@ mod tests {
         proxy_stops: AtomicUsize,
         proxy_clears: AtomicUsize,
         proxy_restores: AtomicUsize,
+        fail_proxy_clear: AtomicBool,
     }
 
     #[async_trait]
@@ -2511,6 +2538,9 @@ mod tests {
 
         async fn clear_hiddify_system_proxy(&self) -> Result<bool, CoreError> {
             self.proxy_clears.fetch_add(1, Ordering::SeqCst);
+            if self.fail_proxy_clear.load(Ordering::SeqCst) {
+                return Err(CoreError::Platform("system proxy clear failed".into()));
+            }
             Ok(false)
         }
 
@@ -2672,6 +2702,26 @@ mod tests {
                 .expect("idempotent")
                 .already_complete
         );
+    }
+
+    #[tokio::test]
+    async fn stop_removes_the_tunnel_when_system_proxy_clear_fails() {
+        let backend = Arc::new(FakeBackend::default());
+        backend.fail_proxy_clear.store(true, Ordering::SeqCst);
+        let engine = Engine::new(Arc::clone(&backend), &tokio::runtime::Handle::current());
+        engine.start_stack(None).await.expect("start accepted");
+        engine
+            .wait_for_phase(StackPhase::Running, Duration::from_secs(2))
+            .await
+            .expect("running");
+
+        engine.stop_stack().await.expect("stop accepted");
+        engine
+            .wait_for_phase(StackPhase::Stopped, Duration::from_secs(2))
+            .await
+            .expect("stopped");
+        assert!(!backend.tun.load(Ordering::SeqCst));
+        assert!(backend.cleanups.load(Ordering::SeqCst) >= 1);
     }
 
     #[tokio::test]

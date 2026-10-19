@@ -9,8 +9,11 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, LazyLock},
-    time::Duration,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, LazyLock,
+    },
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use tokio::{
@@ -21,6 +24,12 @@ use tokio::{
 use uuid::Uuid;
 
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Mihomo removes its own routes, nftables, and TUN on `SIGTERM`. Killing it
+/// immediately leaves those rules in place and the network stays black-holed.
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+/// The desktop health loop talks to the helper every 10 seconds. A longer
+/// silence means the app crashed or was killed, so the capture must come down.
+const DESKTOP_ABSENCE_LIMIT: Duration = Duration::from_secs(90);
 const MIHOMO_STAY_ALIVE: Duration = Duration::from_millis(400);
 const MAX_LOG_ENTRIES: usize = 2_000;
 const FIXED_GENERATION_FILES: [&str; 8] = [
@@ -172,6 +181,9 @@ pub struct Supervisor {
     registered: Mutex<HashMap<Uuid, String>>,
     logs: Arc<Mutex<VecDeque<ServiceLogEntry>>>,
     pub(crate) side_tunnels: Mutex<HashMap<Uuid, openvpn::RunningSideTunnel>>,
+    desktop_contact: Mutex<Option<Instant>>,
+    commands_in_flight: AtomicUsize,
+    started_at: Instant,
 }
 
 impl Supervisor {
@@ -183,7 +195,19 @@ impl Supervisor {
             registered: Mutex::new(HashMap::new()),
             logs: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES))),
             side_tunnels: Mutex::new(HashMap::new()),
+            desktop_contact: Mutex::new(None),
+            commands_in_flight: AtomicUsize::new(0),
+            started_at: Instant::now(),
         }
+    }
+
+    pub(crate) async fn note_desktop_contact(&self) {
+        *self.desktop_contact.lock().await = Some(Instant::now());
+    }
+
+    pub(crate) fn begin_command(&self) -> CommandInFlight<'_> {
+        self.commands_in_flight.fetch_add(1, Ordering::SeqCst);
+        CommandInFlight { supervisor: self }
     }
 
     #[must_use]
@@ -418,15 +442,52 @@ impl Supervisor {
             stop_managed_child(managed).await?;
         }
         *current = None;
+        // Hold the child lock across the orphan kill so a concurrent start
+        // cannot spawn a new Mihomo while this stop is still tearing the
+        // previous one down.
+        if let Err(cause) = orphan::cleanup(&self.settings, Uuid::new_v4()).await {
+            tracing::warn!(
+                event = "helper.orphan_after_stop_failed",
+                section = "helper_process",
+                initiator = "helper_process",
+                cause = %cause,
+                trace_route = "helper_process->stop->owned_orphan_cleanup",
+                "scoped Mihomo orphan remained after stop"
+            );
+        }
         drop(current);
         self.push_log("info", "mihomo_stopped", BTreeMap::new())
             .await;
+        // DNS restore talks to networksetup for every service. Keep it off
+        // the child lock so a status read is not stuck behind that wait.
+        // Start takes the same lock before it spawns, and the desktop does
+        // not overlap stop with start.
+        #[cfg(target_os = "macos")]
+        self.release_macos_network().await;
         Ok(ProcessStatus {
             running: false,
             pid: None,
             generation_id: None,
             started_at: None,
         })
+    }
+
+    /// Drops macOS tunnel routes and points system DNS back at the network
+    /// the machine had before Connect.
+    #[cfg(target_os = "macos")]
+    async fn release_macos_network(&self) {
+        clear_owned_routes(&self.settings.tun_name).await;
+        if let Err(cause) = macos_dns::restore(&self.settings.runtime_dir) {
+            tracing::warn!(
+                event = "helper.dns_restore_after_stop_failed",
+                section = "helper_dns",
+                initiator = "helper_process",
+                cause = %cause,
+                trace_route = "helper_process->stop->macos_dns",
+                "macOS DNS was not restored when Mihomo stopped"
+            );
+        }
+        flush_dns_cache();
     }
 
     /// Returns the current helper-owned process status.
@@ -459,6 +520,8 @@ impl Supervisor {
             #[cfg(not(unix))]
             delete_owned_interface(&self.settings.tun_name);
         }
+        #[cfg(target_os = "macos")]
+        clear_owned_routes(&self.settings.tun_name).await;
         let tun_removed = !interface_exists(&self.settings.tun_name);
         let warnings = if tun_removed {
             Vec::new()
@@ -471,7 +534,10 @@ impl Supervisor {
         // Restore the macOS system DNS (router resolver) now that the TUN is
         // down; Mihomo's `127.0.0.1:53` listener is gone with the process.
         #[cfg(target_os = "macos")]
-        macos_dns::restore(&self.settings.runtime_dir)?;
+        let dns_result = macos_dns::restore(&self.settings.runtime_dir);
+        flush_dns_cache();
+        #[cfg(target_os = "macos")]
+        dns_result?;
         let report = CleanupReport {
             process_stopped,
             tun_removed,
@@ -616,6 +682,15 @@ async fn stop_managed_child(managed: &mut ManagedChild) -> Result<(), HelperServ
     if managed.child.try_wait()?.is_some() {
         return Ok(());
     }
+    request_graceful_stop(&managed.child);
+    match tokio::time::timeout(GRACEFUL_STOP_TIMEOUT, managed.child.wait()).await {
+        Ok(Ok(_)) => return Ok(()),
+        Ok(Err(error)) => return Err(HelperServiceError::Process(error.to_string())),
+        Err(_) => {}
+    }
+    if managed.child.try_wait()?.is_some() {
+        return Ok(());
+    }
     managed
         .child
         .start_kill()
@@ -625,6 +700,232 @@ async fn stop_managed_child(managed: &mut ManagedChild) -> Result<(), HelperServ
         .map_err(|_| HelperServiceError::Process("process stop timed out".into()))?
         .map_err(|error| HelperServiceError::Process(error.to_string()))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn request_graceful_stop(child: &Child) {
+    let Some(pid) = child.id() else {
+        return;
+    };
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    if let Err(cause) = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGTERM,
+    ) {
+        // The child can exit between try_wait and kill; no signal is then needed.
+        if cause != nix::errno::Errno::ESRCH {
+            tracing::warn!(
+                event = "helper.graceful_stop_failed",
+                section = "helper_process",
+                initiator = "helper_process",
+                cause = %cause,
+                trace_route = "helper_process->stop->sigterm",
+                "graceful stop failed; the bounded force-stop fallback remains active"
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn request_graceful_stop(child: &Child) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Some(pid) = child.id() else {
+        return;
+    };
+    let result = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let cause = match result {
+        Ok(status) if status.success() => return,
+        Ok(_) => "taskkill_failed",
+        Err(_) => "taskkill_spawn_failed",
+    };
+    tracing::warn!(
+        event = "helper.graceful_stop_failed",
+        section = "helper_process",
+        initiator = "helper_process",
+        cause,
+        trace_route = "helper_process->stop->taskkill",
+        "graceful stop failed; the bounded force-stop fallback remains active"
+    );
+}
+
+/// Drops cached fake-ip answers (`198.18.0.0/16`) so lookups work again after
+/// the TUN is gone. A missing tool is ignored; a failed flush is not fatal.
+fn flush_dns_cache() {
+    for (program, args) in dns_flush_commands() {
+        if !Path::new(program).is_file() {
+            continue;
+        }
+        match dns_flush_status(program, args) {
+            Ok(status) if status.success() => {
+                tracing::info!(
+                    event = "helper.dns_cache_flushed",
+                    section = "helper_dns",
+                    initiator = "helper_process",
+                    cause = "network_cleanup",
+                    trace_route = "helper_process->cleanup->dns_cache",
+                    "flushed the system DNS cache after releasing the tunnel"
+                );
+            }
+            Ok(status) => tracing::warn!(
+                event = "helper.dns_cache_flush_failed",
+                section = "helper_dns",
+                initiator = "helper_process",
+                cause = "flush_command_failed",
+                trace_route = "helper_process->cleanup->dns_cache",
+                status = %status,
+                "system DNS cache was not flushed"
+            ),
+            Err(cause) => tracing::warn!(
+                event = "helper.dns_cache_flush_failed",
+                section = "helper_dns",
+                initiator = "helper_process",
+                cause = %cause,
+                trace_route = "helper_process->cleanup->dns_cache",
+                "system DNS cache flush could not start"
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dns_flush_commands() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        ("/usr/bin/dscacheutil", vec!["-flushcache"]),
+        ("/usr/bin/killall", vec!["-HUP", "mDNSResponder"]),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn dns_flush_commands() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        ("/usr/bin/resolvectl", vec!["flush-caches"]),
+        ("/usr/bin/systemd-resolve", vec!["--flush-caches"]),
+    ]
+}
+
+#[cfg(windows)]
+fn dns_flush_commands() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![(r"C:\Windows\System32\ipconfig.exe", vec!["/flushdns"])]
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn dns_flush_commands() -> Vec<(&'static str, Vec<&'static str>)> {
+    Vec::new()
+}
+
+fn dns_flush_status(program: &str, args: Vec<&str>) -> io::Result<std::process::ExitStatus> {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.status()
+}
+
+struct CommandInFlight<'a> {
+    supervisor: &'a Supervisor,
+}
+
+impl Drop for CommandInFlight<'_> {
+    fn drop(&mut self) {
+        self.supervisor
+            .commands_in_flight
+            .fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// `true` when the desktop has not been seen for `limit` and a capture remains.
+#[must_use]
+fn abandoned_capture(
+    contact: Option<Instant>,
+    started_at: Instant,
+    now: Instant,
+    in_flight: bool,
+    captured: bool,
+    limit: Duration,
+) -> bool {
+    if in_flight || !captured {
+        return false;
+    }
+    let age = match contact {
+        Some(seen) => now.saturating_duration_since(seen),
+        None => now.saturating_duration_since(started_at),
+    };
+    age >= limit
+}
+
+impl Supervisor {
+    /// Stops Mihomo and restores DNS when the desktop process has disappeared.
+    pub(crate) async fn release_if_desktop_absent(&self) {
+        let in_flight = self.commands_in_flight.load(Ordering::SeqCst) > 0;
+        let contact = *self.desktop_contact.lock().await;
+        let captured = self.network_captured().await;
+        if !abandoned_capture(
+            contact,
+            self.started_at,
+            Instant::now(),
+            in_flight,
+            captured,
+            DESKTOP_ABSENCE_LIMIT,
+        ) {
+            return;
+        }
+        tracing::warn!(
+            event = "helper.desktop_absent",
+            section = "helper_lifecycle",
+            initiator = "helper_process",
+            cause = "desktop_contact_expired",
+            trace_route = "helper_process->absence_watch->cleanup",
+            "desktop contact expired while the tunnel was still up; releasing the network"
+        );
+        if let Err(cause) = self.cleanup().await {
+            tracing::warn!(
+                event = "helper.desktop_absent_cleanup_failed",
+                section = "helper_lifecycle",
+                initiator = "helper_process",
+                cause = %cause,
+                trace_route = "helper_process->absence_watch->cleanup",
+                "network release after a missing desktop did not finish"
+            );
+        }
+        if !self.network_captured().await {
+            *self.desktop_contact.lock().await = None;
+        }
+    }
+
+    async fn network_captured(&self) -> bool {
+        let running = self
+            .status()
+            .await
+            .map(|status| status.running)
+            .unwrap_or(false);
+        running || interface_exists(&self.settings.tun_name)
+    }
+}
+
+pub(crate) fn spawn_absence_watch(supervisor: Arc<Supervisor>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            supervisor.release_if_desktop_absent().await;
+        }
+    });
 }
 
 fn collect_generation_files(root: &Path) -> Result<Vec<String>, HelperServiceError> {
@@ -966,6 +1267,112 @@ async fn delete_owned_interface(name: &str) -> Result<(), HelperServiceError> {
     Ok(())
 }
 
+/// A route row from `netstat -rn` whose interface column is the helper TUN.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, PartialEq, Eq)]
+struct OwnedRoute {
+    destination: String,
+    gateway: String,
+    host_route: bool,
+}
+
+/// `netstat` puts the interface in the fourth column. An optional expire
+/// value comes after it, so the interface is not always the last field.
+#[cfg(any(target_os = "macos", test))]
+fn owned_routes(table: &str, interface: &str) -> Vec<OwnedRoute> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            if columns.len() < 4 || columns[3] != interface {
+                return None;
+            }
+            let destination = columns[0];
+            if destination.eq_ignore_ascii_case("destination") {
+                return None;
+            }
+            Some(OwnedRoute {
+                destination: destination.to_owned(),
+                gateway: columns[1].to_owned(),
+                host_route: columns[2].contains('H'),
+            })
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn route_delete_args(route: &OwnedRoute) -> Vec<String> {
+    if route.destination == "default" {
+        return vec![
+            "-n".into(),
+            "delete".into(),
+            "default".into(),
+            route.gateway.clone(),
+        ];
+    }
+    let kind = if route.host_route { "-host" } else { "-net" };
+    vec![
+        "-n".into(),
+        "delete".into(),
+        kind.into(),
+        route.destination.clone(),
+        route.gateway.clone(),
+    ]
+}
+
+#[cfg(target_os = "macos")]
+async fn clear_owned_routes(interface: &str) {
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    for family in ["inet", "inet6"] {
+        let output = Command::new("/usr/sbin/netstat")
+            .args(["-rn", "-f", family])
+            .env_clear()
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await;
+        let Ok(output) = output else {
+            failed += 1;
+            continue;
+        };
+        if !output.status.success() {
+            failed += 1;
+            continue;
+        }
+        let table = String::from_utf8_lossy(&output.stdout);
+        for route in owned_routes(&table, interface) {
+            let deleted = Command::new("/sbin/route")
+                .args(route_delete_args(&route))
+                .env_clear()
+                .env("LC_ALL", "C")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .await;
+            match deleted {
+                Ok(result) if result.status.success() => removed += 1,
+                _ => failed += 1,
+            }
+        }
+    }
+    if removed > 0 || failed > 0 {
+        tracing::info!(
+            event = "helper.tun_routes_cleared",
+            section = "helper_network",
+            initiator = "helper_process",
+            cause = "network_cleanup",
+            removed,
+            failed,
+            trace_route = "helper_process->stop->route",
+            "removed routes that still pointed at the tunnel"
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 async fn delete_owned_interface(name: &str) -> Result<(), HelperServiceError> {
     // Mihomo creates a `utun` device and destroys it when the process exits, so
@@ -1056,6 +1463,141 @@ pub fn clap_install_error_message(error: &clap::Error) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absence_releases_only_an_idle_capture() {
+        let now = Instant::now();
+        let ago = |age: Duration| now.checked_sub(age).expect("instant stays in range");
+        let started = ago(Duration::from_secs(120));
+        assert!(abandoned_capture(
+            Some(ago(Duration::from_secs(90))),
+            started,
+            now,
+            false,
+            true,
+            DESKTOP_ABSENCE_LIMIT
+        ));
+        assert!(!abandoned_capture(
+            Some(ago(Duration::from_secs(10))),
+            started,
+            now,
+            false,
+            true,
+            DESKTOP_ABSENCE_LIMIT
+        ));
+        assert!(!abandoned_capture(
+            Some(ago(Duration::from_secs(120))),
+            started,
+            now,
+            true,
+            true,
+            DESKTOP_ABSENCE_LIMIT
+        ));
+        assert!(!abandoned_capture(
+            None,
+            started,
+            now,
+            false,
+            false,
+            DESKTOP_ABSENCE_LIMIT
+        ));
+        assert!(abandoned_capture(
+            None,
+            ago(DESKTOP_ABSENCE_LIMIT),
+            now,
+            false,
+            true,
+            DESKTOP_ABSENCE_LIMIT
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_waits_for_a_graceful_exit_before_killing() {
+        // Perl installs the ignore handler before it sleeps. A shell `trap`
+        // loses the race: stop's SIGTERM arrives before the trap is parsed.
+        let child = Command::new("perl")
+            .args(["-e", "$SIG{TERM} = 'IGNORE'; sleep 30;"])
+            .kill_on_drop(true)
+            .spawn()
+            .expect("process that ignores SIGTERM");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut managed = ManagedChild {
+            child,
+            generation_id: Uuid::new_v4(),
+            started_at: String::new(),
+        };
+        let started = Instant::now();
+        stop_managed_child(&mut managed)
+            .await
+            .expect("process stopped");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= GRACEFUL_STOP_TIMEOUT,
+            "stop killed the process before the graceful wait: {elapsed:?}"
+        );
+        assert!(
+            elapsed < PROCESS_STOP_TIMEOUT,
+            "stop waited for the force-kill timeout: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn tun_routes_are_removed_without_touching_the_physical_default() {
+        let table = "\
+Routing tables
+
+Internet:
+Destination        Gateway            Flags           Netif Expire
+default            10.0.0.1           UGScg           en0
+1                  198.18.0.1         UGSc            utun9
+128.0/1            198.18.0.1         UGSc            utun9
+198.18.0.1         198.18.0.1         UH              utun9
+default            fe80::1%utun9      UGcIg           utun9        1
+";
+        let routes = owned_routes(table, "utun9");
+        assert_eq!(
+            routes,
+            vec![
+                OwnedRoute {
+                    destination: "1".into(),
+                    gateway: "198.18.0.1".into(),
+                    host_route: false,
+                },
+                OwnedRoute {
+                    destination: "128.0/1".into(),
+                    gateway: "198.18.0.1".into(),
+                    host_route: false,
+                },
+                OwnedRoute {
+                    destination: "198.18.0.1".into(),
+                    gateway: "198.18.0.1".into(),
+                    host_route: true,
+                },
+                OwnedRoute {
+                    destination: "default".into(),
+                    gateway: "fe80::1%utun9".into(),
+                    host_route: false,
+                },
+            ]
+        );
+        assert_eq!(
+            route_delete_args(&routes[0]),
+            vec!["-n", "delete", "-net", "1", "198.18.0.1"]
+        );
+        assert_eq!(
+            route_delete_args(&routes[2]),
+            vec!["-n", "delete", "-host", "198.18.0.1", "198.18.0.1"]
+        );
+        assert_eq!(
+            route_delete_args(&routes[3]),
+            vec!["-n", "delete", "default", "fe80::1%utun9"]
+        );
+        let physical = owned_routes(table, "en0");
+        assert_eq!(physical.len(), 1);
+        assert_eq!(physical[0].destination, "default");
+        assert_eq!(physical[0].gateway, "10.0.0.1");
+    }
 
     #[test]
     fn redaction_removes_common_credentials_and_bounds_output() {

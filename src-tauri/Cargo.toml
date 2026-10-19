@@ -37,7 +37,8 @@ tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2.3.2"
 tauri-plugin-process = "2.3.0"
 tauri-plugin-single-instance = "2.2.0"
-tauri-plugin-updater = "2.7.1"
+# Only verify and download signed bytes; github_update owns package installation.
+tauri-plugin-updater = { version = "2.7.1", default-features = false, features = ["rustls-tls"] }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -58,6 +59,8 @@ iran-split-netstats = { path = "../crates/iran-split-netstats" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 iran-split-platform-macos = { path = "../crates/iran-split-platform-macos" }
+iran-split-taskbar = { path = "../crates/iran-split-taskbar" }
+iran-split-netstats = { path = "../crates/iran-split-netstats" }
 
 [lints]
 workspace = true

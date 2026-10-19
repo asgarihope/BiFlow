@@ -9,6 +9,10 @@ pub use windows::sample;
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::sample;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::sample;
 
 /// One adapter's complete hardware-interface counters. Never sum TUN + NIC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +63,7 @@ impl RateTracker {
     }
 }
 
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 #[derive(Clone, Copy)]
 struct Candidate {
     sample: Sample,
@@ -68,7 +72,7 @@ struct Candidate {
     default_metric: Option<u64>,
 }
 
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 fn select(candidates: &[Candidate]) -> Option<Sample> {
     let eligible: Vec<_> = candidates
         .iter()

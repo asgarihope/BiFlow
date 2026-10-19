@@ -11,6 +11,7 @@ const resources = {
       diagnostics: "Diagnostics",
       taskbarSpeed: "Show network speed on taskbar",
       panelSpeed: "Show network speed in panel",
+      menuBarSpeed: "Show network speed in menu bar",
       speedUnits: {
         label: "Speed unit",
         auto_bits: "Automatic (bits/s)",
@@ -434,6 +435,7 @@ const resources = {
       diagnostics: "عیب‌یابی",
       taskbarSpeed: "نمایش سرعت شبکه در نوار وظیفه",
       panelSpeed: "نمایش سرعت شبکه در پنل",
+      menuBarSpeed: "نمایش سرعت شبکه در نوار منو",
       speedUnits: {
         label: "واحد سرعت",
         auto_bits: "خودکار (بیت بر ثانیه)",

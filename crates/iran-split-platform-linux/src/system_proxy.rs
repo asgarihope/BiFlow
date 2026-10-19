@@ -20,17 +20,19 @@ pub fn points_at_hiddify(snapshot: &Snapshot, host: &str, port: u16) -> bool {
     if matches!(snapshot.mode.as_str(), "none" | "0" | "") {
         return false;
     }
-    let needle = format!("{host}:{port}");
-    for candidate in [
-        format!("{}:{}", snapshot.http_host, snapshot.http_port),
-        format!("{}:{}", snapshot.https_host, snapshot.https_port),
-        format!("{}:{}", snapshot.socks_host, snapshot.socks_port),
-    ] {
-        if candidate == needle {
-            return true;
-        }
-    }
-    false
+    iran_split_core::proxy_endpoint_matches(&snapshot.http_host, &snapshot.http_port, host, port)
+        || iran_split_core::proxy_endpoint_matches(
+            &snapshot.https_host,
+            &snapshot.https_port,
+            host,
+            port,
+        )
+        || iran_split_core::proxy_endpoint_matches(
+            &snapshot.socks_host,
+            &snapshot.socks_port,
+            host,
+            port,
+        )
 }
 
 pub fn snapshot_path(user_data_dir: &Path) -> PathBuf {
@@ -371,6 +373,16 @@ mod tests {
         };
         assert!(points_at_hiddify(&snapshot, "127.0.0.1", 12334));
         assert!(!points_at_hiddify(&snapshot, "10.0.0.1", 8080));
+        let localhost = Snapshot {
+            mode: "manual".into(),
+            http_host: "localhost".into(),
+            http_port: "10808".into(),
+            https_host: String::new(),
+            https_port: "0".into(),
+            socks_host: String::new(),
+            socks_port: "0".into(),
+        };
+        assert!(points_at_hiddify(&localhost, "127.0.0.1", 10808));
     }
 
     #[test]

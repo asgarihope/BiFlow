@@ -1,8 +1,12 @@
 //! Native Windows taskbar boundary. No statistics collection or `WebView`.
 use iran_split_config::SpeedUnit;
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod native;
+#[cfg(target_os = "macos")]
+pub use macos::{apply_menu_bar_label, menu_bar_is_main_thread};
 #[cfg(windows)]
 pub use native::{diagnostic_renderer, diagnostic_status, Display, Status};
 
@@ -88,6 +92,35 @@ pub fn format_rate_in(rate: Option<f64>, unit: SpeedUnit) -> String {
     }
 }
 
+/// Columns for one auto-scaled rate, a space, and the arrow. `99.9 Kbps`
+/// is the longest automatic rate, so normal updates do not resize the item.
+const MENU_BAR_COLUMNS: usize = 11;
+
+/// Upload above download, each line the same width, arrows aligned.
+#[must_use]
+pub fn menu_bar_label(upload: Option<f64>, download: Option<f64>, unit: SpeedUnit) -> String {
+    let upload = format_rate_in(upload, unit);
+    let download = format_rate_in(download, unit);
+    let width = MENU_BAR_COLUMNS
+        .max(aligned_width(&upload))
+        .max(aligned_width(&download));
+    format!(
+        "{}\n{}",
+        align_line('↑', &upload, width),
+        align_line('↓', &download, width)
+    )
+}
+
+fn aligned_width(rate: &str) -> usize {
+    2 + rate.chars().count()
+}
+
+fn align_line(arrow: char, rate: &str, width: usize) -> String {
+    let body = aligned_width(rate);
+    let pad = width.saturating_sub(body);
+    format!("{}{rate} {arrow}", " ".repeat(pad))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +171,27 @@ mod tests {
         for invalid in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
             assert_eq!(format_rate_in(invalid, SpeedUnit::Megabytes), "— MB/s");
         }
+    }
+
+    #[test]
+    fn menu_bar_lines_share_one_width_and_keep_the_arrows_aligned() {
+        let label = menu_bar_label(Some(14_000.0), Some(450_000.0), SpeedUnit::AutoBits);
+        let lines: Vec<_> = label.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].chars().count(), lines[1].chars().count());
+        assert_eq!(lines[0].chars().count(), MENU_BAR_COLUMNS);
+        assert!(lines[0].ends_with("112 Kbps ↑"));
+        assert!(lines[1].ends_with("3.6 Mbps ↓"));
+        let quiet = menu_bar_label(None, Some(0.0), SpeedUnit::AutoBits);
+        let quiet: Vec<_> = quiet.lines().collect();
+        assert_eq!(quiet[0].chars().count(), quiet[1].chars().count());
+        assert_eq!(quiet[0].chars().count(), lines[0].chars().count());
+        assert!(quiet[0].ends_with("— bps ↑"));
+        assert!(quiet[1].ends_with("0 bps ↓"));
+        let wide = menu_bar_label(Some(2_000_000_000.0), Some(1.0), SpeedUnit::Bits);
+        let wide: Vec<_> = wide.lines().collect();
+        assert_eq!(wide[0].chars().count(), wide[1].chars().count());
+        assert!(wide[0].chars().count() > MENU_BAR_COLUMNS);
     }
 
     #[test]

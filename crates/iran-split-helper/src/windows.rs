@@ -65,6 +65,7 @@ pub fn persist_install_error(message: &str) {
 pub async fn run_named_pipe(config_path: &Path) -> Result<(), HelperServiceError> {
     let settings = HelperSettings::load(config_path)?;
     let supervisor = Arc::new(Supervisor::new(settings));
+    super::spawn_absence_watch(Arc::clone(&supervisor));
     let mut server = create_helper_server(PIPE_NAME, true).map_err(HelperServiceError::Io)?;
     info!(
         event = "helper.listening",

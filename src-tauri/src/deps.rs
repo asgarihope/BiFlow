@@ -839,6 +839,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn zip_extraction_keeps_nested_files_inside_destination() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for name in ["nested/mihomo.exe", "../outside.exe"] {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .expect("start ZIP entry");
+            archive.write_all(b"payload").expect("write ZIP entry");
+        }
+        let bytes = archive.finish().expect("finish ZIP").into_inner();
+        let root = tempfile::tempdir().expect("temporary root");
+        let destination = root.path().join("extracted");
+
+        extract_zip(&bytes, &destination).expect("extract ZIP");
+
+        assert_eq!(
+            fs::read(destination.join("nested/mihomo.exe")).expect("nested executable"),
+            b"payload"
+        );
+        assert!(!root.path().join("outside.exe").exists());
+    }
+
+    #[test]
     fn catalogs_only_allow_official_release_hosts() {
         assert!(url_allowed(&hiddify_linux_appimage_url()));
         assert!(url_allowed(&mihomo_linux_url()));

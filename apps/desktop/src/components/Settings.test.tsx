@@ -44,6 +44,9 @@ describe("Settings", () => {
       screen.queryByLabelText("Show network speed in panel"),
     ).not.toBeInTheDocument();
     expect(
+      screen.queryByLabelText("Show network speed in menu bar"),
+    ).not.toBeInTheDocument();
+    expect(
       screen.queryByRole("tab", { name: "Speed display" }),
     ).not.toBeInTheDocument();
     await userEvent.click(screen.getByLabelText("Close window to tray"));
@@ -61,6 +64,7 @@ describe("Settings", () => {
   it.each([
     ["linux", "Show network speed in panel"],
     ["windows", "Show network speed on taskbar"],
+    ["macos", "Show network speed in menu bar"],
   ])(
     "saves %s speed units from a separate tab without changing network settings",
     async (platform, label) => {

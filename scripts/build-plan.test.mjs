@@ -481,7 +481,7 @@ describe("release artifact names", () => {
     assert.match(hook, /run pnpm\.cmd check/);
   });
 
-  it("publishes deb, appimage, portable exe, and nsis from v* tags only", () => {
+  it("publishes deb, appimage, portable exe, nsis, and the macOS disk image", () => {
     const workflow = readFileSync(
       join(root, ".github/workflows/release.yml"),
       "utf8",
@@ -489,7 +489,12 @@ describe("release artifact names", () => {
     const ci = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
 
     assert.match(workflow, /tags:\s*\[["']v\*["']\]/);
-    assert.doesNotMatch(workflow, /branches:\s*\[main\]/);
+    assert.match(workflow, /branches:\s*\[main\]/);
+    assert.match(workflow, /platform: macos-15/);
+    assert.match(workflow, /\.\/build\.sh ci-macos/);
+    assert.match(workflow, /artifacts\/macos\/\*\.dmg/);
+    assert.match(workflow, /-name '\*\.dmg'/);
+    assert.match(workflow, /git push origin "refs\/tags\/\$\{tag\}"/);
     assert.doesNotMatch(workflow, /ref_protected/);
     assert.match(workflow, /--bundles deb,appimage/);
     assert.match(workflow, /--bundles nsis/);

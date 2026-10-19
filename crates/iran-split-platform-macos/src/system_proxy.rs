@@ -46,13 +46,28 @@ pub fn points_at_hiddify(snapshot: &Snapshot, host: &str, port: u16) -> bool {
     if matches!(snapshot.mode.as_str(), "none" | "") {
         return false;
     }
-    let needle = format!("{host}:{port}");
     snapshot.services.iter().any(|service| {
-        service.web_enabled && format!("{}:{}", service.http_host, service.http_port) == needle
-            || service.secure_web_enabled
-                && format!("{}:{}", service.https_host, service.https_port) == needle
-            || service.socks_enabled
-                && format!("{}:{}", service.socks_host, service.socks_port) == needle
+        (service.web_enabled
+            && iran_split_core::proxy_endpoint_matches(
+                &service.http_host,
+                &service.http_port,
+                host,
+                port,
+            ))
+            || (service.secure_web_enabled
+                && iran_split_core::proxy_endpoint_matches(
+                    &service.https_host,
+                    &service.https_port,
+                    host,
+                    port,
+                ))
+            || (service.socks_enabled
+                && iran_split_core::proxy_endpoint_matches(
+                    &service.socks_host,
+                    &service.socks_port,
+                    host,
+                    port,
+                ))
     })
 }
 
@@ -364,6 +379,11 @@ mod tests {
         };
         assert!(points_at_hiddify(&snapshot, "127.0.0.1", 12334));
         assert!(!points_at_hiddify(&snapshot, "10.0.0.1", 8080));
+        let localhost = Snapshot {
+            mode: "manual".into(),
+            services: vec![service("Wi-Fi", "localhost", "10808")],
+        };
+        assert!(points_at_hiddify(&localhost, "127.0.0.1", 10808));
     }
 
     #[test]

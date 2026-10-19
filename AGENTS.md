@@ -71,6 +71,13 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- macOS route parsers used only by native cleanup still compile in Linux and
+  Windows library builds unless gated with `cfg(any(target_os = "macos", test))`.
+  Keep their pure route-deletion tests running on every host. Update vulnerable
+  lockfile dependencies instead of ignoring RustSec advisories. The updater is
+  used only for signed downloads; keep its unused archive installer disabled so
+  it cannot reintroduce a second, vulnerable ZIP dependency (ADR 0124).
+
 - Copy native display preferences out of their mutex before `TrayIcon::set_title`.
   That operation can synchronously wait for the main thread; keeping the settings
   lock in an argument temporary can block a concurrent settings/shutdown action
@@ -555,7 +562,7 @@ If a required command fails or emits a warning from project code, fix it in the 
 - React Fast Refresh warns when a component module also exports a plain helper. Put shared helpers such as country-flag conversion in a separate module so `eslint --max-warnings 0` stays clean.
 - `cargo deny check` uses an explicit license allow list. Add `MPL-2.0` (cssparser via Tauri/wry), `Apache-2.0 WITH LLVM-exception`, `CDLA-Permissive-2.0`, and `BSL-1.0` (`clipboard-win` via `tauri-plugin-clipboard-manager`) when the lockfile needs them; do not blanket-allow. Workspace `path` crates look like `*` wildcards unless `allow-wildcard-paths = true` and those crates are unpublished (`publish = false`); cargo-deny 0.20 does not apply the path exception to public crates. Transitive unmaintained crates (GTK3 via Tauri, unic via urlpattern, proc-macro-error via glib) fail unless `unmaintained = "workspace"`.
 - Windows Clippy `unnecessary_wraps` fires on `#[cfg(not(unix))]` permission stubs that always `Ok(())`. Keep `Result` on the Unix chmod path and a `()` no-op off Unix, with `cfg` at the call site. Helper `main` must `cfg` Unix-only imports such as `tracing_subscriber::EnvFilter`; Windows Clippy treats them as unused.
-- `github.ref_protected` is false for typical `v*` tags, so a release job with that `if` never runs. Trigger `.github/workflows/release.yml` on `push: tags: ["v*"]` only, verify before building, upload workflow artifacts, and publish only after every platform succeeds.
+- `github.ref_protected` is false for typical `v*` tags, so a release job with that `if` never runs. Trigger `.github/workflows/release.yml` on `push: tags: ["v*"]` and on `main` when that version has no finished release. Verify before building, upload workflow artifacts, and publish only after every platform succeeds. A tag created with the workflow token does not start a second workflow, so the publish job must create the missing `v<version>` tag itself and upload the macOS disk image in that same job (ADR 0123).
 - Ubuntu 24.04 renamed AppImage's FUSE 2 runtime package to `libfuse2t64`. Use that exact package in the Ubuntu 24.04 workflow and let `build.sh` select `libfuse2t64` or `libfuse2` from the local apt catalog.
 - A palette-only UI request changes the existing RGB tokens in `apps/desktop/src/index.css`. Do not add a second theme runtime, shared component CSS system, or TSX behavior/layout changes unless the request explicitly includes them.
 - Vitest's jsdom transform can expose a non-`file:` `import.meta.url`. Tests that inspect frontend source files should resolve them from the package test working directory (for example, `path.join(process.cwd(), "src/index.css")`).
@@ -719,3 +726,31 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   traffic. An opaque layered fill also hides Explorer's taskbar tint: retain
   layered composition but color-key only the background, and test composed
   background continuity and rightmost placement (ADR 0117).
+
+- Quit used to leave the helper-owned Mihomo TUN up while the desktop-owned
+  local proxy died with the process, and macOS DNS stayed on `127.0.0.1`.
+  Treat `localhost` / `127.0.0.1` / `::1` as one loopback proxy, clear every
+  configured local-proxy port, and still delete the TUN when that clear
+  fails. Stop Mihomo with `SIGTERM` before `SIGKILL` so it can remove its
+  own routes, flush the OS DNS cache, and release the capture if the desktop
+  has been gone for 90 seconds (ADR 0120). An update exit stays on Pause.
+- A successful macOS DNS restore can still leave every service on
+  `127.0.0.1` when `system-dns.toml` captured the tunnel resolver, or when
+  `networksetup` returns success while `scutil --dns` does not change. Names
+  then fail and a raw IP can still connect. Never store or write loopback as
+  the original DNS. If the live resolver is still loopback, set the private
+  default gateway, and delete `netstat` routes that still name the TUN. Kill
+  a scoped Mihomo orphan on stop when the child handle is already empty
+  (ADR 0121).
+- macOS `NET_RT_IFLIST2` `if_data64.ifi_ibytes` does not match `netstat -ib`
+  on current Darwin. Menu bar speeds must read `IFMIB_IFDATA` /
+  `IFDATA_GENERAL`. Wi-Fi reports `IFT_ETHER`, so classify with
+  `SIOCGIFMEDIA` and require `IFM_ACTIVE`. Exclude `utun`, `awdl`, `bridge`,
+  `anpi`, and the other virtual prefixes even when their flags look up.
+  `TrayIcon::set_title` is one proportional line and `None` does not clear
+  it, so the menu bar item changes width as the digits change. Draw upload
+  above download with the arrow on the right, in an 11-column 9-point
+  monospaced attributed title on the `TaoTrayTarget` status button. Hide the
+  status icon while that title is shown and restore the retained image when
+  it is cleared. Widen both lines together when a fixed unit is longer
+  (ADR 0122).

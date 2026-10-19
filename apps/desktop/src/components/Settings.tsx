@@ -37,6 +37,14 @@ const SPEED_UNITS = [
   "gigabytes",
 ] as const;
 
+function speedToggleKey(
+  platform: string | undefined,
+): "panelSpeed" | "menuBarSpeed" | "taskbarSpeed" {
+  if (platform === "linux") return "panelSpeed";
+  if (platform === "macos") return "menuBarSpeed";
+  return "taskbarSpeed";
+}
+
 const formSchema = z
   .object({
     controllerPort: z.coerce.number().int().min(1).max(65535),
@@ -131,7 +139,9 @@ export function Settings({ settings }: { settings: AppConfig }) {
   const { t } = useTranslation();
   const { saveSettings, actionPending, boot } = useAppStore();
   const speedSupported =
-    boot?.platform === "windows" || boot?.platform === "linux";
+    boot?.platform === "windows" ||
+    boot?.platform === "linux" ||
+    boot?.platform === "macos";
   const [tab, setTab] = usePageTab(
     "settings",
     SETTINGS_TABS.filter((id) => id !== "speed" || speedSupported),
@@ -326,11 +336,7 @@ export function Settings({ settings }: { settings: AppConfig }) {
               >
                 <div className="sm:col-span-2">
                   <Check
-                    label={t(
-                      boot?.platform === "linux"
-                        ? "panelSpeed"
-                        : "taskbarSpeed",
-                    )}
+                    label={t(speedToggleKey(boot?.platform))}
                     registration={register("showTaskbarSpeed")}
                   />
                 </div>
