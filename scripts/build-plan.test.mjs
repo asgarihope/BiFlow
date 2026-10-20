@@ -496,7 +496,10 @@ describe("release artifact names", () => {
     assert.match(workflow, /platform: macos-15/);
     assert.match(workflow, /\.\/build\.sh ci-macos/);
     assert.match(workflow, /artifacts\/macos\/\*\.dmg/);
+    assert.match(workflow, /artifacts\/macos\/\*\.dmg\.sig/);
+    assert.match(workflow, /Sign macOS updater package/);
     assert.match(workflow, /-name '\*\.dmg'/);
+    assert.match(workflow, /-name '\*\.dmg\.sig'/);
     assert.match(workflow, /git push origin "refs\/tags\/\$\{tag\}"/);
     assert.doesNotMatch(workflow, /ref_protected/);
     assert.match(workflow, /--bundles deb,appimage/);

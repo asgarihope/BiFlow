@@ -20,7 +20,8 @@ env:
 # Ubuntu 22.04 and 24.04, Windows MSVC + WebView2 on windows-2025. The 22.04
 # packages are extra release assets (`*_ubuntu2204_*`) because that glibc is
 # too old for a binary built on 24.04. Updater latest.json stays on the 24.04
-# deb and AppImage. Do not cross-compile the Windows installer from Linux here;
+# deb and AppImage, plus the signed Apple Silicon disk image (ADR 0126).
+# Do not cross-compile the Windows installer from Linux here;
 # the Linux Tauri CLI rejects --bundles nsis.
 
 concurrency:
@@ -234,6 +235,18 @@ jobs:
           TAURI_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY}" \
             TAURI_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
             pnpm exec tauri signer sign "${debs[0]}"
+      - name: Sign macOS updater package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(artifacts/macos/*.dmg)
+          (( ${#dmgs[@]} == 1 )) || { echo "Expected one macOS disk image to sign"; exit 1; }
+          TAURI_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY}" \
+            TAURI_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+            pnpm exec tauri signer sign "${dmgs[0]}"
+          [[ -f "${dmgs[0]}.sig" ]] || { echo "macOS updater signature was not written"; exit 1; }
       - name: Stage portable Windows app
         if: runner.os == 'Windows'
         shell: bash
@@ -270,7 +283,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-macos
-          path: artifacts/macos/*.dmg
+          path: |
+            artifacts/macos/*.dmg
+            artifacts/macos/*.dmg.sig
           if-no-files-found: error
           retention-days: 7
 
@@ -321,10 +336,11 @@ jobs:
           mapfile -t installers < <(find release-assets -type f -name '*-setup.exe' -print | sort)
           mapfile -t installer_sigs < <(find release-assets -type f -name '*-setup.exe.sig' -print | sort)
           mapfile -t manifests < <(find release-assets -type f -name 'latest.json' -print | sort)
-          mapfile -t dmgs < <(find release-assets -type f -name '*.dmg' -print | sort)
+          mapfile -t dmgs < <(find release-assets -type f -name '*.dmg' ! -name '*.dmg.sig' -print | sort)
+          mapfile -t dmg_sigs < <(find release-assets -type f -name '*.dmg.sig' -print | sort)
 
-          if (( ${#debs[@]} != 1 || ${#deb_sigs[@]} != 1 || ${#appimages[@]} != 1 || ${#appimage_sigs[@]} != 1 || ${#ubuntu_debs[@]} != 1 || ${#ubuntu_deb_sigs[@]} != 1 || ${#ubuntu_appimages[@]} != 1 || ${#ubuntu_appimage_sigs[@]} != 1 || ${#portable[@]} != 1 || ${#installers[@]} != 1 || ${#installer_sigs[@]} != 1 || ${#manifests[@]} != 1 || ${#dmgs[@]} != 1 )); then
-            echo "Expected Ubuntu 24.04 and Ubuntu 22.04 deb/AppImage pairs with signatures, one portable exe, one NSIS installer and signature, one macOS disk image, and latest.json"
+          if (( ${#debs[@]} != 1 || ${#deb_sigs[@]} != 1 || ${#appimages[@]} != 1 || ${#appimage_sigs[@]} != 1 || ${#ubuntu_debs[@]} != 1 || ${#ubuntu_deb_sigs[@]} != 1 || ${#ubuntu_appimages[@]} != 1 || ${#ubuntu_appimage_sigs[@]} != 1 || ${#portable[@]} != 1 || ${#installers[@]} != 1 || ${#installer_sigs[@]} != 1 || ${#manifests[@]} != 1 || ${#dmgs[@]} != 1 || ${#dmg_sigs[@]} != 1 )); then
+            echo "Expected Ubuntu 24.04 and Ubuntu 22.04 deb/AppImage pairs with signatures, one portable exe, one NSIS installer and signature, one signed macOS disk image, and latest.json"
             find release-assets -type f -print
             exit 1
           fi
@@ -337,7 +353,7 @@ jobs:
             git push origin "refs/tags/${tag}"
           fi
 
-          assets=("${debs[@]}" "${deb_sigs[@]}" "${appimages[@]}" "${appimage_sigs[@]}" "${ubuntu_debs[@]}" "${ubuntu_deb_sigs[@]}" "${ubuntu_appimages[@]}" "${ubuntu_appimage_sigs[@]}" "${portable[@]}" "${installers[@]}" "${installer_sigs[@]}" "${dmgs[@]}" "${manifests[@]}")
+          assets=("${debs[@]}" "${deb_sigs[@]}" "${appimages[@]}" "${appimage_sigs[@]}" "${ubuntu_debs[@]}" "${ubuntu_deb_sigs[@]}" "${ubuntu_appimages[@]}" "${ubuntu_appimage_sigs[@]}" "${portable[@]}" "${installers[@]}" "${installer_sigs[@]}" "${dmgs[@]}" "${dmg_sigs[@]}" "${manifests[@]}")
           if ! gh release view "${tag}" >/dev/null 2>&1; then
             gh release create "${tag}" \
               --draft \

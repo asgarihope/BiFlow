@@ -160,6 +160,12 @@ pub fn pick_asset(release: &Release, kind: InstallKind) -> Result<Asset, String>
         })
 }
 
+/// Platform key that `latest.json` must publish for this install kind.
+///
+/// Apple Silicon requests `macos-aarch64`. The updater fails with that
+/// platform missing from the response `platforms` object when the manifest
+/// lists only Linux and Windows. Keep the string aligned with
+/// `scripts/generate-latest-json.mjs`.
 #[must_use]
 pub const fn signed_target(kind: InstallKind) -> &'static str {
     match kind {
@@ -790,6 +796,12 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn apple_silicon_updater_target_is_macos_aarch64() {
+        assert_eq!(signed_target(InstallKind::Dmg), "macos-aarch64");
     }
 
     #[test]

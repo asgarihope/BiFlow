@@ -3,7 +3,14 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const PLATFORM_KEYS = ["linux-deb-x86_64", "linux-x86_64", "windows-x86_64"];
+const PLATFORM_KEYS = [
+  "linux-deb-x86_64",
+  "linux-x86_64",
+  "windows-x86_64",
+  // Apple Silicon asks the updater for this key. Keep it identical to
+  // `signed_target` in src-tauri/src/github_update.rs.
+  "macos-aarch64",
+];
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
@@ -38,6 +45,7 @@ export function buildLatestJson(repo, releaseTag, artifacts, options = {}) {
     "linux-deb-x86_64": `BiFlow_${version}_amd64.deb`,
     "linux-x86_64": `BiFlow_${version}_amd64.AppImage`,
     "windows-x86_64": `BiFlow_${version}_x64-setup.exe`,
+    "macos-aarch64": `BiFlow_${version}_aarch64.dmg`,
   };
 
   for (const artifact of artifacts) {
@@ -190,6 +198,16 @@ export function discoverSignedArtifacts(directory) {
       bundlePath: nsis,
       fileName: basename(nsis),
       signature: readSignature(`${nsis}.sig`),
+    });
+  }
+
+  const dmg = findUniqueBundle(files, "_aarch64.dmg");
+  if (dmg) {
+    artifacts.push({
+      platform: "macos-aarch64",
+      bundlePath: dmg,
+      fileName: basename(dmg),
+      signature: readSignature(`${dmg}.sig`),
     });
   }
 

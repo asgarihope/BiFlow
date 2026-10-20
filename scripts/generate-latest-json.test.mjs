@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   buildLatestJson,
   discoverSignedArtifacts,
@@ -11,6 +12,7 @@ import {
   validateLatestJson,
 } from "./generate-latest-json.mjs";
 
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FAKE_SIG =
   "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTVGVzdEtleVNpZ25hdHVyZQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzAwMDAwMDAwCWZpbGU6dGVzdC5idW5kbGUKdGVzdA==";
 
@@ -26,7 +28,7 @@ describe("generate-latest-json", () => {
     assert.equal(normalizeVersion("1.2.0"), "1.2.0");
   });
 
-  it("builds a signed manifest for deb, AppImage, and NSIS", () => {
+  it("builds a signed manifest for deb, AppImage, NSIS, and the Apple Silicon disk image", () => {
     const manifest = buildLatestJson(
       "devlifeX/BiFlow",
       "v1.2.0",
@@ -49,6 +51,12 @@ describe("generate-latest-json", () => {
           fileName: "BiFlow_1.2.0_x64-setup.exe",
           signature: FAKE_SIG,
         },
+        {
+          platform: "macos-aarch64",
+          bundlePath: "/tmp/BiFlow_1.2.0_aarch64.dmg",
+          fileName: "BiFlow_1.2.0_aarch64.dmg",
+          signature: FAKE_SIG,
+        },
       ],
       { notes: "Signed updater test", pubDate: "2026-08-13T12:00:00.000Z" },
     );
@@ -64,6 +72,11 @@ describe("generate-latest-json", () => {
       "https://github.com/devlifeX/BiFlow/releases/download/v1.2.0/BiFlow_1.2.0_amd64.AppImage",
     );
     assert.equal(manifest.platforms["windows-x86_64"].signature, FAKE_SIG);
+    assert.equal(
+      manifest.platforms["macos-aarch64"].url,
+      "https://github.com/devlifeX/BiFlow/releases/download/v1.2.0/BiFlow_1.2.0_aarch64.dmg",
+    );
+    assert.equal(manifest.platforms["macos-aarch64"].signature, FAKE_SIG);
     validateLatestJson(manifest);
   });
 
@@ -98,12 +111,14 @@ describe("generate-latest-json", () => {
     writeFakeBundle(directory, "BiFlow_1.2.0_amd64.deb");
     writeFakeBundle(directory, "BiFlow_1.2.0_amd64.AppImage");
     writeFakeBundle(directory, "BiFlow_1.2.0_x64-setup.exe");
+    writeFakeBundle(directory, "BiFlow_1.2.0_aarch64.dmg");
 
     const artifacts = discoverSignedArtifacts(directory);
-    assert.equal(artifacts.length, 3);
+    assert.equal(artifacts.length, 4);
     assert.deepEqual(artifacts.map((artifact) => artifact.platform).sort(), [
       "linux-deb-x86_64",
       "linux-x86_64",
+      "macos-aarch64",
       "windows-x86_64",
     ]);
 
@@ -132,6 +147,7 @@ describe("generate-latest-json", () => {
     );
     writeFileSync(join(directory, "BiFlow.exe"), "portable", "utf8");
     writeFakeBundle(join(directory, "deb"), "BiFlow_1.2.16_amd64.deb");
+    writeFakeBundle(join(directory, "macos"), "BiFlow_1.2.16_aarch64.dmg");
 
     const manifest = generateLatestJsonFromDirectory(
       directory,
@@ -149,6 +165,10 @@ describe("generate-latest-json", () => {
     assert.equal(
       manifest.platforms["windows-x86_64"].url,
       "https://github.com/devlifeX/BiFlow/releases/download/v1.2.16/BiFlow_1.2.16_x64-setup.exe",
+    );
+    assert.equal(
+      manifest.platforms["macos-aarch64"].url,
+      "https://github.com/devlifeX/BiFlow/releases/download/v1.2.16/BiFlow_1.2.16_aarch64.dmg",
     );
     validateLatestJson(manifest);
   });
@@ -169,8 +189,10 @@ describe("generate-latest-json", () => {
       "BiFlow_1.2.16_ubuntu2204_amd64.deb",
     );
     writeFakeBundle(join(directory, "nsis"), "BiFlow_1.2.16_x64-setup.exe");
+    writeFakeBundle(join(directory, "macos"), "BiFlow_1.2.16_aarch64.dmg");
     const artifacts = discoverSignedArtifacts(directory);
     assert.deepEqual(artifacts.map((artifact) => artifact.fileName).sort(), [
+      "BiFlow_1.2.16_aarch64.dmg",
       "BiFlow_1.2.16_amd64.AppImage",
       "BiFlow_1.2.16_amd64.deb",
       "BiFlow_1.2.16_x64-setup.exe",
@@ -207,7 +229,7 @@ describe("generate-latest-json", () => {
     );
   });
 
-  it("requires all three signed updater packages before publishing", () => {
+  it("requires every signed updater package, including the Apple Silicon disk image, before publishing", () => {
     const directory = mkdtempSync(
       join(tmpdir(), "biflow-latest-json-missing-"),
     );
@@ -216,7 +238,7 @@ describe("generate-latest-json", () => {
     assert.throws(
       () =>
         generateLatestJsonFromDirectory(directory, "devlifeX/BiFlow", "v1.2.0"),
-      /expected 3 signed updater artifacts/,
+      /expected 4 signed updater artifacts/,
     );
   });
 
@@ -232,6 +254,29 @@ describe("generate-latest-json", () => {
           },
         ]),
       /unexpected linux-deb-x86_64 asset/,
+    );
+  });
+
+  it("uses the same macos-aarch64 key the Apple Silicon updater requests", () => {
+    const source = readFileSync(
+      join(root, "src-tauri/src/github_update.rs"),
+      "utf8",
+    );
+    assert.match(source, /"macos-aarch64"/);
+    const directory = mkdtempSync(join(tmpdir(), "biflow-latest-json-macos-"));
+    writeFakeBundle(directory, "BiFlow_6.2.75_amd64.deb");
+    writeFakeBundle(directory, "BiFlow_6.2.75_amd64.AppImage");
+    writeFakeBundle(directory, "BiFlow_6.2.75_x64-setup.exe");
+    writeFakeBundle(directory, "BiFlow_6.2.75_aarch64.dmg");
+    const manifest = generateLatestJsonFromDirectory(
+      directory,
+      "devlifeX/BiFlow",
+      "v6.2.75",
+    );
+    assert.ok(manifest.platforms["macos-aarch64"]);
+    assert.equal(
+      manifest.platforms["macos-aarch64"].url,
+      "https://github.com/devlifeX/BiFlow/releases/download/v6.2.75/BiFlow_6.2.75_aarch64.dmg",
     );
   });
 });
