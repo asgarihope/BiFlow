@@ -130,3 +130,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0124](./0124-pr-validation-and-safe-archives.md)              | Cross-platform PR validation and safe archive dependencies          | Accepted   |
 | [0125](./0125-native-release-bootstrap.md)                     | Native release bootstrap on macOS and Windows                       | Accepted   |
 | [0126](./0126-macos-updater-platform.md)                       | Publish the Apple Silicon disk image as an updater platform         | Accepted   |
+| [0127](./0127-macos-update-relaunch.md)                        | Relaunch the replaced macOS app after the old process exits         | Accepted   |

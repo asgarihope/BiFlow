@@ -353,8 +353,8 @@ pub async fn apply_package(
         InstallKind::Dmg => {
             #[cfg(target_os = "macos")]
             {
-                install_dmg(package).await?;
-                Ok(ApplyOutcome::ManualRestart)
+                install_dmg(package, expected_version).await?;
+                Ok(ApplyOutcome::HelperRestart)
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -435,11 +435,14 @@ async fn install_appimage(package: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Installs a downloaded `.dmg` on macOS. Mounts the image, copies the bundled
-/// `.app` into `/Applications` with administrator privileges, then unmounts.
-/// The operator must restart `BiFlow` from `/Applications` afterwards.
+/// Installs a downloaded `.dmg` on macOS.
+///
+/// The bundle is staged with `ditto`. A detached privileged helper then waits
+/// until this process has exited, replaces `/Applications/BiFlow.app`, and
+/// opens that bundle as the desktop user. Closing the window only hides
+/// `BiFlow` in the menu bar, so a manual relaunch keeps the old process.
 #[cfg(target_os = "macos")]
-async fn install_dmg(package: &Path) -> Result<(), String> {
+async fn install_dmg(package: &Path, expected_version: &str) -> Result<(), String> {
     info!(
         event = "update.dmg_install_started",
         section = "updater",
@@ -462,31 +465,10 @@ async fn install_dmg(package: &Path) -> Result<(), String> {
     if !attach.status.success() {
         return Err("could not mount the update image".into());
     }
-    let result = install_mounted_dmg(&mountpoint).await;
-    let detach = tokio::process::Command::new("hdiutil")
-        .args(["detach", "-force"])
-        .arg(&mountpoint)
-        .status()
-        .await;
-    if !detach.is_ok_and(|status| status.success()) {
-        warn!(
-            event = "update.dmg_detach_failed",
-            section = "updater",
-            initiator = "tauri_command",
-            cause = "image_detach_failed",
-            trace_route = "ui->apply_app_update->install_dmg->cleanup",
-            "could not detach the update image"
-        );
-    } else if tokio::fs::remove_dir(&mountpoint).await.is_err() {
-        warn!(
-            event = "update.dmg_mount_cleanup_failed",
-            section = "updater",
-            initiator = "tauri_command",
-            cause = "mount_directory_removal_failed",
-            trace_route = "ui->apply_app_update->install_dmg->cleanup",
-            "could not remove the empty update mount directory"
-        );
-    }
+    let staged = stage_mounted_app(&mountpoint).await;
+    detach_update_image(&mountpoint).await;
+    let staged = staged?;
+    let result = spawn_dmg_relaunch(&staged, expected_version).await;
     info!(
         event = "update.dmg_install_finished",
         section = "updater",
@@ -500,54 +482,215 @@ async fn install_dmg(package: &Path) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-async fn install_mounted_dmg(mountpoint: &Path) -> Result<(), String> {
-    if !mountpoint.join("BiFlow.app").is_dir() {
+async fn detach_update_image(mountpoint: &Path) {
+    let detach = tokio::process::Command::new("hdiutil")
+        .args(["detach", "-force"])
+        .arg(mountpoint)
+        .status()
+        .await;
+    if !detach.is_ok_and(|status| status.success()) {
+        warn!(
+            event = "update.dmg_detach_failed",
+            section = "updater",
+            initiator = "tauri_command",
+            cause = "image_detach_failed",
+            trace_route = "ui->apply_app_update->install_dmg->cleanup",
+            "could not detach the update image"
+        );
+        return;
+    }
+    if tokio::fs::remove_dir(mountpoint).await.is_err() {
+        warn!(
+            event = "update.dmg_mount_cleanup_failed",
+            section = "updater",
+            initiator = "tauri_command",
+            cause = "mount_directory_removal_failed",
+            trace_route = "ui->apply_app_update->install_dmg->cleanup",
+            "could not remove the empty update mount directory"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn stage_mounted_app(mountpoint: &Path) -> Result<PathBuf, String> {
+    let source = mountpoint.join("BiFlow.app");
+    if !source.is_dir() {
         return Err("the update image has no BiFlow.app bundle".into());
     }
-    let script_path = std::env::temp_dir()
+    let staging_root = std::env::temp_dir()
         .join("biflow-update")
-        .join("apply-dmg.sh");
-    tokio::fs::write(&script_path, dmg_install_script(mountpoint))
-        .await
-        .map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = tokio::fs::metadata(&script_path)
-            .await
-            .map_err(|error| error.to_string())?
-            .permissions();
-        permissions.set_mode(0o700);
-        tokio::fs::set_permissions(&script_path, permissions)
+        .join("staged-app");
+    if staging_root.exists() {
+        tokio::fs::remove_dir_all(&staging_root)
             .await
             .map_err(|error| error.to_string())?;
     }
-    let apple_script = crate::helper_install::macos_admin_applescript(&script_path);
-    let install = tokio::process::Command::new("osascript")
+    tokio::fs::create_dir_all(&staging_root)
+        .await
+        .map_err(|error| error.to_string())?;
+    let destination = staging_root.join("BiFlow.app");
+    let status = tokio::process::Command::new("/usr/bin/ditto")
+        .arg(&source)
+        .arg(&destination)
+        .status()
+        .await
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(destination)
+    } else {
+        Err("could not stage the update bundle".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn spawn_dmg_relaunch(staged_app: &Path, expected_version: &str) -> Result<(), String> {
+    let uid = macos_desktop_uid().await?;
+    let script_path = std::env::temp_dir()
+        .join("biflow-update")
+        .join("apply-dmg.sh");
+    if let Some(parent) = script_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    tokio::fs::write(
+        &script_path,
+        dmg_relaunch_script(std::process::id(), uid, staged_app, expected_version),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    set_owner_execute(&script_path).await?;
+    let apple_script = dmg_detached_admin_applescript(&script_path);
+    let install = tokio::process::Command::new("/usr/bin/osascript")
         .args(["-e", &apple_script])
         .output()
         .await
         .map_err(|error| error.to_string())?;
     if install.status.success() {
-        Ok(())
-    } else if install.status.code() == Some(-128) {
+        info!(
+            event = "update.dmg_relaunch_helper_started",
+            section = "updater",
+            initiator = "tauri_command",
+            cause = "verified_package",
+            trace_route = "ui->apply_app_update->install_dmg->relaunch",
+            "macOS update will replace /Applications/BiFlow.app after this process exits"
+        );
+        return Ok(());
+    }
+    if let Some(parent) = staged_app.parent() {
+        if let Err(cause) = tokio::fs::remove_dir_all(parent).await {
+            warn!(
+                event = "update.dmg_stage_cleanup_failed",
+                section = "updater",
+                initiator = "tauri_command",
+                cause = %cause,
+                trace_route = "ui->apply_app_update->install_dmg->cleanup",
+                "staged macOS update could not be removed after the installer was declined"
+            );
+        }
+    }
+    if install.status.code() == Some(-128) {
         Err("package install was cancelled".into())
     } else {
         Err("package install failed".into())
     }
 }
 
+#[cfg(target_os = "macos")]
+async fn macos_desktop_uid() -> Result<u32, String> {
+    let output = tokio::process::Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("could not read the desktop user id".into());
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| "could not read the desktop user id".to_owned())
+}
+
+#[cfg(target_os = "macos")]
+async fn set_owner_execute(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| error.to_string())?
+        .permissions();
+    permissions.set_mode(0o700);
+    tokio::fs::set_permissions(path, permissions)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Shell script that runs as root after `BiFlow` exits.
+///
+/// It must not remove `/Applications/BiFlow.app` until `process_id` is gone,
+/// and it must open the replaced bundle as `uid` rather than as root.
 #[cfg(any(target_os = "macos", test))]
-fn dmg_install_script(mountpoint: &Path) -> String {
+fn dmg_relaunch_script(
+    process_id: u32,
+    uid: u32,
+    staged_app: &Path,
+    expected_version: &str,
+) -> String {
     format!(
-        "set -e\n\
-         staging=$(mktemp -d '/Applications/.biflow-update.XXXXXX')\n\
-         trap 'rm -rf \"$staging\"' EXIT\n\
-         cp -R {source} \"$staging/BiFlow.app\"\n\
-         rm -rf '/Applications/BiFlow.app'\n\
-         mv \"$staging/BiFlow.app\" '/Applications/BiFlow.app'\n",
-        source = sh_single_quote(&mountpoint.join("BiFlow.app").to_string_lossy()),
+        "#!/bin/sh\n\
+         set -e\n\
+         pid={process_id}\n\
+         uid={uid}\n\
+         expected={expected}\n\
+         staged={staged}\n\
+         dest='/Applications/BiFlow.app'\n\
+         staging=''\n\
+         cleanup() {{\n\
+           status=$?\n\
+           if [ ! -d \"$dest\" ] && [ -n \"$staging\" ] && [ -d \"$staging/BiFlow.app\" ]; then\n\
+             mv \"$staging/BiFlow.app\" \"$dest\" || true\n\
+           fi\n\
+           if [ -n \"$staging\" ] && [ -d \"$dest\" ]; then\n\
+             rm -rf \"$staging\"\n\
+           fi\n\
+           if [ \"$status\" -ne 0 ] && [ -d \"$dest\" ]; then\n\
+             /bin/launchctl asuser \"$uid\" /usr/bin/open \"$dest\" || true\n\
+           fi\n\
+           exit \"$status\"\n\
+         }}\n\
+         trap cleanup EXIT\n\
+         while /bin/kill -0 \"$pid\" 2>/dev/null; do\n\
+           /bin/sleep 1\n\
+         done\n\
+         /bin/sleep 1\n\
+         staging=$(/usr/bin/mktemp -d '/Applications/.biflow-update.XXXXXX')\n\
+         /usr/bin/ditto \"$staged\" \"$staging/BiFlow.app\"\n\
+         found=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \"$staging/BiFlow.app/Contents/Info.plist\" | /usr/bin/tr -d '[:space:]')\n\
+         if [ \"$found\" != \"$expected\" ]; then\n\
+           echo 'staged update version does not match the downloaded release' >&2\n\
+           exit 1\n\
+         fi\n\
+         rm -rf \"$dest\"\n\
+         mv \"$staging/BiFlow.app\" \"$dest\"\n\
+         /usr/bin/xattr -dr com.apple.quarantine \"$dest\" || true\n\
+         rm -rf \"$staged\"\n\
+         /bin/launchctl asuser \"$uid\" /usr/bin/open \"$dest\"\n",
+        expected = sh_single_quote(expected_version),
+        staged = sh_single_quote(&staged_app.to_string_lossy()),
     )
+}
+
+/// Starts the relaunch script in its own session so the administrator prompt
+/// returns before `BiFlow` exits. A foreground script that waited on this
+/// process would deadlock.
+#[cfg(any(target_os = "macos", test))]
+fn dmg_detached_admin_applescript(script_path: &Path) -> String {
+    let command = format!(
+        "((/bin/sh {} >/tmp/biflow-dmg-update.log 2>&1 </dev/null &) &)",
+        crate::helper_install::macos_shell_quote(&script_path.to_string_lossy())
+    );
+    let literal = serde_json::to_string(&command).expect("serializing a string cannot fail");
+    format!("do shell script {literal} with administrator privileges")
 }
 
 async fn install_nsis(
@@ -821,23 +964,63 @@ mod tests {
     }
 
     #[test]
-    fn dmg_update_quotes_the_source_and_copies_before_replacing_the_installed_app() {
-        let script = dmg_install_script(Path::new("/tmp/owner's update image"));
-        let source = sh_single_quote(
-            &Path::new("/tmp/owner's update image")
-                .join("BiFlow.app")
-                .to_string_lossy(),
-        );
-        assert!(script.contains(&format!("cp -R {source} \"$staging/BiFlow.app\"")));
-        let copy = script.find("cp -R ").expect("copy");
-        let remove = script
-            .find("rm -rf '/Applications/BiFlow.app'")
-            .expect("replace");
+    fn dmg_update_waits_for_exit_then_relaunches_the_applications_bundle() {
+        let staged = Path::new("/tmp/owner's update image/BiFlow.app");
+        let script = dmg_relaunch_script(42, 501, staged, "6.2.76");
+        let quoted = sh_single_quote(&staged.to_string_lossy());
+        assert!(script.contains(&format!("staged={quoted}")));
+        assert!(script.contains("pid=42"));
+        assert!(script.contains("uid=501"));
+        assert!(script.contains("expected='6.2.76'"));
+        assert!(script.contains("dest='/Applications/BiFlow.app'"));
+        assert!(!script.contains("cp -R "));
+        let wait = script
+            .find("while /bin/kill -0 \"$pid\"")
+            .expect("wait for exit");
+        let copy = script.find("/usr/bin/ditto \"$staged\"").expect("ditto");
+        let version_check = script
+            .find("staged update version does not match")
+            .expect("version");
+        let remove = script.find("rm -rf \"$dest\"").expect("replace");
+        assert!(wait < copy, "the running bundle must be released first");
+        assert!(copy < version_check);
         assert!(
-            copy < remove,
-            "a failed copy must preserve the installed app"
+            version_check < remove,
+            "a mismatched bundle must not replace the installed app"
         );
-        assert!(script.contains("mv \"$staging/BiFlow.app\" '/Applications/BiFlow.app'"));
+        assert!(
+            script[remove..].contains("/bin/launchctl asuser \"$uid\" /usr/bin/open \"$dest\""),
+            "the replaced bundle must be opened after the installed app is swapped"
+        );
+        assert!(script.contains("mv \"$staging/BiFlow.app\" \"$dest\" || true"));
+
+        let applescript =
+            dmg_detached_admin_applescript(Path::new("/tmp/owner's update image/apply-dmg.sh"));
+        assert!(applescript.contains("with administrator privileges"));
+        assert!(
+            applescript.contains("&) &"),
+            "the administrator prompt must return before BiFlow exits"
+        );
+        assert!(applescript.contains("apply-dmg.sh"));
+
+        #[cfg(unix)]
+        {
+            let directory =
+                std::env::temp_dir().join(format!("biflow-dmg-script-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("script dir");
+            let path = directory.join("apply.sh");
+            std::fs::write(&path, &script).expect("script");
+            let status = std::process::Command::new("sh")
+                .arg("-n")
+                .arg(&path)
+                .status()
+                .expect("sh");
+            assert!(
+                status.success(),
+                "generated relaunch script must be valid sh"
+            );
+            std::fs::remove_dir_all(&directory).expect("cleanup");
+        }
     }
 
     #[test]

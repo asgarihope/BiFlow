@@ -772,3 +772,10 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   `BiFlow_*_aarch64.dmg`. Sign that disk image in the release job and publish
   it as the `macos-aarch64` entry. The platform key must stay identical to
   `signed_target` for `InstallKind::Dmg` on `aarch64` (ADR 0126).
+- macOS in-app update used to copy the new app into `/Applications` and then
+  tell the operator to quit and open BiFlow again. Closing the window only
+  hides the process in the menu bar, and a later launch is delivered to that
+  same process, so the version never changes. A running bundle also cannot be
+  replaced reliably. Stage the disk image with `ditto`, wait until this
+  process has exited, swap `/Applications/BiFlow.app`, and `open` that bundle
+  as the desktop user (ADR 0127).
