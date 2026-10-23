@@ -2988,19 +2988,18 @@ async fn fetch_verified_update_bytes(
     }
 }
 
-async fn apply_downloaded_package(
+fn emit_finished_update(
     app: &AppHandle,
     operation_id: Uuid,
-    info: &github_update::UpdateInfo,
-    package: &Path,
-) -> Result<OperationAccepted, String> {
-    let target_version = info.latest_version.clone();
+    version: String,
+    phase: &str,
+) -> OperationAccepted {
     emit_update_progress(
         app,
         UpdateProgress {
-            phase: "installing".into(),
+            phase: phase.into(),
             percent: Some(100),
-            version: Some(target_version.clone()),
+            version: Some(version),
             error: None,
             operation_id: Some(operation_id),
             app_available: None,
@@ -3008,55 +3007,71 @@ async fn apply_downloaded_package(
             thirdparty_available: None,
         },
     );
+    OperationAccepted {
+        operation_id,
+        already_complete: true,
+    }
+}
+
+async fn apply_downloaded_package(
+    app: &AppHandle,
+    operation_id: Uuid,
+    info: &github_update::UpdateInfo,
+    package: &Path,
+) -> Result<OperationAccepted, String> {
+    let target_version = info.latest_version.clone();
+    let kind = github_update::detect_install_kind();
+    if kind != github_update::InstallKind::Dmg {
+        emit_update_progress(
+            app,
+            UpdateProgress {
+                phase: "installing".into(),
+                percent: Some(100),
+                version: Some(target_version.clone()),
+                error: None,
+                operation_id: Some(operation_id),
+                app_available: None,
+                rules_available: None,
+                thirdparty_available: None,
+            },
+        );
+    }
     let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
-    let outcome = match github_update::apply_package(
-        github_update::detect_install_kind(),
-        package,
-        &current_exe,
-        &target_version,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(cause) => {
-            restore_stack_after_failed_install(services(app)?).await;
-            emit_update_progress(
-                app,
-                UpdateProgress {
-                    phase: "failed".into(),
-                    percent: None,
-                    version: Some(target_version),
-                    error: Some(cause.clone()),
-                    operation_id: Some(operation_id),
-                    app_available: None,
-                    rules_available: None,
-                    thirdparty_available: None,
-                },
-            );
-            return Err(cause);
-        }
-    };
+    let outcome =
+        match github_update::apply_package(kind, package, &current_exe, &target_version).await {
+            Ok(outcome) => outcome,
+            Err(cause) => {
+                restore_stack_after_failed_install(services(app)?).await;
+                emit_update_progress(
+                    app,
+                    UpdateProgress {
+                        phase: "failed".into(),
+                        percent: None,
+                        version: Some(target_version),
+                        error: Some(cause.clone()),
+                        operation_id: Some(operation_id),
+                        app_available: None,
+                        rules_available: None,
+                        thirdparty_available: None,
+                    },
+                );
+                return Err(cause);
+            }
+        };
     record_package_apply_outcome(operation_id, &target_version, outcome);
     match outcome {
-        github_update::ApplyOutcome::ManualRestart => {
-            emit_update_progress(
-                app,
-                UpdateProgress {
-                    phase: "installed".into(),
-                    percent: Some(100),
-                    version: Some(target_version),
-                    error: None,
-                    operation_id: Some(operation_id),
-                    app_available: None,
-                    rules_available: None,
-                    thirdparty_available: None,
-                },
-            );
-            Ok(OperationAccepted {
-                operation_id,
-                already_complete: true,
-            })
-        }
+        github_update::ApplyOutcome::ManualRestart => Ok(emit_finished_update(
+            app,
+            operation_id,
+            target_version,
+            "installed",
+        )),
+        github_update::ApplyOutcome::DiskImageOpened => Ok(emit_finished_update(
+            app,
+            operation_id,
+            target_version,
+            "downloaded",
+        )),
         github_update::ApplyOutcome::HelperRestart => {
             emit_update_progress(
                 app,
@@ -3102,6 +3117,16 @@ fn record_package_apply_outcome(
             update_version = %target_version,
             "application update helper was launched; package installation is pending"
         ),
+        github_update::ApplyOutcome::DiskImageOpened => info!(
+            event = "update.dmg_ready",
+            section = "updates",
+            initiator = "install_update",
+            cause = "disk_image_opened",
+            trace_route = "tauri_command->github_update->open_downloaded_dmg",
+            trace_id = %operation_id,
+            update_version = %target_version,
+            "verified disk image is open; the running app was not replaced"
+        ),
     }
 }
 
@@ -3137,8 +3162,12 @@ async fn perform_complete_update_install(
         });
     }
     let package = download_github_package(app, operation_id, &update).await?;
-    record_direct_rules_upgrade_guard(&services(app)?.paths.data)?;
-    pause_stack_for_update(services(app)?).await?;
+    // A disk image is opened for the user to drag. Pausing the tunnel or
+    // writing an upgrade guard would treat a download as an in-place install.
+    if github_update::detect_install_kind() != github_update::InstallKind::Dmg {
+        record_direct_rules_upgrade_guard(&services(app)?.paths.data)?;
+        pause_stack_for_update(services(app)?).await?;
+    }
     apply_downloaded_package(app, operation_id, &update, &package).await
 }
 
@@ -3663,7 +3692,32 @@ fn build_tray_menu<R: Runtime>(
 }
 
 fn apply_tray_menu<R: Runtime>(app: &AppHandle<R>, snapshot: &StackSnapshot) {
-    let Ok(menu) = build_tray_menu(app, snapshot.phase, snapshot.busy) else {
+    let key = tray::menu_key(snapshot.phase, snapshot.busy);
+    if !tray::menu_changed(TRAY_MENU.lock().expect("tray menu").as_ref().copied(), key) {
+        return;
+    }
+    let app = app.clone();
+    if let Err(cause) = app.clone().run_on_main_thread(move || {
+        if !tray::menu_changed(TRAY_MENU.lock().expect("tray menu").as_ref().copied(), key) {
+            return;
+        }
+        if replace_tray_menu(&app, key) {
+            *TRAY_MENU.lock().expect("tray menu") = Some(key);
+        }
+    }) {
+        warn!(
+            event = "tray.menu_update_failed",
+            section = "tray",
+            initiator = "apply_tray_menu",
+            cause = %cause,
+            trace_route = "snapshot_watcher->run_on_main_thread",
+            "tray menu could not be queued on the main thread"
+        );
+    }
+}
+
+fn replace_tray_menu<R: Runtime>(app: &AppHandle<R>, key: tray::TrayMenuKey) -> bool {
+    let Ok(menu) = build_tray_menu(app, key.phase, key.busy) else {
         warn!(
             event = "tray.menu_build_failed",
             section = "tray",
@@ -3672,10 +3726,10 @@ fn apply_tray_menu<R: Runtime>(app: &AppHandle<R>, snapshot: &StackSnapshot) {
             trace_route = "snapshot_watcher->build_tray_menu",
             "tray menu could not be rebuilt"
         );
-        return;
+        return false;
     };
     let Some(icon) = app.tray_by_id("main") else {
-        return;
+        return false;
     };
     if let Err(cause) = icon.set_menu(Some(menu)) {
         warn!(
@@ -3686,8 +3740,12 @@ fn apply_tray_menu<R: Runtime>(app: &AppHandle<R>, snapshot: &StackSnapshot) {
             trace_route = "snapshot_watcher->tray.set_menu",
             "tray menu could not be replaced"
         );
+        return false;
     }
+    true
 }
+
+static TRAY_MENU: std::sync::Mutex<Option<tray::TrayMenuKey>> = std::sync::Mutex::new(None);
 
 fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
     let snapshot = app
@@ -3706,6 +3764,7 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
         .on_tray_icon_event(|tray, event| handle_tray_icon(tray, &event))
         .on_menu_event(|app, event| handle_tray_menu(app, &event))
         .build(app)?;
+    *TRAY_MENU.lock().expect("tray menu") = Some(tray::menu_key(snapshot.phase, snapshot.busy));
     Ok(())
 }
 
@@ -4242,6 +4301,42 @@ mod tests {
     fn quit_releases_the_network_and_an_update_exit_does_not() {
         assert!(exit_releases_owned_network(false));
         assert!(!exit_releases_owned_network(true));
+    }
+
+    #[test]
+    fn macos_disk_image_update_stays_running() {
+        let source = include_str!("lib.rs");
+        let production = source.split("mod tests").next().expect("production half");
+        let start = production
+            .find("async fn perform_complete_update_install")
+            .expect("install");
+        let end = production[start..]
+            .find("async fn install_update")
+            .expect("command");
+        let body = &production[start..start + end];
+        let skip = body
+            .find("!= github_update::InstallKind::Dmg")
+            .expect("dmg skip");
+        let pause = body.find("pause_stack_for_update").expect("pause");
+        assert!(
+            skip < pause,
+            "a disk image download must not pause the tunnel"
+        );
+        let apply = production
+            .find("async fn apply_downloaded_package")
+            .expect("apply");
+        let record = production[apply..]
+            .find("fn record_package_apply_outcome")
+            .expect("record");
+        let apply_body = &production[apply..apply + record];
+        let opened = apply_body.find("DiskImageOpened").expect("opened");
+        let helper = apply_body.find("HelperRestart").expect("helper");
+        assert!(opened < helper);
+        assert!(apply_body.contains("\"downloaded\""));
+        assert!(
+            !apply_body[opened..helper].contains("schedule_update_exit"),
+            "opening a disk image must not quit BiFlow"
+        );
     }
 
     /// Regression (ADR 0115): the application's data roots and the

@@ -836,7 +836,9 @@ test.describe("primary BiFlow flows", () => {
     );
     await page.getByRole("button", { name: "Check for updates" }).click();
     await expect(page.getByText(/Version 9\.9\.9 is available/i)).toBeVisible();
-    await page.getByRole("button", { name: /Install update 9\.9\.9/i }).click();
+    await page
+      .getByRole("button", { name: /(?:Install update|Download) 9\.9\.9/i })
+      .click();
     await expect(page.getByRole("progressbar")).toBeVisible();
     await expect(
       page.getByText("an update is already in progress"),

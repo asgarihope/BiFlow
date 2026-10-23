@@ -1,6 +1,6 @@
 # ADR 0127: Relaunch the replaced macOS app after the old process exits
 
-Status: Accepted (6.2.76)
+Status: Superseded by [ADR 0129](./0129-macos-update-downloads-only.md) (6.2.78)
 
 A finished macOS update told the operator to quit and open BiFlow again. The
 download had completed and `/Applications/BiFlow.app` may already have been
