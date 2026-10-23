@@ -55,6 +55,10 @@ pub enum ApplyOutcome {
     /// A helper script will replace this process after exit.
     HelperRestart,
     /// The signed macOS disk image is open. Nothing was replaced or restarted.
+    ///
+    /// Only macOS constructs this variant. Leaving it in the Linux and Windows
+    /// builds makes Clippy reject it as dead code.
+    #[cfg(target_os = "macos")]
     DiskImageOpened,
 }
 

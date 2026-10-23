@@ -782,6 +782,14 @@ SHA-256")`); launchd `KeepAlive` then restarts it in a crash loop and the
   `BiFlow_*_aarch64.dmg`. Sign that disk image in the release job and publish
   it as the `macos-aarch64` entry. The platform key must stay identical to
   `signed_target` for `InstallKind::Dmg` on `aarch64` (ADR 0126).
+- A macOS-only update outcome must be `#[cfg(target_os = "macos")]` on the
+  enum variant and on every match arm. Linux and Windows Clippy compile
+  that variant as dead code when only the macOS installer constructs it
+  (ADR 0129).
+- `cargo deny check` fails a pull request when `rustls-webpki`, `tokio`,
+  `webpki-roots`, or `webpki-root-certs` fall inside a new RustSec range.
+  Update them with `cargo update -p`. `webpki-roots` has two majors, so
+  name `webpki-roots@1` (RUSTSEC-2026-0381, 0382, 0383, 0386).
 - macOS in-app update must not replace `/Applications/BiFlow.app` or quit.
   Closing the window only hides the menu-bar process, so an automatic swap
   and relaunch was easy to miss and left the operator on the old version

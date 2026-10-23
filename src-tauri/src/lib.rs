@@ -3066,6 +3066,7 @@ async fn apply_downloaded_package(
             target_version,
             "installed",
         )),
+        #[cfg(target_os = "macos")]
         github_update::ApplyOutcome::DiskImageOpened => Ok(emit_finished_update(
             app,
             operation_id,
@@ -3107,16 +3108,7 @@ fn record_package_apply_outcome(
             update_version = %target_version,
             "application package installation completed; restart is required"
         ),
-        github_update::ApplyOutcome::HelperRestart => info!(
-            event = "update.restart_helper_started",
-            section = "updates",
-            initiator = "install_update",
-            cause = "package_install_pending",
-            trace_route = "tauri_command->github_update->apply_helper",
-            trace_id = %operation_id,
-            update_version = %target_version,
-            "application update helper was launched; package installation is pending"
-        ),
+        #[cfg(target_os = "macos")]
         github_update::ApplyOutcome::DiskImageOpened => info!(
             event = "update.dmg_ready",
             section = "updates",
@@ -3126,6 +3118,16 @@ fn record_package_apply_outcome(
             trace_id = %operation_id,
             update_version = %target_version,
             "verified disk image is open; the running app was not replaced"
+        ),
+        github_update::ApplyOutcome::HelperRestart => info!(
+            event = "update.restart_helper_started",
+            section = "updates",
+            initiator = "install_update",
+            cause = "package_install_pending",
+            trace_route = "tauri_command->github_update->apply_helper",
+            trace_id = %operation_id,
+            update_version = %target_version,
+            "application update helper was launched; package installation is pending"
         ),
     }
 }
