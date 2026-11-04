@@ -256,10 +256,16 @@ No. The UI runs as your user. Only the helper performs privileged network
 changes, over a versioned, size-limited, allowlisted local protocol.
 
 **Which platforms are supported?**
-Linux (Debian package and AppImage) and Windows (portable `.exe` and NSIS
-installer). GitHub-hosted native jobs build those artifacts. Pushing a `v*`
-tag publishes them together with signed updater metadata (`latest.json`).
-AppImage and NSIS can self-update; `.deb` remains download/open.
+Linux (Debian package and AppImage), Windows (portable `.exe` and NSIS
+installer), and Apple Silicon macOS (DMG). GitHub-hosted native jobs build
+those artifacts. Pushing a `v*` tag publishes them together with signed
+updater metadata (`latest.json`). AppImage, NSIS, and macOS DMG updates
+reopen the updated app; Debian updates require a manual restart.
+
+Quit disconnects owned networking before the process exits. Closing the window
+keeps BiFlow in the tray and keeps routing active. A connected stack rebuilds
+after sleep, Windows unlock, or persistent local tunnel/DNS failure; a paused
+or disconnected stack stays that way.
 
 **Can I add my own DIRECT sites?**
 Yes. **Direct rules** stores extra domains and IPs. They take precedence over

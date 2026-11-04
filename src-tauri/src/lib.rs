@@ -6,6 +6,7 @@ mod environment;
 mod github_update;
 mod helper_install;
 mod hiddify_reset;
+mod lifecycle;
 mod network;
 mod platform_paths;
 mod profile;
@@ -3593,7 +3594,7 @@ fn handle_tray_menu<R: Runtime>(app: &AppHandle<R>, event: &MenuEvent) {
                 initiator = "tray_menu",
                 cause = "quit_selected",
                 trace_route = "tray_menu->application_exit",
-                "quit requested without disconnect"
+                "quit requested; owned networking will be disconnected"
             );
             app.exit(0);
         }
@@ -3803,8 +3804,12 @@ fn spawn_traffic_loop<R: Runtime>(handle: AppHandle<R>) {
 /// Refreshes health and rejoins late local proxies every 10 seconds.
 fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
     tauri::async_runtime::spawn(async move {
+        let mut recovery = lifecycle::RecoveryMonitor::default();
+        #[cfg(windows)]
+        let mut was_locked = false;
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
+            let tick_time = std::time::SystemTime::now();
             if matches!(
                 health_engine.snapshot().phase,
                 StackPhase::Stopped
@@ -3814,10 +3819,50 @@ fn spawn_health_loop(health_engine: Arc<Engine<NativeBackend>>) {
                     | StackPhase::Error
             ) {
                 health_engine.refresh_health().await;
+                #[cfg(not(windows))]
+                let unlocked = false;
+                #[cfg(windows)]
+                let unlocked = match lifecycle::session_locked().await {
+                    Ok(locked) => {
+                        let changed = was_locked && !locked;
+                        if was_locked != locked {
+                            info!(
+                                event = "session.lock_state_changed",
+                                section = "lifecycle",
+                                initiator = "health_loop",
+                                cause = "session_transition",
+                                locked,
+                                trace_route = "health_loop->session_query->recovery_monitor",
+                                "Windows session lock state changed"
+                            );
+                        }
+                        was_locked = locked;
+                        changed
+                    }
+                    Err(cause) => {
+                        warn!(
+                            event = "session.state_query_failed",
+                            section = "lifecycle",
+                            initiator = "health_loop",
+                            cause,
+                            trace_route = "health_loop->session_query",
+                            "session state unavailable; timer and health recovery remain active"
+                        );
+                        false
+                    }
+                };
+                if recovery.observe(tick_time, &health_engine.snapshot(), unlocked) {
+                    if let Err(cause) = health_engine.recover_network().await {
+                        warn!(event = "network.recovery_request_failed", section = "lifecycle",
+                            initiator = "health_loop", %cause, trace_route = "health_loop->engine",
+                            "automatic network recovery did not complete");
+                    }
+                }
                 // ADR 0076: a local proxy (e.g. Happ) the operator connected
                 // after Connect rejoins live routing without a full reconnect.
                 health_engine.recover_clients().await;
             }
+            recovery.finish_tick(std::time::SystemTime::now());
         }
     });
 }
@@ -4142,11 +4187,8 @@ pub fn run() {
     let app = builder
         .build(tauri::generate_context!())
         .expect("BiFlow failed to build");
-    app.run(|_, event| match event {
-        tauri::RunEvent::ExitRequested { code, .. } => diagnostics::exit_requested(code),
-        tauri::RunEvent::Exit => diagnostics::close_session(),
-        _ => {}
-    });
+    app.manage(lifecycle::ExitState::default());
+    app.run(lifecycle::handle_run_event);
 }
 
 #[cfg(test)]

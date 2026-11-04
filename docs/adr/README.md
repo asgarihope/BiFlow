@@ -120,3 +120,4 @@ Keep this index current. Add a new ADR for each non-obvious change, or update th
 | [0114](./0114-macos-helper-security-and-dns-recovery.md)       | Authorize Unix helper peers and preserve macOS DNS recovery         | Accepted   |
 | [0115](./0115-resolved-runtime-profile.md)                     | One resolved runtime profile owns profile-dependent resources       | Accepted   |
 | [0116](./0116-windows-widgets-board-and-static-tray.md)        | Windows 11 Widgets Board provider, and a static tray logo           | Accepted   |
+| [0117](./0117-network-lifecycle-and-macos-updates.md)          | Restore networking on exit/resume and complete macOS updates        | Accepted   |

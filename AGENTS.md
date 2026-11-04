@@ -71,6 +71,35 @@ If a required command fails or emits a warning from project code, fix it in the 
 
 ## Lessons
 
+- A tray Quit must not just call process exit while the SYSTEM/root helper
+  owns networking. Intercept all exit requests, cancel/drain pending Connect,
+  and await verified cleanup. A proxy-stop failure must not skip route/DNS/TUN
+  cleanup, and an Error phase can still own a running core (ADR 0117).
+- Direct engine recovery calls set an operation ID through the normal start
+  steps. Clear that ID before releasing their lifecycle reservation; the release
+  intentionally refuses to unlock an operation still marked active. Cover the
+  next user Pause after recovery so a successful rebuild cannot strand the lock.
+- Drain client-maintenance work before exit cleanup and reject further recovery
+  after shutdown begins. Otherwise a delayed local-proxy recovery can relaunch
+  a client after the quit path has already detached its network state.
+- A healthy controller can describe a stale tunnel after sleep. Recover after
+  native timer gaps and Windows unlock as well as persistent component failures;
+  preserve Pause/Disconnect intent and serialize recovery with user actions.
+- An updater implementation is incomplete if the release job never publishes
+  its platform's signed package. Require the Apple Silicon DMG in latest.json,
+  verify the staged bundle version, preserve its actual install location, and
+  relaunch only after the old PID exits (ADR 0117). A temporary mount owner must
+  relinquish automatic recursive cleanup when detach fails.
+- An update staging cleanup trap must preserve the previous bundle if rollback
+  cannot rename it back. Otherwise handling the install failure deletes the only
+  recoverable application copy. Delete the backup only after replacement succeeds.
+- When bounding Vitest workers through environment variables, set both minimum
+  and maximum forks/threads. Setting only a low maximum can conflict with its
+  CPU-derived minimum and fail before collecting any tests.
+- Keep the Rust helper-install NSIS contract aligned with the script contract:
+  strip NSIS comments before negative assertions and require COMMONPROGRAMDATA,
+  rather than pinning the retired PROGRAMDATA typo (ADR 0116).
+
 - A WSL target cache on a nearly full Windows system drive can expand the
   distro VHD and, together with WSL swap, exhaust C: during GTK compilation.
   Concurrent Vitest workers then fail allocation and WSL can return I/O errors.

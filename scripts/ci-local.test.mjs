@@ -21,6 +21,20 @@ function jobBlock(workflow, job) {
 }
 
 describe("ci-local", () => {
+  it("uses native Mac verification and reports the other OS gaps", () => {
+    const { steps, gaps } = planSteps("darwin");
+    assert.equal(
+      steps.find((step) => step.id === "clippy-host").runner,
+      "macos-15",
+    );
+    assert.equal(
+      steps.find((step) => step.id === "clippy-windows"),
+      undefined,
+    );
+    assert.match(gaps.join("\n"), /ubuntu-24\.04/);
+    assert.match(gaps.join("\n"), /windows-2025/);
+    assert.match(planSteps("win32").gaps.join("\n"), /macos-15/);
+  });
   it("mirrors every verification command in ci.yml", () => {
     const mirrored = new Set(
       planSteps("linux").steps.map((step) => step.ciCommand),

@@ -43,7 +43,12 @@ export const SETUP_ONLY = [
  * @returns {{ steps: Step[], gaps: string[] }}
  */
 export function planSteps(platform) {
-  const hostRunner = platform === "win32" ? "windows-2025" : "ubuntu-24.04";
+  const hostRunner =
+    platform === "win32"
+      ? "windows-2025"
+      : platform === "darwin"
+        ? "macos-15"
+        : "ubuntu-24.04";
   const clippy = "cargo clippy --workspace --all-targets -- -D warnings";
   /** @type {Step[]} */
   const steps = [
@@ -118,10 +123,20 @@ export function planSteps(platform) {
   ];
   const gaps = [];
 
-  if (platform === "win32") {
+  if (platform !== "darwin") {
+    gaps.push(
+      "rust (macos-15): macOS-only code and installer smoke tests need a native Mac host",
+    );
+  }
+  if (platform === "win32" || platform === "darwin") {
     gaps.push(
       "rust (ubuntu-22.04, ubuntu-24.04): Linux-only modules and `cargo test --workspace` need a Linux host",
     );
+    if (platform === "darwin") {
+      gaps.push(
+        "rust (windows-2025): Windows-only modules and tests need a Windows host",
+      );
+    }
   } else {
     steps.splice(steps.findIndex((step) => step.id === "clippy-host") + 1, 0, {
       id: "clippy-windows",

@@ -347,8 +347,8 @@ pub async fn apply_package(
         InstallKind::Dmg => {
             #[cfg(target_os = "macos")]
             {
-                install_dmg(package).await?;
-                Ok(ApplyOutcome::ManualRestart)
+                install_dmg(package, current_exe, expected_version).await?;
+                Ok(ApplyOutcome::HelperRestart)
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -430,10 +430,14 @@ async fn install_appimage(package: &Path) -> Result<(), String> {
 }
 
 /// Installs a downloaded `.dmg` on macOS. Mounts the image, copies the bundled
-/// `.app` into `/Applications` with administrator privileges, then unmounts.
-/// The operator must restart `BiFlow` from `/Applications` afterwards.
+/// `.app` into its installed location with administrator privileges, then unmounts.
+/// A user-session launcher waits for this process to exit, then opens the new bundle.
 #[cfg(target_os = "macos")]
-async fn install_dmg(package: &Path) -> Result<(), String> {
+async fn install_dmg(
+    package: &Path,
+    current_exe: &Path,
+    expected_version: &str,
+) -> Result<(), String> {
     info!(
         event = "update.dmg_install_started",
         section = "updater",
@@ -442,7 +446,12 @@ async fn install_dmg(package: &Path) -> Result<(), String> {
         trace_route = "ui->apply_app_update->install_dmg",
         "installing the verified macOS update"
     );
-    let mountpoint = std::env::temp_dir().join("biflow-update").join("dmg-mount");
+    let directory = tempfile::Builder::new()
+        .prefix("biflow-dmg-")
+        .tempdir()
+        .map_err(|_| "could not create private update directory")?;
+    let mountpoint = directory.path().join("dmg-mount");
+    let destination = macos_bundle_destination(current_exe)?;
     tokio::fs::create_dir_all(&mountpoint)
         .await
         .map_err(|error| error.to_string())?;
@@ -451,18 +460,22 @@ async fn install_dmg(package: &Path) -> Result<(), String> {
         .arg(&mountpoint)
         .arg(package)
         .output()
-        .await
-        .map_err(|error| error.to_string())?;
-    if !attach.status.success() {
+        .await;
+    if !attach.is_ok_and(|output| output.status.success()) {
+        // A failed attach may have mounted before reporting an error. Keep
+        // this private directory rather than recursively traversing that volume.
+        let _retained_mount = directory.keep();
         return Err("could not mount the update image".into());
     }
-    let result = install_mounted_dmg(&mountpoint).await;
+    let result = install_mounted_dmg(&mountpoint, &destination, expected_version).await;
     let detach = tokio::process::Command::new("hdiutil")
         .args(["detach", "-force"])
         .arg(&mountpoint)
         .status()
         .await;
     if !detach.is_ok_and(|status| status.success()) {
+        // Never let TempDir recursively remove a mount that is still attached.
+        let _retained_mount = directory.keep();
         warn!(
             event = "update.dmg_detach_failed",
             section = "updater",
@@ -490,20 +503,29 @@ async fn install_dmg(package: &Path) -> Result<(), String> {
         trace_route = "ui->apply_app_update->install_dmg",
         "macOS update installer finished"
     );
-    result
+    result?;
+    schedule_macos_relaunch(&destination)
 }
 
 #[cfg(target_os = "macos")]
-async fn install_mounted_dmg(mountpoint: &Path) -> Result<(), String> {
+async fn install_mounted_dmg(
+    mountpoint: &Path,
+    destination: &Path,
+    expected_version: &str,
+) -> Result<(), String> {
     if !mountpoint.join("BiFlow.app").is_dir() {
         return Err("the update image has no BiFlow.app bundle".into());
     }
-    let script_path = std::env::temp_dir()
-        .join("biflow-update")
+    let script_path = mountpoint
+        .parent()
+        .ok_or("invalid mount directory")?
         .join("apply-dmg.sh");
-    tokio::fs::write(&script_path, dmg_install_script(mountpoint))
-        .await
-        .map_err(|error| error.to_string())?;
+    tokio::fs::write(
+        &script_path,
+        dmg_install_script(mountpoint, destination, expected_version),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -532,16 +554,77 @@ async fn install_mounted_dmg(mountpoint: &Path) -> Result<(), String> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn dmg_install_script(mountpoint: &Path) -> String {
+fn dmg_install_script(mountpoint: &Path, destination: &Path, expected_version: &str) -> String {
     format!(
         "set -e\n\
-         staging=$(mktemp -d '/Applications/.biflow-update.XXXXXX')\n\
-         trap 'rm -rf \"$staging\"' EXIT\n\
+         destination={destination}\n\
+         staging=$(mktemp -d {staging})\n\
+         trap 'if [ ! -e \"$staging/previous.app\" ]; then rm -rf \"$staging\"; fi' EXIT\n\
          cp -R {source} \"$staging/BiFlow.app\"\n\
-         rm -rf '/Applications/BiFlow.app'\n\
-         mv \"$staging/BiFlow.app\" '/Applications/BiFlow.app'\n",
+         actual=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \"$staging/BiFlow.app/Contents/Info.plist\")\n\
+         [ \"$actual\" = {version} ] || exit 1\n\
+         test -x \"$staging/BiFlow.app/Contents/MacOS/iran-split-desktop\"\n\
+         if [ -e \"$destination\" ]; then mv \"$destination\" \"$staging/previous.app\"; fi\n\
+         if ! mv \"$staging/BiFlow.app\" \"$destination\"; then\n\
+           if [ -e \"$staging/previous.app\" ]; then mv \"$staging/previous.app\" \"$destination\"; fi\n\
+           exit 1\n\
+         fi\n\
+         rm -rf \"$staging/previous.app\"\n",
         source = sh_single_quote(&mountpoint.join("BiFlow.app").to_string_lossy()),
+        destination = sh_single_quote(&destination.to_string_lossy()),
+        staging = sh_single_quote(&destination.parent().expect("bundle parent").join(".biflow-update.XXXXXX").to_string_lossy()),
+        version = sh_single_quote(expected_version),
     )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_bundle_destination(current_exe: &Path) -> Result<PathBuf, String> {
+    let bundle = current_exe
+        .ancestors()
+        .find(|path| path.file_name() == Some(OsStr::new("BiFlow.app")))
+        .filter(|path| path.is_absolute())
+        .ok_or("BiFlow must run from its app bundle to update")?;
+    if bundle.starts_with("/Volumes")
+        || bundle
+            .components()
+            .any(|component| component.as_os_str() == OsStr::new("AppTranslocation"))
+    {
+        Ok(PathBuf::from("/Applications/BiFlow.app"))
+    } else {
+        Ok(bundle.to_path_buf())
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_relaunch_script(pid: u32, destination: &Path) -> String {
+    format!(
+        "while kill -0 {pid} 2>/dev/null; do sleep 1; done\nexec /usr/bin/open -n {}\n",
+        sh_single_quote(&destination.to_string_lossy())
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_macos_relaunch(destination: &Path) -> Result<(), String> {
+    tokio::process::Command::new("/usr/bin/nohup")
+        .args([
+            "/bin/sh",
+            "-c",
+            &macos_relaunch_script(std::process::id(), destination),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| "could not schedule updated application restart")?;
+    info!(
+        event = "update.macos_relaunch_scheduled",
+        section = "updates",
+        initiator = "github_update",
+        cause = "verified_bundle_installed",
+        trace_route = "updater->exit->open",
+        "updated macOS bundle will reopen after network cleanup and process exit"
+    );
+    Ok(())
 }
 
 async fn install_nsis(
@@ -810,7 +893,11 @@ mod tests {
 
     #[test]
     fn dmg_update_quotes_the_source_and_copies_before_replacing_the_installed_app() {
-        let script = dmg_install_script(Path::new("/tmp/owner's update image"));
+        let script = dmg_install_script(
+            Path::new("/tmp/owner's update image"),
+            Path::new("/Applications/BiFlow.app"),
+            "6.3.1",
+        );
         let source = sh_single_quote(
             &Path::new("/tmp/owner's update image")
                 .join("BiFlow.app")
@@ -819,13 +906,88 @@ mod tests {
         assert!(script.contains(&format!("cp -R {source} \"$staging/BiFlow.app\"")));
         let copy = script.find("cp -R ").expect("copy");
         let remove = script
-            .find("rm -rf '/Applications/BiFlow.app'")
+            .find("mv \"$destination\" \"$staging/previous.app\"")
             .expect("replace");
         assert!(
             copy < remove,
             "a failed copy must preserve the installed app"
         );
-        assert!(script.contains("mv \"$staging/BiFlow.app\" '/Applications/BiFlow.app'"));
+        assert!(script.contains("mv \"$staging/BiFlow.app\" \"$destination\""));
+        let verify = script
+            .find("[ \"$actual\" = '6.3.1' ] || exit 1")
+            .expect("verify version");
+        assert!(copy < verify && verify < remove);
+        assert!(script.contains("mv \"$staging/previous.app\" \"$destination\""));
+        assert!(
+            script.contains("trap 'if [ ! -e \"$staging/previous.app\" ]"),
+            "a failed rollback must retain the only previous bundle"
+        );
+    }
+
+    #[test]
+    fn macos_update_reopens_the_same_bundle_only_after_old_process_exit() {
+        let root = tempfile::tempdir().expect("temp");
+        let destination = root.path().join("owner's apps/BiFlow.app");
+        let current = destination.join("Contents/MacOS/iran-split-desktop");
+        assert_eq!(
+            macos_bundle_destination(&current).expect("bundle"),
+            destination
+        );
+        assert!(macos_bundle_destination(&root.path().join("unbundled")).is_err());
+        let translocated = root
+            .path()
+            .join("AppTranslocation/id/d/BiFlow.app/Contents/MacOS/iran-split-desktop");
+        assert_eq!(
+            macos_bundle_destination(&translocated).expect("translocated bundle"),
+            PathBuf::from("/Applications/BiFlow.app")
+        );
+        let script = macos_relaunch_script(42, &destination);
+        assert!(
+            script.find("kill -0 42").expect("wait")
+                < script.find("/usr/bin/open -n").expect("reopen")
+        );
+        assert!(script.contains(&sh_single_quote(&destination.to_string_lossy())));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn dmg_installer_replaces_real_bundle_and_preserves_it_on_version_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("temp");
+        let mount = root.path().join("owner's mounted image");
+        let source = mount.join("BiFlow.app/Contents");
+        let destination = root.path().join("BiFlow.app");
+        std::fs::create_dir_all(source.join("MacOS")).expect("source");
+        std::fs::create_dir_all(&destination).expect("installed");
+        std::fs::write(destination.join("old"), "previous").expect("old marker");
+        std::fs::write(source.join("Info.plist"),
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleShortVersionString</key><string>6.3.1</string></dict></plist>").expect("plist");
+        let binary = source.join("MacOS/iran-split-desktop");
+        std::fs::write(&binary, "#!/bin/sh\nexit 0\n").expect("binary");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let run = |version| {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.args(["-c", &dmg_install_script(&mount, &destination, version)]);
+            command
+        };
+        assert!(!run("9.9.9")
+            .status()
+            .await
+            .expect("reject version")
+            .success());
+        assert!(destination.join("old").is_file());
+        assert!(run("6.3.1").status().await.expect("install").success());
+        assert!(!destination.join("old").exists());
+        assert!(destination
+            .join("Contents/MacOS/iran-split-desktop")
+            .is_file());
+        assert_eq!(
+            macos_bundle_destination(Path::new(
+                "/Volumes/Disk/BiFlow.app/Contents/MacOS/iran-split-desktop"
+            ))
+            .expect("disk image launch"),
+            PathBuf::from("/Applications/BiFlow.app")
+        );
     }
 
     #[test]

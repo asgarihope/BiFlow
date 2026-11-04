@@ -69,6 +69,30 @@ function requiredPlatformBackendMethods(traitSource) {
 }
 
 describe("Tauri frontend contract", () => {
+  it("tests macOS natively and publishes the signed Mac updater package", () => {
+    const ci = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+    const release = readFileSync(
+      join(root, ".github/workflows/release.yml"),
+      "utf8",
+    );
+    const manifest = readFileSync(
+      join(root, "scripts/generate-latest-json.mjs"),
+      "utf8",
+    );
+    assert.match(ci, /os: \[[^\]]*macos-15/);
+    assert.match(release, /platform: macos-15/);
+    assert.match(
+      release,
+      /--bundles dmg --config src-tauri\/tauri\.macos\.conf\.json/,
+    );
+    assert.match(release, /tauri signer sign "\$\{dmgs\[0\]\}"/);
+    assert.match(
+      release,
+      /assets\+=\("\$\{dmgs\[@\]\}" "\$\{dmg_sigs\[@\]\}"\)/,
+    );
+    assert.match(manifest, /"macos-aarch64"/);
+  });
+
   it("registers every Rust command invoked by the production UI", () => {
     const frontend = readFileSync(
       join(root, "apps/desktop/src/api/desktop.ts"),

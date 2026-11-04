@@ -49,6 +49,12 @@ describe("generate-latest-json", () => {
           fileName: "BiFlow_1.2.0_x64-setup.exe",
           signature: FAKE_SIG,
         },
+        {
+          platform: "macos-aarch64",
+          bundlePath: "/tmp/BiFlow_1.2.0_aarch64.dmg",
+          fileName: "BiFlow_1.2.0_aarch64.dmg",
+          signature: FAKE_SIG,
+        },
       ],
       { notes: "Signed updater test", pubDate: "2026-08-13T12:00:00.000Z" },
     );
@@ -64,6 +70,7 @@ describe("generate-latest-json", () => {
       "https://github.com/devlifeX/BiFlow/releases/download/v1.2.0/BiFlow_1.2.0_amd64.AppImage",
     );
     assert.equal(manifest.platforms["windows-x86_64"].signature, FAKE_SIG);
+    assert.equal(manifest.platforms["macos-aarch64"].signature, FAKE_SIG);
     validateLatestJson(manifest);
   });
 
@@ -98,12 +105,14 @@ describe("generate-latest-json", () => {
     writeFakeBundle(directory, "BiFlow_1.2.0_amd64.deb");
     writeFakeBundle(directory, "BiFlow_1.2.0_amd64.AppImage");
     writeFakeBundle(directory, "BiFlow_1.2.0_x64-setup.exe");
+    writeFakeBundle(directory, "BiFlow_1.2.0_aarch64.dmg");
 
     const artifacts = discoverSignedArtifacts(directory);
-    assert.equal(artifacts.length, 3);
+    assert.equal(artifacts.length, 4);
     assert.deepEqual(artifacts.map((artifact) => artifact.platform).sort(), [
       "linux-deb-x86_64",
       "linux-x86_64",
+      "macos-aarch64",
       "windows-x86_64",
     ]);
 
@@ -132,6 +141,7 @@ describe("generate-latest-json", () => {
     );
     writeFileSync(join(directory, "BiFlow.exe"), "portable", "utf8");
     writeFakeBundle(join(directory, "deb"), "BiFlow_1.2.16_amd64.deb");
+    writeFakeBundle(join(directory, "dmg"), "BiFlow_1.2.16_aarch64.dmg");
 
     const manifest = generateLatestJsonFromDirectory(
       directory,
@@ -207,7 +217,7 @@ describe("generate-latest-json", () => {
     );
   });
 
-  it("requires all three signed updater packages before publishing", () => {
+  it("requires all four signed updater packages before publishing", () => {
     const directory = mkdtempSync(
       join(tmpdir(), "biflow-latest-json-missing-"),
     );
@@ -216,7 +226,7 @@ describe("generate-latest-json", () => {
     assert.throws(
       () =>
         generateLatestJsonFromDirectory(directory, "devlifeX/BiFlow", "v1.2.0"),
-      /expected 3 signed updater artifacts/,
+      /expected 4 signed updater artifacts/,
     );
   });
 
